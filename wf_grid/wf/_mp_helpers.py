@@ -289,4 +289,23 @@ def _run_grid_point_both(grid_point: Any) -> tuple[str, list, list]:
         config=state["config"],
         zigzag_global_stats=state["zigzag_global_stats"],
     )
+    # filter_diagnostics_oos holds ~21 per-bar numpy arrays per step
+    # (~24K bars OOS, ~72K bars train).  The downstream consumer
+    # (collect_oos_steps / collect_train_steps) only reads
+    # filter_diagnostics_summary, which has already been derived at
+    # StepResult construction time.  Keeping the per-bar arrays inflates
+    # the IPC payload to ~100 MB/task and OOMs the queue on large grids.
+    _strip_filter_diagnostics_arrays(oos_results)
+    _strip_filter_diagnostics_arrays(train_results)
     return grid_point.grid_point_id, oos_results, train_results
+
+
+def _strip_filter_diagnostics_arrays(step_results: list) -> None:
+    """Null per-bar filter_diagnostics_oos on each StepResult in-place.
+
+    Safe to call on any iterable of StepResult: filter_diagnostics_summary
+    is preserved (it is the only field consumed by downstream collectors).
+    """
+    for sr in step_results:
+        if getattr(sr, "filter_diagnostics_oos", None) is not None:
+            sr.filter_diagnostics_oos = None

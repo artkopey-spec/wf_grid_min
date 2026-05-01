@@ -654,6 +654,8 @@ def _execute_wf_grid_sequential(
 
     Returns (all_oos_results, all_train_results) dicts keyed by grid_point_id.
     """
+    from wf_grid.wf._mp_helpers import _strip_filter_diagnostics_arrays
+
     all_oos: Dict[str, List[StepResult]] = {}
     for i, gp in enumerate(grid_points):
         if (i + 1) % max(1, len(grid_points) // 10) == 0:
@@ -669,6 +671,9 @@ def _execute_wf_grid_sequential(
             prepend_bars_requested=prepend_bars,
             zigzag_global_stats=zigzag_global_stats,
         )
+        # Drop per-bar filter_diagnostics_oos: only the small derived
+        # filter_diagnostics_summary is consumed downstream (DEBUG-A1813C).
+        _strip_filter_diagnostics_arrays(step_results)
         all_oos[gp.grid_point_id] = step_results
 
     all_train: Dict[str, List[StepResult]] = {}
@@ -680,6 +685,7 @@ def _execute_wf_grid_sequential(
             config=config,
             zigzag_global_stats=zigzag_global_stats,
         )
+        _strip_filter_diagnostics_arrays(train_results)
         all_train[gp.grid_point_id] = train_results
 
     return all_oos, all_train

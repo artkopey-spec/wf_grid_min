@@ -1,0 +1,102 @@
+schema_version: 1                      # Версия схемы конфига; обязательна для strict-validator (Этап 2)
+
+data:                                  # Блок данных и параметров годовой нормализации
+  file_path: "data.csv"                # Путь к CSV; от каталога, из которого запущен run.py
+  periods_per_year: 252                # Сколько баров считать за год для метрик
+  annualization_basis: "trading"       # Использовать торговый календарь, не календарный
+
+optimization:                          # Блок параметров перебора сетки
+  atr_period_range: [20, 40]           # Диапазон ATR period: от 12 до 48 включительно
+  multiplier_range: [1.5, 4.0]         # Диапазон множителя SuperTrend: от 2.0 до 4.0
+  multiplier_step: 0.2                 # Шаг перебора multiplier
+  trade_mode: "revers"                   # Торговать только в long, без short
+  
+backtest:                              # Блок параметров самого бэктеста
+  commission: 0.0003                 # Комиссия на одно действие/операцию
+  min_trades_required: 3               # Минимум сделок для осмысленной оценки шага
+  early_exit_enabled: false            # Досрочную остановку по просадке отключаем
+  early_exit_max_drawdown: 0.50        # Порог early-exit: 50% просадки
+  early_exit_check_bars: 50            # Проверять early-exit только на первых 50 барах
+
+validation:                            # Блок валидации и walk-forward
+  warmup_period: 0                     # Ручной warmup не задаём
+  warmup_period_auto: true             # Warmup считать автоматически от max ATR
+
+  walk_forward:                        # Настройки walk-forward разбиения
+    train_size: "756bars"              # Обучающее окно: 756 баров (~3 года дневки)
+    test_size: "252bars"               # Тестовое OOS-окно: 252 бара (~1 год дневки)
+    step_size: "252bars"               # Сдвиг окна: 252 бара, без перекрытия тестов
+    scheme: "rolling"                  # Скользящее окно: train и test двигаются вместе
+    anchor: "start"                    # Привязка окон: "start" (от начала) или "end" (от конца ряда)
+    min_train_bars: 500                # Минимальное число баров в train-окне (окна меньше отбрасываются)
+    min_test_bars: 100                 # Минимальное число баров в test-окне (окна меньше отбрасываются)
+    
+gates:                                 # Блок фильтров/гейтов
+  step:                                # Фильтры на уровне каждого WF-шага
+    min_trades: null                   # Брать значение из backtest.min_trades_required
+    max_drawdown_threshold: -0.50      # Шаг провален, если просадка хуже -50%
+
+  candidate:                           # Фильтры на уровне всей комбинации параметров
+    positive_median_threshold: 0.0     # Медианный PnL по шагам должен быть > 0
+    min_trades_median: 3.0             # Медиана числа сделок по шагам должна быть >= 3
+    worst_segment_pnl_threshold: null  # Худший сегмент не фильтруем, гейт отключён
+    max_drawdown_threshold: -0.50      # Худшая просадка по сегментам не хуже -50%
+    min_ok_ratio: 0.7                  # Минимум 70% WF-шагов должны быть «ok» (survivorship guard)
+
+ranking:                               # Блок логики ранжирования кандидатов
+  mode: "gates_score"                  # Ранжировать по gate+score логике
+  min_segments_for_ranking: null       # Порог сегментов считать автоматически
+  sort_by: "sum_pnl_pct_Median"        # Основная сортировка: медианный суммарный PnL
+  tiebreaker: "sum_pnl_pct_Min"        # Тайбрейк: худший сегмент по PnL
+
+scoring:                               # Блок весов итогового seed score
+  normalization_mode: "rank"         # "minmax" (legacy) или "rank" (устойчив к выбросам)
+  score_weights:
+    sum_pnl_pct_Median:        0.42  # 45% веса — стабильная медианная доходность
+    profitable_segments_count: 0.34  # 35% веса — число прибыльных сегментов
+    abs_max_drawdown_Median:   0.12  # 10% веса — штраф за типичную (медианную) просадку
+    abs_max_drawdown_Min:      0.12  # 10% веса — штраф за хвостовой риск (худшая просадка)
+
+status:                                # Блок правил присвоения статуса шагу
+  min_meaningful_bars: 30              # Меньше 30 OOS-баров = шаг не считается осмысленным
+
+bucket:                                # Блок параметров бакетизации (BucketMatrix_Median)
+  atr_bucket_step: 2                   # Шаг бакета по ATR period (целое число, > 0)
+  mult_bucket_step: 0.2                # Шаг бакета по multiplier (float, > 0)
+  min_buckets_for_median: 5            # Минимум бакетов с данными на шаге для above-median расчёта
+
+execution:                             # WP-PAR: parallelization controls (plan §1.6)
+  parallel_enabled: true             # YAML default ON; dataclass default is False
+                                     # for direct tests/callers (plan §1.6 asymmetry).
+  max_workers: null                  # null => os.cpu_count(), capped at
+                                     # len(grid_points) and 32.
+  chunksize: null                    # Reserved for future batching; currently ignored.
+  fallback_to_sequential: false      # On infra failure do NOT silently retry seq.
+
+trade_filter:                          # Блок WP2: фильтр сделок ZigZag + SuperTrend (Appendix A v1.1 разд. 11)
+  enabled: true                        # Включён: полный цикл с глобальной статистикой и триггерами A+B
+  type: "zigzag_st_mode"
+
+  zigzag:
+    global_stats_source: "full_dataset"  # в v1 только full_dataset
+    leg_height_mode: "pct"               # доли цены, не 0–100
+    reversal_threshold: 0.005            # 0.5% цены; дробь в (0, 1)
+    candidate_trigger_threshold: auto    # дробь (0–1) или auto
+    candidate_trigger_quantile: 0.80     # при auto обязательно; типично 0.7–0.9
+    global_median: "auto"
+    local_window: 5                      # rolling N для local_median_N
+
+  triggers:
+    candidate_threshold:                 # контур A — ранний candidate-trigger
+      enabled: true
+    confirmed_median:                    # контур B — подтверждённая медиана
+      enabled: true
+
+  lifecycle:
+    freeze_confirmed_legs: 5             # подтверждённых ног после старта lifecycle
+    stop_check: "confirm_bar_only"       # в v1 только этот литерал
+    stopping_exit: "opposite_st_flip"    # в v1 только этот литерал
+
+  diagnostics:
+    export_state_columns: true
+    export_trigger_columns: true

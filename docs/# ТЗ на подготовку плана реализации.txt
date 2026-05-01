@@ -1,0 +1,622 @@
+# ТЗ на подготовку плана реализации WF Grid Search
+
+---
+
+## 1. Цель
+
+Подготовить **план реализации** оптимизатора walk-forward с **полным перебором (grid search)** по заданной сетке гиперпараметров.
+
+Документ должен описывать:
+
+* этапы внедрения;
+* зависимости;
+* архитектуру модулей;
+* артефакты;
+* контракты данных;
+* требования к логированию и диагностике;
+* требования к автоматическим тестам;
+* критерии готовности этапов;
+* сопоставление со существующим кодом;
+* явное разделение:
+
+  * reuse;
+  * wrapper;
+  * adapter;
+  * refactor;
+  * new module.
+
+Документ **не должен содержать реализацию кода**.
+
+---
+
+## 2. Scope
+
+### 2.1. In scope
+
+* Grid search по заданной сетке гиперпараметров WF.
+
+* Walk-forward pipeline.
+
+* Раздельная реализация:
+
+  * **Phase A (обязательная и завершённая)**
+  * **Phase B (расширение поверх Phase A)**
+
+* Формирование:
+
+  * **candidate-level aggregate** (canonical слой);
+  * **step-level / long** (вспомогательный слой).
+
+* OOS gates.
+
+* Canonical ranking.
+
+* Полный XLSX export contract:
+
+  * `WF_Config`
+  * `WF_Gates` (условно)
+  * `WF_01 ... WF_N`
+  * `WF_Trades`
+  * `WF_Train_Trades`
+  * `summary`
+
+* Логирование, диагностика и автоматические тесты.
+
+* Подготовка Phase A под Phase B.
+
+---
+
+### 2.2. Out of scope
+
+* Optuna.
+* Байесовские / adaptive оптимизаторы.
+* Оптимизация внутри одной точки сетки.
+* UI / визуализация.
+* Distributed orchestration (если отдельно не оговорено).
+* Переписывание существующих canonical модулей без необходимости.
+
+---
+
+## 3. Основные ограничения
+
+* Только полный перебор (grid search).
+* Один grid-point = один полный WF.
+* Ranking только по candidate-level aggregate.
+* Step-layer не используется напрямую для ranking.
+* XLSX не является source of truth.
+* Единый execution contract для всех шагов.
+
+---
+
+## 4. Phase A и Phase B (ключевой принцип)
+
+### 4.1. Общий принцип
+
+* Phase A и Phase B реализуются **отдельно**.
+* Phase A должна быть:
+
+  * полностью завершена;
+  * пригодна к использованию;
+  * независима от Phase B.
+* Phase B — **расширение**, а не часть MVP.
+
+---
+
+### 4.2. Требование к Phase A
+
+Phase A должна:
+
+* полностью выполнять WF Grid Search;
+* давать usable ranking;
+* формировать полный экспорт;
+* быть эксплуатационно полезной.
+
+---
+
+### 4.3. Требование к Phase B
+
+Phase B:
+
+* работает поверх Phase A;
+* не ломает её контракты;
+* добавляет enrichment:
+
+  * plateau;
+  * topology;
+  * FIR;
+  * дополнительные каналы.
+
+---
+
+### 4.4. Подготовка Phase A под Phase B
+
+Phase A обязана заранее обеспечить:
+
+* стабильный `grid_point_id`;
+* стабильный candidate aggregate;
+* полный step-layer;
+* machine-readable статусы;
+* достаточные диагностические поля;
+* расширяемость схем.
+
+---
+
+### 4.5. Запрет на архитектурный тупик
+
+Запрещено:
+
+* менять identity grid points;
+* ломать candidate aggregate;
+* пересобирать базовые артефакты для Phase B.
+
+Допустимо:
+
+* добавлять поля;
+* расширять схемы;
+* добавлять каналы.
+
+---
+
+## 5. Канонический слой данных
+
+### 5.1. Candidate-level aggregate (главный слой)
+
+* одна строка = одна точка сетки;
+* используется для:
+
+  * ranking;
+  * selection;
+  * Phase B;
+  * export decision layer.
+
+---
+
+### 5.2. Step-level / long (вспомогательный слой)
+
+Используется для:
+
+* диагностики;
+* explainability;
+* aggregation;
+* построения:
+
+  * `summary`
+  * `WF_*`
+  * trades layers.
+
+---
+
+### 5.3. Приоритет
+
+candidate-level aggregate — authoritative слой.
+
+---
+
+## 6. Reuse policy
+
+### 6.1. Обязательное переиспользование
+
+Нельзя переписывать:
+
+* config loader
+* CSV loader
+* validator
+* backtest executor
+* BacktestResult
+* warmup logic
+* timeframe logic
+* WF slicer
+* trades extraction
+* metrics layer
+* sentinel policy
+
+---
+
+### 6.2. Допустимые формы интеграции
+
+* reuse
+* wrapper
+* adapter
+* refactor (обоснованный)
+* new module
+
+---
+
+### 6.3. Запрет дублирования
+
+Нельзя создавать альтернативные реализации:
+
+* backtest;
+* trades;
+* metrics;
+* slicing;
+* warmup.
+
+---
+
+## 7. XLSX export contract
+
+### 7.1. Полная книга
+
+Обязательные листы:
+
+1. `WF_Config`
+2. `WF_Gates` (если есть)
+3. `WF_01 ... WF_N`
+4. `WF_Trades`
+5. `WF_Train_Trades`
+6. `summary`
+
+---
+
+### 7.2. `summary`
+
+* только OOS;
+* wide формат;
+* одна строка = grid point;
+* содержит:
+
+  * rank;
+  * decision columns;
+  * `S1...SN`;
+  * агрегаты;
+* не удаляет строки.
+
+---
+
+### 7.3. `WF_Config`
+
+* flattened config;
+* deterministic order.
+
+---
+
+### 7.4. `WF_01...WF_N`
+
+* один шаг WF;
+* step-level представление;
+* включает train + OOS.
+
+---
+
+### 7.5. `WF_Trades`
+
+* все OOS trades;
+* содержит идентичность точки и шага.
+
+---
+
+### 7.6. `WF_Train_Trades`
+
+* все train trades.
+
+---
+
+### 7.7. `WF_Gates`
+
+* run-level gates;
+* условный лист.
+
+---
+
+### 7.8. UX
+
+* autofilter;
+* freeze panes;
+* deterministic column order.
+
+---
+
+## 8. Pipeline
+
+### 8.1. Phase A
+
+1. Config load
+2. Data load + validation
+3. Warmup resolution
+4. WF slicing
+5. Grid enumeration
+6. WF execution:
+
+   * train
+   * OOS
+7. Step-layer
+8. Trades layers
+9. Aggregation
+10. Gates
+11. Ranking
+12. Export
+13. Logging + diagnostics
+
+---
+
+### Выход Phase A
+
+* `base_candidate_aggregate`
+* `step_oos_long`
+* `step_train_long`
+* `oos_trades_long`
+* `train_trades_long`
+* `wf_step_tables`
+* `summary_wide`
+* полный XLSX
+
+---
+
+### 8.2. Phase B
+
+* plateau
+* topology
+* FIR
+* enrichment
+* enriched aggregate
+
+---
+
+## 9. Контракт candidate aggregate
+
+Группы полей:
+
+* identity
+* status
+* step counts
+* OOS aggregates
+* gates / ranking
+* channels
+* diagnostics
+
+---
+
+## 10. Контракт step-layer
+
+Одна строка:
+
+* grid_point × wf_step × segment
+
+Поля:
+
+* identity
+* window bounds
+* status
+* warmup
+* metrics
+* flags
+
+---
+
+## 11. Trades contracts
+
+### OOS trades
+
+* одна строка = сделка
+* содержит:
+
+  * grid_point_id
+  * wf_step
+  * trade data
+
+### Train trades
+
+* аналогично
+
+---
+
+## 12. Grid identity
+
+* deterministic
+* reproducible
+* stable
+
+---
+
+## 13. Статусная модель
+
+Step:
+
+* ok
+* skipped
+* invalid
+* gate_failed
+* runtime_error
+
+Candidate:
+
+* ok
+* partial
+* failed
+
+---
+
+## 14. Aggregation policy
+
+Для каждого поля:
+
+* источник
+* маска
+* min steps
+* функция
+* NaN policy
+* sentinel handling
+* usage
+
+---
+
+## 15. OOS gates
+
+* step-level
+* candidate-level
+* reason codes
+* влияние на ranking
+
+---
+
+## 16. Canonical ranking
+
+* только candidate-level
+* deterministic
+* tie-breaking
+* NaN handling
+
+---
+
+## 17. Каналы
+
+Все `ch_*` + обязательный:
+
+### `ch_step_consistency`
+
+* CV-based
+* минимум 3 шага
+* `higher_is_better`
+
+---
+
+## 18. Phase B
+
+* plateau
+* topology
+* FIR
+* enrichment
+
+---
+
+## 19. Логирование
+
+Обязательно:
+
+* ids
+* события
+* ошибки
+* timing
+* aggregation
+* ranking
+* export
+
+Форматы:
+
+* text
+* JSONL
+* artifacts
+
+---
+
+## 20. Тесты
+
+### Unit
+
+* config
+* warmup
+* slicing
+* aggregation
+* ranking
+* export
+
+### Integration
+
+* small dataset
+* mini grid
+
+### Golden
+
+* все листы XLSX
+* schema
+* порядок
+
+### Ranking regression
+
+### Negative
+
+### Reproducibility
+
+---
+
+## 21. Архитектура
+
+Модули:
+
+* config
+* data
+* warmup
+* slicer
+* grid engine
+* WF runner
+* step collector
+* candidate aggregator
+* gates
+* ranking
+* Phase B
+* export
+* logging
+
+---
+
+## 22. Порядок внедрения
+
+### Phase A
+
+1. config
+2. grid
+3. WF runner
+4. step layer
+5. trades
+6. aggregation
+7. gates
+8. ranking
+9. export
+10. стабилизация
+
+### Phase B
+
+1. enrichment
+2. channels
+3. extensions
+
+---
+
+## 23. Definition of Done
+
+### Phase A
+
+* полностью runnable
+* usable
+* экспорт работает
+* ranking корректен
+* тесты есть
+* архитектура готова к Phase B
+
+### Phase B
+
+* не ломает Phase A
+* расширяет
+* покрыта тестами
+
+---
+
+## 24. Риски
+
+* масштаб сетки
+* performance
+* nondeterminism
+* NaN scenarios
+* gate vs invalid
+* расхождение слоёв
+* регрессии ranking
+* рост экспортов
+
+---
+
+## 25. Финальное требование
+
+План реализации должен:
+
+* использовать candidate aggregate как основу;
+* использовать step-layer как вспомогательный слой;
+* переиспользовать существующий код;
+* реализовывать Phase A как законченный продукт;
+* готовить архитектуру под Phase B;
+* поддерживать полный XLSX export contract;
+* быть полностью тестируемым и воспроизводимым.
+
+---
+
+

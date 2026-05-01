@@ -1,0 +1,101 @@
+# =========================
+# SUPER TREND PARAMETERS
+# =========================
+supertrend:
+  atr_period:        18     # длина ATR; больше = плавнее, меньше = чувствительнее
+  multiplier:        1.5    # ширина каналов; меньше = агрессивнее сигналы
+
+
+# =========================
+# TRADING MODE
+# =========================
+trade_mode:          long  #жим: long | short | revers (long+short)
+
+
+# =========================
+# COSTS
+# =========================
+commission:          0.0003    # комиссия за операцию (0.0003 = 0.03%)
+
+
+# =========================
+# WARMUP (INDICATOR STABILIZATION)
+# =========================
+warmup_period:       0         # фиксированный warmup (игнорируется если auto=true)
+warmup_period_auto:  true      # авто: ~10% данных, clamp 100–400, >= atr_period
+
+
+# =========================
+# METRICS SETTINGS
+# =========================
+# auto: periods_per_year считается по индексу CSV (дневной / интрадей).
+# market: stocks → торговый календарь (~252 дня/год); crypto → календарь (~365.25).
+# Для крипты замените на: market: crypto
+# Явное число вместо auto — если нужно зафиксировать нормализацию вручную.
+periods_per_year:    auto
+market:              stocks
+min_trades_required: 5         # минимум сделок для валидных Sharpe/Sortino/CAGR
+
+
+# =========================
+# EARLY EXIT (DISABLED)
+# =========================
+# NB: ключи ниже не читаются SuperTrend Tester CLI / run_batch_tester.py
+# (early exit в тестере всегда выключен в коде движка). Секция для других
+# инструментов / единого шаблона конфига.
+early_exit:
+  enabled:           false     # отключено: полный бэктест без ранней остановки
+  max_drawdown:      0.5       # порог DD для выхода (0.5 = -50%)
+  check_bars:        100       # частота проверки условия выхода
+
+
+# =========================
+# SEGMENTATION MODE
+# =========================
+segmentation:
+  mode:              equal_blocks    # legacy (100/75/50/33/25%) | equal_blocks (равные сегменты)
+  n_parts:           7         # кол-во сегментов для equal_blocks (>= 2)
+
+# Экспорт legacy Excel (лист false start): сделки с bars_held < N; по умолчанию N=4
+# export:
+#   false_start_max_bars: 4
+
+
+# =========================
+# TRADE FILTER (Phase 2, ZigZag SuperTrend mode)
+# =========================
+# Документирует контракт фильтра. Отсутствие блока ИЛИ enabled: false =>
+# baseline-bit-identical поведение (Appendix A v1.1 §11.1). Раскомментируйте и
+# выставьте enabled: true ТОЛЬКО при segmentation.mode: legacy
+# (Phase 2 v0.4 не поддерживает enabled-фильтр в equal_blocks — конфигурация
+# отвергается до backtest, см. Phase 2 plan §5.5).
+#
+# Spec reference: docs/zigzag_st_trade_filter_spec_v1_1.txt §11
+#
+# trade_filter:
+#   enabled: false
+#   type: zigzag_st_mode
+#
+#   zigzag:
+#     global_stats_source: full_dataset      # only full_dataset supported in v1
+#     leg_height_mode: pct                   # fractions of price (NOT 0–100)
+#     reversal_threshold: 0.005              # 0.5% of price; required when enabled
+#     candidate_trigger_threshold: auto      # numeric fraction (e.g. 0.012) | auto
+#     candidate_trigger_quantile: 0.80       # required only when threshold is auto
+#     global_median: auto
+#     local_window: 5                        # rolling N for local_median_N
+#
+#   triggers:
+#     candidate_threshold:
+#       enabled: true                        # contour A — early candidate trigger
+#     confirmed_median:
+#       enabled: true                        # contour B — confirmed median trigger
+#
+#   lifecycle:
+#     freeze_confirmed_legs: 5               # # confirmed legs after lifecycle start
+#     stop_check: confirm_bar_only           # only literal supported in v1
+#     stopping_exit: opposite_st_flip        # only literal supported in v1
+#
+#   diagnostics:
+#     export_state_columns: true
+#     export_trigger_columns: true

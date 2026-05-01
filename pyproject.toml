@@ -1,0 +1,16 @@
+[tool.pytest.ini_options]
+# WP-T8: donor TESTER/tests added to default discovery.
+# TOML string arrays handle paths with spaces correctly (unlike pytest.ini).
+# pytest.ini still holds wf_grid/tests + pythonpath; this file EXTENDS testpaths.
+testpaths = [
+    "wf_grid/tests",
+    "donor TESTER/tests",
+]
+pythonpath = [".", "donor"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+markers = [
+    "slow: marks tests as slow (deselect with '-m not slow')",
+]

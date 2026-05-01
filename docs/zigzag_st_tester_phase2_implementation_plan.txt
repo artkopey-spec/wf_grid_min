@@ -1,0 +1,1516 @@
+# Phase 2 Implementation Plan — trade_filter.type: zigzag_st_mode in SuperTrend Tester
+
+Project: SuperTrend Tester (donor TESTER/)
+Plan version: v0.5.2 (draft, legacy-only scope, post pre-implementation audit fixes + owner decisions + internal consistency pass)
+Source of truth: docs/zigzag_st_trade_filter_spec_v1_1.txt — Appendix A v1.1
+Authoritative bar-level diagnostics keyset: spec v1.1 §13 (см. §3.3.1 этого плана).
+Phase 1 plan (контекст): docs/zigzag_st_implementation_plan_hybrid_v2_final.txt v2.1.1
+Phase 2 TZ: docs/tz_phase2_tester_zigzag_filter_plan.txt
+Reference architecture (only design patterns, not semantics, not keyset): C:\2.0 — TESTER\ — донорская реализация ZigZag-фильтра v2.0/RFC v3.1. Используется для архитектурных шаблонов (oos_boundary, prepend_warning pattern, Excel layout, two-step trade-trigger linker, CLI calibrator, user-facing doc). Продуктовая семантика фильтра, состояния FSM, имена и dtype диагностических ключей у нас СВОИ (Appendix A v1.1 §13 + zigzag_st_filter.py:1479..1500); НИЧЕГО из 2.0-TESTER keyset (mode / thresholds / counters / allow_entry / filtered_reason / zz_st_*) в наш `BacktestResult.filter_diagnostics` НЕ попадает.
+Status: ready for WP-T0 start — все active questions §15 (#1-#4, #7-#9) закрыты owner sign-off (см. блок "Owner decisions" ниже).
+Implementation status (2026-04-28): WP-T0..WP-T9 are implemented and gated in
+the current workspace. Production/root rollout is covered by the root
+run_batch_tester.py wrapper, root config_tester.yaml disabled template,
+docs/zigzag_st_filter.md, and donor TESTER/tests/test_phase2_wp_t9_root_rollout.py.
+
+Owner decisions on active questions §15 (v0.5.1):
+
+| #  | Вопрос | Chosen variant | Влияние на план |
+|----|--------|----------------|-----------------|
+| #1 | `TradeFilter*` + `_validate_trade_filter` location | **(a) shared module в active `donor/supertrend_optimizer`**; `wf_grid.config` потом импортирует / реэкспортит dataclass'ы оттуда. Тестер импортирует напрямую из active donor namespace. Без дубликата в `donor TESTER/`, без импорта из `wf_grid` | §5.1 фиксирует variant (a); §15 #1 -> закрыт |
+| #2 | Signals sheet при enabled=true | **same sheet `Signals`, NO meta-row, filter columns only**. Изменение default'а v0.5: meta-row отозван (ломает обычный `pd.read_excel(header=0)`); rename отозван. Filtered run отличается ТОЛЬКО наличием четырёх filter-колонок | §8.3 переписан; §15 #2 -> закрыт |
+| #3 | `FilterDiagnostics_*` granularity | **только `FilterDiagnostics_100`** (100% slice). Остальные periods — future extension, отдельного config-флага в Phase 2 НЕ вводим | §9.2 без изменений (default уже соответствует); §15 #3 -> закрыт |
+| #4 | Ratio metrics при 0 trades после фильтра | **принять текущее поведение `INVALID_METRIC_VALUE`**. Фильтр не вводит "смягчённую" политику метрик. Owner-affirmed: enabled run может сократить trades до нуля -> ratio metrics станут INVALID — это not bug | §15 #4 -> закрыт; §11 / §15 #4 пометить affirmed |
+| #7 | `candidate_trigger_source` в summary | **YES, обязательное поле** в `filter_diagnostics_summary["thresholds"]` И в `filters_summary` sheet. Echo "explicit" / "quantile" из `ZigZagGlobalStats` | §3.3.2 -> required (не Optional); §9.2 filters_summary -> явный column; §15 #7 -> закрыт |
+| #8 | Filter columns position в Signals | **после `Is Reversal`, до `Exec Price`** (как single source of truth §9.5) | §9.5 без изменений; §15 #8 -> закрыт |
+| #9 | Mode C namespace strategy | **(b)+(c) — hard-delete/quarantine stale duplicates + runtime import-origin assert**. Rename НЕ выбран (слишком большой scope для Phase 2). PYTHONPATH-only НЕ выбран (защищает только от CI/dev environment)  | §15 #9 -> закрыт; WP-T3 фиксирует hard-delete как mandatory; §17 DoD соответственно |
+
+Все семь решений owner-approved и зафиксированы как final до старта WP-T0. План больше не содержит open active questions; все §15 #1-#9 переведены в "Закрытые вопросы". Любое будущее отклонение от этих решений требует отдельного re-approval cycle.
+
+Changelog v0.5.1 -> v0.5.2 (internal consistency pass — findings from owner pre-start review):
+- **BLOCKER B-1 (§13)**: убрано противоречие «Phase 2 НЕ модифицирует ни одного файла под `donor/supertrend_optimizer/`» vs WP-T2 prep. §13 теперь содержит явный carve-out: prep-refactor (создание `core/trade_filter_config.py` + wf_grid re-export shims) — единственное разрешённое изменение active donor; все прочие файлы LOCKED. File impact table пополнена строками donor/trade_filter_config.py, wf_grid/config/schema.py (shim), wf_grid/config/loader.py (shim).
+- **BLOCKER B-2 (WP-T3 packaging)**: зафиксирована `__init__.py` асимметрия: `donor TESTER/supertrend_optimizer/__init__.py` EXISTS (regular package), `donor/supertrend_optimizer/__init__.py` ABSENT (namespace package). Hard-delete без fix этой асимметрии не гарантирует fallback в `donor/`. WP-T3 steps перенумерованы: добавлен step 0 (0a-0e) — packaging fix + sys.path order verification + smoke + enhanced assert ПЕРЕД hard-delete. Runtime assert (step 5) расширен: теперь проверяет ОБА — `supertrend_optimizer.__file__` (top-level) И `engine.run.__file__`.
+- **HIGH H-3 (dataclass names)**: везде заменены фиктивные `ZigZagSubConfig`, `TriggersSubConfig`, `LifecycleSubConfig`, `DiagnosticsSubConfig` на реальные имена из schema.py: `TradeFilterZigZagConfig`, `TradeFilterTriggersConfig`, `TradeFilterLifecycleConfig`, `TradeFilterDiagnosticsConfig`, `TradeFilterTriggerToggleConfig`. WP-T2 step 0a уточнён: имена при переносе не меняются.
+- **HIGH H-4 (validator signature)**: план больше не использует фиктивный `validate_trade_filter(parsed_dict, raw_presence_set, caller_pipeline="tester")`. §5.1 теперь содержит реальную сигнатуру, соответствующую `_validate_trade_filter` в loader.py:559 (`tf: TradeFilterConfig, errors: list[str], raw_user_keys: frozenset[tuple[str, ...]]`) плюс shared-адаптацию с добавлением `caller_pipeline: str = "wf_grid"`. wf_grid shim pattern задокументирован.
+- **MEDIUM M-5 (stale residual risk #4)**: убрано «Owner-affirmation требуется» из §15 residual risks по вопросу #4; заменено на «ЗАКРЫТ v0.5.1, принять текущее поведение».
+
+Changelog v0.5 -> v0.5.1 (owner decisions on active questions):
+- §15 #1-#4, #7-#9 переведены в "Закрытые вопросы" с явным указанием chosen variant.
+- §5.1 фиксирует variant (a): shared module в active donor; вариант (b) и (c) отозваны.
+- §8.3 default по Signals sheet renaming изменён: «same sheet, no meta-row, filter columns only» — meta-row отозван (ломает `read_excel(header=0)`).
+- §3.3.2: `candidate_trigger_source` повышен с Optional до required field в `filter_diagnostics_summary["thresholds"]`.
+- §9.2 filters_summary sheet: `candidate_trigger_source` теперь mandatory column (echo "explicit" / "quantile").
+- WP-T3 / §17 DoD: hard-delete + runtime import-origin assert зафиксированы как mandatory; rename и PYTHONPATH-only варианты отозваны.
+
+Changelog v0.4 -> v0.5 (pre-implementation audit fixes; план перед стартом WP-T0):
+КОНТРАКТНЫЕ УТОЧНЕНИЯ (audit-fix v0.5):
+- §3.3.2 расширен: (a) `summary["thresholds"]` дополнено `candidate_trigger_source: str ("explicit" | "quantile")` (echo из `ZigZagGlobalStats`, Phase 1 plan §3.2); (b) sanity-инварианты теперь покрывают не только `blocked_*`, но и `lifecycle_starts`, `median_stop_triggered`, `exits_opposite_flip` (cross-source check со `state_arr` / bar-level dict / trade rows); (c) `bars_in_state.sum` инвариант переписан с `== n_period` на `== len(positions) == len(filter_diagnostics["trade_filter_state"])` — это устойчиво к будущему изменению early-exit defaults.
+- §3.3.1 / §3.3.4 явно помечают `freeze_confirmed_legs` как broadcast config-scalar (constant per run), а `confirmed_legs_since_start` — как dynamic FSM counter. Это устраняет путаницу: оба ключа имеют похожие имена, но разную природу.
+- §4.4 фиксирует `pending_open_trade_at_end` rule по реальной реализации active donor (`zigzag_st_filter.py:1597`): `if exit_index >= len(positions) - 1: skip exit_signal lookup, set exit_reason = "pending_open_trade_at_end"`. Используется defensive `>=` (не `==`), потому что это уже контракт active donor; docstring `==` остаётся spec'овской нормой, `>=` — out-of-range guard.
+- §5.5 mode-rejection gate явно помечен как **plan extension (not in Appendix A v1.1)**: spec нигде не запрещает фильтр в "не своём" CLI, это product-level fail-closed gate, owner-approved (TZ §5.5). Spec ref оставлен только на §11.x для dataclass-validation rules внутри gate, не для самого whitelist.
+- §8.3 / §9.5 — устранено внутреннее противоречие по позиции filter columns в Signals sheet. Single-source-of-truth: §9.5 (Excel layer) — «после Is Reversal, до Exec Price». §8.3 переписан как pointer на §9.5.
+- §9.2.1 — формула reconstruction `ZigZag_Trigger_Events` переписана под РЕАЛЬНЫЙ active donor contract: `trade_filter_trigger_source[t]` устанавливается ровно когда `state_at_bar_start == OFF` (zigzag_st_filter.py:1301), и repeated triggers в WAIT/FREEZE/MONITORING/STOPPING подавлены (spec §15.3). Поэтому `trigger_source[t] != "none"` САМ ПО СЕБЕ является exact trigger-event marker; никакая heuristic через `confirmed_legs_since_start` delta не нужна. v0.4 черновая формула отозвана.
+TEST MATRIX (v0.5):
+- §10 #25 переписан: `set(filter_diagnostics.keys()) == EXPECTED_KEYSET` (равенство), не subset; запретительный список 2.0-TESTER ключей сохраняется как regression-gate.
+- §10 #11 расширен: cross-source инварианты `lifecycle_starts` / `median_stop_triggered` / `exits_opposite_flip`.
+- §10 #13 расширен: явный edge-case `pending_open_trade_at_end` (`exit_index >= len(positions)-1`).
+- Добавлены тесты #26 (warmup × filter parametric, FSM начинается с bar 0), #27 (Mode-C namespace resolution gate: import resolves to `donor/`, не `donor TESTER/`), #28 (deterministic XLSX через нормализованное сравнение sheet content / cell values / column orders / styles — НЕ byte-identical across OS), #29 (static grep gate на 2.0-TESTER literal'ы и stale `compute_zigzag_global_stats`), #30 (ZigZag_Trigger_Events reconstruction = ровно те bars, где `trigger_source != "none"`).
+WORK PACKAGES (v0.5):
+- WP-T3 расширен: (a) deliverable `docs/wp_t3_tester_dedup_log.md` — file-by-file diff log (delete vs shim vs unchanged) для `donor TESTER/supertrend_optimizer/{engine,core}/...`; (b) grep-gate на 2.0-TESTER литералы (`'allow_entry'`, `'filtered_reason'`, `'zz_st_*'`, `'thresholds'`) в writer-paths `BacktestResult.filter_diagnostics` / `PeriodResult.filter_diagnostics`; (c) namespace resolution test (#27).
+- WP-T8 расширен: precondition (WP-T1 baseline captured + dataset hash в `donor TESTER/tests/baselines/README.md`); gate (golden snapshots committed, не silent-regenerate); forbidden (`--update-golden` без owner sign-off).
+OPEN QUESTIONS / RISKS (v0.5):
+- §15 #6 (np.quantile method "linear", numpy version pinning) перенесён в "Закрытые вопросы": pinned spec §12.1 + active donor zigzag_st_filter.py:611. Numpy version — verify в CI, не owner approval.
+- Добавлен active question §15 #7: `candidate_trigger_source` в `summary["thresholds"]` (audit H-3 → Medium/owner approval, не High).
+- Добавлен active question §15 #8: финальная позиция filter columns в Signals sheet (после Is Reversal, до Exec Price — выбор фиксируется этим планом, owner-confirm).
+- Добавлен active question §15 #9: namespace strategy для Mode C — (a) rename `donor TESTER/supertrend_optimizer` в `donor TESTER/supertrend_optimizer_tester` с переписыванием imports, (b) hard-delete дубликатов, (c) PYTHONPATH-only с runtime assert (#27). Default — (b)+(c). Required approval до WP-T3.
+- Residual risk: namespace collision между `donor/` и `donor TESTER/` — оба объявляют top-level пакет `supertrend_optimizer`. Без жёсткого WP-T3 gate stale engine может всплыть от порядка sys.path. Mitigation — runtime assert (#27) в conftest + grep-gate.
+
+Changelog v0.3 -> v0.4 (scope reduction after owner direction):
+- Phase 2 теперь протягивает `trade_filter.type: zigzag_st_mode` только в legacy tester mode (`segmentation.mode: legacy`, периоды 100/75/50/33/25%).
+- `segmentation.mode: equal_blocks` остаётся существующим режимом тестера, но filter-enabled path для него out of scope. Конфигурация `trade_filter.enabled=true` + `segmentation.mode=equal_blocks` должна завершаться явной ConfigError до backtest.
+- Удалены work-package и acceptance gates, которые требовали `run_equal_blocks` integration, `SegmentResult.filter_diagnostics`, `[oos_boundary:]` trim, prepend warning, rebase edge `exit_index >= n_bars_segment`, `FilterDiagnostics_S1` и enabled equal_blocks golden tests.
+- Disabled-path baseline для equal_blocks сохраняется как regression guard: отсутствие блока `trade_filter` или `enabled=false` не меняет текущий equal_blocks workbook.
+
+Changelog v0.2 -> v0.3 (after static audit against spec v1.1 + active donor/):
+БЛОКЕРЫ (исправлены):
+- §3.3 переписан полностью. Bar-level keyset = строго spec v1.1 §13 (17 ключей) + служебные `trade_filter_state_code` (int64) и `st_flip_dir` (int8) уже реализованные в active donor (zigzag_st_filter.py:1479–1500). Никаких 2.0-TESTER ключей (`mode`, `thresholds`, `counters`, `allow_entry`, `filtered_reason`, `zz_st_*`) в `BacktestResult.filter_diagnostics` нет — они нарушили бы `BacktestResult.__post_init__` length-инвариант (result.py:189–197).
+- §3.3 / §6.3 / §9: все агрегатные поля (mode echo, thresholds echo, counters, global_offset metadata) живут в `PeriodResult.filter_diagnostics_summary`, не в bar-level dict. Это поле в плане уже было — теперь оно становится единственным каналом для агрегатов.
+- §3.3.3: disabled-path = `filter_diagnostics is None` СТРОГО. Никаких `{"mode": "none", ...}` альтернатив (это сломает существующие test_wp9_diagnostics_export.py:317–336 / 338–...).
+- §3.3.4 dtype-контракт переписан под реальные dtypes Phase 1: `trade_filter_state` — string (np.object_), `trade_filter_state_code` — int64; `st_flip_dir` — int8; bool-маски (`filter_allowed_entry`, `trade_filter_enabled`, `local_median_available`, `global_stats_available`, `median_stop_triggered`) — int8 (НЕ np.bool_, как в zigzag_st_filter.py:1487–1499).
+- §6.3 / §7 / §13 / §17: имя функции — `build_zigzag_global_stats` (zigzag_st_filter.py:611), не `compute_*`. Replace_all.
+- §4.6 prepend warning переписан в v0.3, но в v0.4 полностью выведен из Phase 2 scope вместе с enabled equal_blocks integration.
+- §8.2: `filter_decision = raw_initialization` для 0 -> ±1 удалён. Текущий signal_events.py:112 пропускает `prev == 0` — добавление таких строк сломает disabled-baseline-bit-identity. 0 -> ±1 покрывается отдельным FSM unit test (см. §10 #15), не Signals-листом.
+- §15 #2 (CLOSE_TO_CLOSE): закрыт как «не сохраняем». Active donor backtest.py:95–100 / cli/tester.py отвергают всё кроме OPEN_TO_OPEN. Mode A с возвратом CLOSE_TO_CLOSE отозван.
+- §3.1 / §13 / §14 WP-T3: Mode A («copy engine to donor TESTER/») фактически исключён, потому что engine integration уже есть в active donor (run.py:40–65, backtest.py:300–400, result.py:53–197, zigzag_st_filter.py:611, 1479–1500). WP-T3 переформулирован как «verify/reuse existing donor engine + grep-gate».
+- §5.1: импорт из `wf_grid.config.*` ограничен только `TradeFilter*` dataclass'ами и `_validate_trade_filter`. `load_grid_config` НЕ импортируется тестером (root schema другой: `supertrend`, `segmentation`, `export`, см. cli/tester.py:213–237).
+СЕРЬЁЗНЫЕ РИСКИ (зафиксированы):
+- §2.3 / §2.4: таблица diff обновлена — Phase 1 surface (RawBacktestArtifacts, run_single_backtest signature, BacktestResult.filter_diagnostics, attach_trade_filter_diagnostics, build_zigzag_global_stats) уже в active donor. Phase 2 = wiring tester (runner / CLI / config / signal_events / excel_tester) + verification, не engine migration.
+МЕЛКИЕ:
+- §16: «full test matrix (24 tests)» -> «(27 tests)» в v0.3; v0.4 сокращает matrix до legacy-only набора.
+- §10 #26 переписан под реальный keyset spec §13 (без `allow_entry` / `counters` / `zz_st_*`); в v0.4 после сокращения matrix этот dtype gate стал тестом #25.
+- §3.3.5 уточнён: regenerated `positions_raw` живёт ТОЛЬКО в tester-side export-helper при формировании `filter_diagnostics_summary["counters"]`, не в `BacktestResult.filter_diagnostics`, не в `RawBacktestArtifacts`.
+
+Sticky changelog от v0.1 -> v0.2 (контекст, не отменяется):
+- §2.5 (new): фиксация шаблонов из C:\2.0 — TESTER, которые включаются в план (architecture only).
+- §4.6 (new): zz_st_prepend_warning для S>=2 в equal_blocks. В v0.4 перенесено out of scope.
+- §5.3 усилен: строгая schema-валидация; явный reject unknown keys.
+- §5.5 (new): mode-rejection gates.
+- §9.1.1 (new): _NA sentinel для close-rows.
+- §10: добавлены тесты #25, #26, #27 (#26 переработан в v0.3). В v0.4 equal_blocks-specific тесты удалены из Phase 2 gates.
+- §15: добавлены backlog-пункты zigzag_st_calibrator CLI и zigzag_st_and_volume combo-mode.
+- §18: добавлен deliverable docs/zigzag_st_filter.md.
+
+---
+
+## 0. Governance / anti-drift lock
+
+1. Appendix A v1.1 — единственный источник истины для lifecycle, состояний, thresholds, формулы ZigZag, единиц измерения, config contract, diagnostics keyset, runtime fail-policy, calibration и acceptance criteria. Этот план ничего из этого не переопределяет.
+2. План Phase 2 не изменяет Appendix A v1.1 и не меняет уже принятые решения Phase 1 plan v2.1.1; при конфликте побеждает Appendix A v1.1.
+3. Каждый work-package и каждое design-решение этого плана содержит строку "Spec reference: Appendix A v1.1 §...". Пункт без spec reference не попадает в реализацию.
+4. Lifecycle enum literals — строго lifecycle.stop_check: confirm_bar_only и lifecycle.stopping_exit: opposite_st_flip.
+5. Все ZigZag thresholds и height metrics в тестере — numeric fractions of price; никаких percent strings и значений 0–100. Это касается reversal_threshold, candidate_trigger_threshold, candidate_height_pct, confirmed-leg heights, global_median, local_median_N.
+6. Если в процессе обнаружится конфликт между текущим поведением donor TESTER/ и Appendix A v1.1, он останавливает реализацию и фиксируется в §15 как owner approval point. Тестер не имеет права «по-своему» интерпретировать спеку (например, считать global_median per-period, post-фильтровать trades_df, использовать high/low в pivot).
+
+Spec reference: Appendix A v1.1 §0, §3.2, §3.3, §3.4, §10, §11, §16, §17, §18
+
+---
+
+## 1. Цель плана
+
+Развернуть placeholder WP12 из Phase 1 plan в полный набор work-packages, реализующий trade_filter.type: zigzag_st_mode в SuperTrend Tester (donor TESTER/), сохраняя:
+
+- baseline-совместимость disabled-path (отсутствие блока trade_filter или enabled: false);
+- интеграцию фильтра внутри backtest execution path до returns/equity/trades/metrics, без post-фильтрации trades_df;
+- единое поведение FSM zigzag_st_mode между WF Grid (Phase 1) и Tester (Phase 2);
+- legacy-only scope для тестера: фильтр включается только при `segmentation.mode: legacy` (100/75/50/33/25%). Для `equal_blocks` enabled-фильтр явно отвергается до backtest; disabled equal_blocks остаётся bit-identical baseline.
+
+Spec reference: Appendix A v1.1 §10, §11, §12, §13, §17
+
+---
+
+## 2. Runtime audit тестера (current call graph)
+
+### 2.1 Entry points
+
+    run_batch_tester.py
+      ├─ load_tester_config(args.config)            # cli/tester.py:load_tester_config
+      ├─ load_ohlc_csv + validate_ohlc_data         # data/loader.py + data/validator.py
+      ├─ merge_cli_and_config                       # cli/tester.py
+      ├─ resolve_periods_per_year_from_config       # data/timeframe.py
+      ├─ calculate_warmup_tester                    # utils/warmup.py
+      └─ select segmentation.mode:
+            if equal_blocks:
+                run_equal_blocks(df, n_parts, ...)            # testing/runner.py
+                export_equal_blocks_results(segments, out)    # io/excel_tester.py
+                # v0.4: trade_filter.enabled=true rejected before this branch
+            else:
+                run_all_periods(df, ...)                      # testing/runner.py
+                build_signal_events(df, trend, ...)           # testing/signal_events.py
+                export_tester_results(results, out, signals_df, false_start_max_bars)
+
+CLI single-run (cli/tester.py:run_backtest) делает то же по single segmentation mode.
+
+### 2.2 Backtest path внутри тестера
+
+    run_period(df, ...)                       # testing/runner.py
+      └─ run_single_backtest(open, high, low, close, index, ...)   # engine/run.py
+            └─ run_backtest_fast(open, high, low, close, ...)      # core/backtest.py
+                  -> 7-tuple: (returns, equity_curve, trend, positions,
+                               early_exit, exit_bar, exit_drawdown)
+
+    run_equal_blocks(df, n_parts, ...)        # testing/runner.py
+      for segment in build_equal_block_slices(...):
+        ext_arrays = full[ext_start:seg_end]
+        ext_result = run_single_backtest(ext_arrays, warmup_period=engine_warmup, ...)
+        oos_boundary = prepend
+        oos_returns / oos_equity / oos_positions = ext_result.* [oos_boundary:]
+        segment_metrics = calculate_all_metrics(oos_*, warmup_period=0, ...)
+        segment_trades  = filter_trades_to_segment(ext_result.trades_df, oos_boundary)
+                          then rebase entry_index/exit_index by -oos_boundary
+        recalc_trade_metrics(segment_metrics, segment_trades, min_trades_required)
+
+### 2.3 Состояние Phase 1 surface в active donor (не нужно реализовывать заново)
+
+ВАЖНО (audit-fix v0.3): Phase 1 engine integration уже полностью реализована в active donor (donor/supertrend_optimizer/...), и тестер (donor TESTER/) на тот же runtime не переключён. Поэтому Phase 2 не делает engine migration — она делает tester wiring + verify/reuse.
+
+| Аспект | donor/ (active, Phase 1 готов) | donor TESTER/ (текущее) |
+|---|---|---|
+| run_backtest_fast return | RawBacktestArtifacts dataclass + filter_diagnostics (backtest.py:300–400) | legacy 7-tuple, без diagnostics |
+| BacktestResult | filter_diagnostics: Optional[Dict[str, np.ndarray]] + __post_init__ length-invariant (result.py:189–197) | без поля diagnostics |
+| run_single_backtest | принимает trade_filter_config, zigzag_global_stats, global_offset (run.py:40–65); вызывает attach_trade_filter_diagnostics после extract_trades | без этих параметров |
+| core/zigzag_st_filter.py | модуль реализован: FSM, build_zigzag_global_stats (line 611), apply (line ~1100), attach_trade_filter_diagnostics (line 1514); §13 keyset уже эмитится (line 1479–1500) | отсутствует |
+| generate_positions enabled-path | НЕ вызывается (filter_result.positions — единственный источник; backtest.py:397–415) | всегда вызывается |
+| OHLC contract | OPEN_TO_OPEN only; CLOSE_TO_CLOSE отвергается на уровне generate_positions (backtest.py:95–100) | поддерживает OPEN_TO_OPEN и CLOSE_TO_CLOSE |
+| Early-exit truncation diagnostics | синхронно усекает filter_diagnostics (Phase 1 plan §8.2 rule 7) | n/a (early_exit_enabled=False hardcoded в тестере) |
+
+### 2.4 Что делает Phase 2 (не повторно реализует engine)
+
+Phase 2:
+
+1. Переключает тестер на active donor engine — `engine/run.py:run_single_backtest`, `core/backtest.py:run_backtest_fast`, `core/zigzag_st_filter.py`, `engine/result.py:BacktestResult` (см. §3.1 Mode C, единственный жизнеспособный).
+2. Wiring config: load_tester_config валидирует `trade_filter` (через shared TradeFilter* dataclass + `_validate_trade_filter`, §5.1), пробрасывает через merge_cli_and_config.
+3. Wiring stats: `build_zigzag_global_stats(close, trade_filter_config)` — один раз на full dataset перед legacy run. При `segmentation.mode=equal_blocks` и `trade_filter.enabled=true` stats не строятся: конфигурация отвергается до backtest.
+4. Wiring runner: `run_period`, `run_all_periods` принимают `trade_filter_config`, `zigzag_global_stats`, `global_offset` и пробрасывают в `run_single_backtest`. `PeriodResult` получает `filter_diagnostics` (bar-level, length-invariant) + `filter_diagnostics_summary` (per-period агрегаты). `run_equal_blocks` не получает enabled filter wiring в Phase 2 v0.4.
+5. Wiring signals: `build_signal_events` принимает optional `filter_diagnostics`, добавляет 4 колонки только при enabled (см. §8.2; raw ST flips остаются как сейчас, 0->±1 НЕ инжектируется).
+6. Wiring excel_tester: conditional inclusion трейд-колонок, optional листов `FilterDiagnostics_100`, `ZigZag_Trigger_Events`, `filters_summary` только в legacy workbook; строгий column order; deterministic golden snapshots.
+
+Spec reference: Appendix A v1.1 §10, §12, §13, §17
+
+### 2.5 Reference architecture (C:\2.0 — TESTER) — что и зачем переиспользуем
+
+Каталог C:\2.0 — TESTER содержит донорскую реализацию ZigZag-фильтра v2.0 / RFC v3.1 (другая семантика — readiness contours A/B и confirmed-pivot armament FSM). Семантику этого фильтра, имена и dtype диагностических ключей МЫ НЕ копируем (наш контракт — Appendix A v1.1 §13 + active donor zigzag_st_filter.py). Однако там отработан ряд интеграционных паттернов, которые применимы к Phase 2:
+
+| Шаблон | Эталон-источник | Куда применяется в плане | Уровень переноса |
+|---|---|---|---|
+| oos_boundary как параметр run_single_backtest + per-bar attribution только при decision_bar >= oos_boundary | engine/run.py:_compute_filter_diagnostics, runner.py:run_equal_blocks | out of scope v0.4 | не переносится в legacy-only Phase 2 |
+| Регенерация positions_raw из trend через generate_positions(...) для счётчиков raw vs passed | engine/run.py: generate_positions(trend, trade_mode, execution_model) после run_backtest_fast | §6.3 | архитектура; positions_raw — tester-side helper, не в BacktestResult |
+| Подход «filter_diagnostics на BacktestResult» концептуально | engine/result.py:BacktestResult docstring | §3.3 | INSPIRATIONAL ONLY — наш keyset фиксирует spec v1.1 §13, не 2.0-TESTER |
+| _default_filters_cfg() / _default_trade_filter_cfg() — нормализатор | engine/run.py:_default_filters_cfg | §5.4 | архитектура (адаптируется) |
+| amp_prepend_warning -> zz_st_prepend_warning для S>=2 при недостаточном prepend | runner.py:run_equal_blocks | out of scope v0.4 | не переносится в legacy-only Phase 2 |
+| Strict schema reject unknown keys в подблоках фильтра | tests/cli/test_zz_filters_config.py | §5.3 | архитектура |
+| Mode-rejection gate — фильтр отвергается «не своим» CLI | tests/optimization/test_optimizer_rejects_zigzag.py | §5.5 | архитектура |
+| Excel: отдельный лист для событий ZigZag (Legs / ZigZag Trigger Events) | io/excel_tester.py:_write_legs_sheet | §9.2 | архитектура (адаптируется под наши столбцы) |
+| Excel: filters_summary с параметрами + counters | io/excel_tester.py:_write_filters_summary_sheet | §9.2 | архитектура; источник данных у нас — `filter_diagnostics_summary`, не bar-level dict |
+| Excel: enrichment Trades-листа триггер-колонками + двухступенчатый линкер trade -> trigger | io/excel_tester.py:_link_trades_to_legs, _enrich_trades_with_leg_columns | §9.5 | архитектура |
+| _NA sentinel для close-rows | io/excel_tester.py:_NA = "N/A" | §9.5 | архитектура |
+| CLI-калибратор как отдельный tool | tools/zigzag_calibrator.py | §15 (backlog) | архитектура (future work) |
+| User-facing summary doc отдельно от spec | docs/zigzag_filter.md | §18 (deliverable) | архитектура |
+
+Что НЕ берём из C:\2.0 — TESTER (несовместимо с Appendix A v1.1 / active donor):
+- ядро core/zigzag_filter.py (другая FSM: ARM_SRC_A/B/BOTH, FIRED_*, contours readiness);
+- 2.0-TESTER bar-level keyset: `mode`, `thresholds`, `counters`, `allow_entry`, `filtered_reason`, `zz_st_*` — В НАШЕМ `BacktestResult.filter_diagnostics` ИХ НЕТ (нарушит `result.py:189–197` length-invariant; для агрегатов используется `filter_diagnostics_summary`);
+- 2.0-TESTER state codes (FSM int8 enum) — у нас `trade_filter_state` уже string, `trade_filter_state_code` уже int64, оба emit'ятся active donor'ом (zigzag_st_filter.py:1481–1482);
+- whitelist причин блокировки (zz_armed_waiting, zz_locked_same_leg, zz_expired_*, zz_regime_off) — наш whitelist в spec §13: `none / filter_off / waiting_for_allowed_st_flip / trade_mode_disallowed_flip / local_median_unavailable / invalid_stats / stopping_mode_no_new_entries / insufficient_global_stats`;
+- LegRecord и per-leg структуры (у нас триггер-события другой природы);
+- two-step armament + pre-confirm sessions.
+
+Spec reference: Appendix A v1.1 §0, §10, §13, §16, §17, §18
+
+---
+
+## 3. Target architecture
+
+### 3.1 Code reuse / synchronization model — Mode C is the only viable path
+
+ТЗ §5.1 формально оставлял выбор между тремя режимами. Audit-fix v0.3 фиксирует, что Mode A и Mode B фактически отозваны, потому что Phase 1 engine integration уже целиком в active donor (donor/supertrend_optimizer/...) и активно тестируется (wf_grid/tests/test_wp*_zigzag*.py). Копировать тот же engine во вторую ветку (Mode A) или переносить его в третий subtree (Mode B) — это пытаться повторно реализовать уже работающий код и расходиться с ним.
+
+Mode C — sync to active donor (единственный жизнеспособный):
+
+- Активным runtime тестера становится `donor/supertrend_optimizer/...` (тот же subtree, что использует WF Grid Phase 1). `donor TESTER/` либо переписывается в тонкий wrapper над `donor/`, либо удаляется.
+- Tester-only артефакты (`testing/runner.py`, `testing/signal_events.py`, `io/excel_tester.py`, `cli/tester.py`, `run_batch_tester.py`, `config_tester.yaml`) остаются и расширяются, но импортируют `engine/run.py`, `core/backtest.py`, `core/zigzag_st_filter.py`, `engine/result.py` из `donor/`.
+- Преимущество: один `zigzag_st_filter.py`, один `RawBacktestArtifacts`, один `BacktestResult.filter_diagnostics` invariant; исключает drift между WF Grid и Tester.
+
+Отозванные альтернативы (audit-fix v0.3):
+
+- Mode A — sync copy donor/supertrend_optimizer/core/zigzag_st_filter.py и связанных файлов в donor TESTER/. ОТОЗВАН: дублирование уже-реализованного, постоянный риск drift, и dead-code в `donor TESTER/.../engine/run.py`. Если в `donor TESTER/` уже есть стейл-копии этих файлов, они УДАЛЯЮТСЯ или превращаются в `from supertrend_optimizer.engine.run import run_single_backtest` shim'ы.
+- Mode B — shared module в новом subtree (shared/supertrend_filter/). ОТОЗВАН: большой rewrite imports в обеих ветках; не оправдан, когда Mode C уже даёт single source.
+
+~~Open question: где живёт shared `TradeFilter*` dataclass + `_validate_trade_filter`?~~ — закрыто owner decision v0.5.1 §15 #1: variant (a) shared module под `donor/supertrend_optimizer/core/trade_filter_config.py`. См. §5.1 / WP-T2 step 0a-0d (pre-requisite refactor).
+
+Spec reference: Appendix A v1.1 §16, §18
+
+### 3.2 Где живёт FSM в тестере
+
+| Tester mode | FSM slice | global_offset |
+|---|---|---|
+| legacy run_period (доля от tail of df) | сама переданная DataFrame slice (last n_period bars) | n_total - n_period (см. §4.3) |
+| legacy run_all_periods (over 100/75/50/33/25%) | то же, на каждом из 5 slice'ов | per-period n_total - n_period |
+
+`segmentation.mode=equal_blocks` не имеет FSM slice в Phase 2 v0.4: при `trade_filter.enabled=true` этот режим отвергается до backtest. При disabled-path он продолжает работать как сейчас, без `filter_diagnostics`.
+
+global_median, candidate_trigger_threshold (если auto) и confirmed_heights_pct рассчитываются один раз на полном валидированном df перед legacy run и переиспользуются всеми legacy slice'ами.
+
+FSM на post-trim segment-only не реализуется в Phase 2 v0.4; это будущая работа, если owner отдельно вернёт enabled equal_blocks scope.
+
+Spec reference: Appendix A v1.1 §10, §12
+
+### 3.3 Transport contracts
+
+ВНИМАНИЕ (audit-fix v0.3): bar-level keyset = строго spec v1.1 §13. Никаких 2.0-TESTER ключей (`mode`/`thresholds`/`counters`/`allow_entry`/`filtered_reason`/`zz_st_*`) в `BacktestResult.filter_diagnostics` нет — `BacktestResult.__post_init__` (result.py:189–197) требует `len(arr) == len(positions)` для КАЖДОГО значения; scalar / dict / string такие проверки не пройдут. Все агрегаты живут в отдельном `filter_diagnostics_summary` (per-period), не в bar-level dict.
+
+Все базовые contract'ы наследуются из Phase 1 (active donor, изменений НЕ требуется):
+
+- `RawBacktestArtifacts(returns, equity_curve, trend, positions, early_exit, exit_bar, exit_drawdown, filter_diagnostics)` — return type `run_backtest_fast` (backtest.py:300);
+- `BacktestResult.filter_diagnostics: Optional[Dict[str, np.ndarray]]` с `__post_init__` length-инвариантом (result.py:53, 189–197);
+- `ZigZagGlobalStats` — output `build_zigzag_global_stats(close, trade_filter_config)` (zigzag_st_filter.py:611);
+- `apply(close, trend, trade_mode, trade_filter_config, zigzag_global_stats, open_prices, global_offset, execution_model)` — единственный источник `filtered_positions` в enabled-пути (backtest.py:399–415);
+- `attach_trade_filter_diagnostics(trades_df, filter_diagnostics)` — post-`extract_trades` (zigzag_st_filter.py:1514);
+- `extract_trades` сигнатура не меняется.
+
+В Phase 2 добавляется только tester-specific transport:
+
+    TesterFilterContext(
+        trade_filter_config: Optional[TradeFilterConfig],
+        zigzag_global_stats: Optional[ZigZagGlobalStats],
+    )
+
+— один объект, который `run_period` / `run_all_periods` передают в `run_single_backtest`. Disabled-path: оба поля None.
+
+PeriodResult расширяется ДВУМЯ опциональными полями:
+
+    PeriodResult.filter_diagnostics:          Optional[Dict[str, np.ndarray]] = None  # bar-level, spec §13
+    PeriodResult.filter_diagnostics_summary:  Optional[Dict[str, Any]]        = None  # aggregates (см. §3.3.2)
+
+Disabled-path: оба поля = None (никаких placeholder dicts).
+
+#### 3.3.1 Bar-level keyset (spec v1.1 §13, normative)
+
+Источник истины — Appendix A v1.1 §13 (см. spec lines 510–528). Active donor уже эмитит этот keyset (zigzag_st_filter.py:1479–1500). Phase 2 НЕ ВВОДИТ новых ключей в bar-level dict.
+
+Spec §13 минимальный bar-level keyset (присутствуют когда `trade_filter.enabled=true`):
+
+    "trade_filter_enabled"          : np.ndarray[int8],   shape (n_bars,)
+    "trade_filter_state"            : np.ndarray[object], shape (n_bars,)  # str
+    "trade_filter_trigger_source"   : np.ndarray[object], shape (n_bars,)  # str
+    "zigzag_reversal_threshold"     : np.ndarray[float64], shape (n_bars,)
+    "candidate_height_pct"          : np.ndarray[float64], shape (n_bars,)
+    "candidate_trigger_threshold"   : np.ndarray[float64], shape (n_bars,)
+    "local_median_N"                : np.ndarray[float64], shape (n_bars,)
+    "local_median_available"        : np.ndarray[int8],    shape (n_bars,)
+    "local_window"                  : np.ndarray[int64],   shape (n_bars,)
+    "global_median"                 : np.ndarray[float64], shape (n_bars,)
+    "global_stats_available"        : np.ndarray[int8],    shape (n_bars,)
+    "confirmed_legs_since_start"    : np.ndarray[int64],   shape (n_bars,)
+        # DYNAMIC FSM counter; reset to -1 outside active states; +1 on confirm-bar
+        # while in ST_ACTIVE_FREEZE / ST_ACTIVE_MONITORING (zigzag_st_filter.py:1467,
+        # 1328). Не путать с `freeze_confirmed_legs` ниже.
+    "freeze_confirmed_legs"         : np.ndarray[int64],   shape (n_bars,)
+        # BROADCAST CONFIG SCALAR. Echo `lifecycle.freeze_confirmed_legs` из config
+        # (constant per run); active donor эмитит как массив для length-invariant
+        # совместимости с BacktestResult.__post_init__ (zigzag_st_filter.py:1496).
+        # Не динамический счётчик; для динамики см. `confirmed_legs_since_start`.
+    "median_stop_triggered"         : np.ndarray[int8],    shape (n_bars,)
+    "stopping_started_at_index"     : np.ndarray[int64],   shape (n_bars,)
+    "filter_allowed_entry"          : np.ndarray[int8],    shape (n_bars,)
+    "filter_block_reason"           : np.ndarray[object],  shape (n_bars,)  # str
+
+Служебные (уже эмитятся active donor, plan их сохраняет):
+
+    "trade_filter_state_code"       : np.ndarray[int64], shape (n_bars,)
+        # internal int FSM state; OFF=0, WAIT_FIRST_ST_FLIP=1,
+        #   ST_ACTIVE_FREEZE=2, ST_ACTIVE_MONITORING=3, ST_STOPPING=4
+    "st_flip_dir"                   : np.ndarray[int8], shape (n_bars,)
+        # +1 / -1 / 0 (см. zigzag_st_filter.py:1485)
+
+Все массивы имеют shape `(len(positions),)` после early-exit truncation. Phase 2 НЕ добавляет в этот dict ни одного нового ключа.
+
+`trade_filter_trigger_source` enum (spec v1.1 §13 lines 530–535): `candidate_threshold` / `confirmed_median` / `both` / `none`.
+`filter_block_reason` enum (spec v1.1 §13 lines 537–546): `none` / `filter_off` / `waiting_for_allowed_st_flip` / `trade_mode_disallowed_flip` / `local_median_unavailable` / `invalid_stats` / `stopping_mode_no_new_entries` / `insufficient_global_stats`.
+
+Trade-level колонки (от `attach_trade_filter_diagnostics`): `entry_filter_state`, `entry_trigger_source`, `exit_reason` (`st_flip` / `filter_stopping_opposite_flip` / `pending_open_trade_at_end`) — spec v1.1 §13 lines 548–558. Эти колонки попадают в trade-DataFrame, не в `filter_diagnostics` dict.
+
+#### 3.3.2 filter_diagnostics_summary contract (Phase 2 tester aggregate)
+
+`filter_diagnostics_summary` — отдельный dict, который ЖИВЁТ в `PeriodResult` (НЕ в `BacktestResult.filter_diagnostics`). Он содержит per-period агрегаты, нужные Excel-summary блокам и golden snapshots:
+
+    summary = {
+        "mode"                        : "zigzag_st_mode",          # echo
+        "thresholds"                  : {                          # echo нормализованного config + materialized stats
+            "reversal_threshold": float,
+            "candidate_trigger_threshold": float,
+            "candidate_trigger_quantile": Optional[float],
+            "candidate_trigger_source"  : str,   # REQUIRED (owner decision v0.5.1):
+                                                  # "explicit" | "quantile" — echo из
+                                                  # ZigZagGlobalStats.candidate_trigger_source
+                                                  # (Phase 1 plan §3.2). Не Optional.
+            "global_median": float,
+            "local_window": int,
+            "freeze_confirmed_legs": int,
+        },
+        "global_offset"               : int,                       # slice metadata
+        "counters"                    : {
+            "raw_st_flips"            : int,  # все ST color changes (decision bars)
+            "passed_entry_signals"    : int,  # raw flips, разрешённые фильтром
+            "blocked_entry_signals"   : int,  # raw flips, заблокированные
+            "blocked_filter_off"          : int,
+            "blocked_waiting_first"       : int,
+            "blocked_trade_mode"          : int,
+            "blocked_local_median"        : int,
+            "blocked_invalid_stats"       : int,
+            "blocked_stopping"            : int,
+            "lifecycle_starts"            : int,
+            "median_stop_triggered"       : int,
+            "exits_opposite_flip"         : int,
+        },
+        "bars_in_state"               : {
+            "OFF": int, "WAIT_FIRST_ST_FLIP": int,
+            "ST_ACTIVE_FREEZE": int, "ST_ACTIVE_MONITORING": int,
+            "ST_STOPPING": int,
+        },
+    }
+
+Sanity-инварианты (audit-fix v0.5; все проверяются тестом #11):
+
+1. `passed_entry_signals + blocked_entry_signals == raw_st_flips` (full reconciliation raw → decision).
+2. `sum(blocked_*) == blocked_entry_signals` (block-reason histogram complete).
+3. `lifecycle_starts == count(state_arr transitions WAIT_FIRST_ST_FLIP -> ST_ACTIVE_FREEZE)` (cross-source check со `state_arr`).
+4. `median_stop_triggered == sum(filter_diagnostics["median_stop_triggered"])` (cross-source check с bar-level int8 mask).
+5. `exits_opposite_flip == count(trade rows where exit_reason == "filter_stopping_opposite_flip")` (cross-source check с trade-level diagnostics, spec §13 lines 554-558).
+6. `sum(bars_in_state.values()) == len(filter_diagnostics["trade_filter_state"]) == len(positions)`.
+
+ВАЖНО (audit-fix v0.5): bars_in_state-инвариант записан через `len(positions)`, не через `n_period`. В legacy тестере Phase 2 `early_exit_enabled=False` hardcoded (§6.2), поэтому фактически `len(positions) == n_period`, но опираться на это в инварианте небезопасно: active donor `BacktestResult.__post_init__` синхронно режет `filter_diagnostics` по `len(positions)` при early-exit truncation (Phase 1 plan §8.2 rule 7). Если в будущем default'ы изменятся, инвариант через `len(positions)` останется корректным.
+
+Для legacy attribution ведётся на полном period slice; `oos_boundary` не используется.
+
+`counters` ключи являются стабильными summary-алиасами поверх `filter_block_reason` enum из spec §13 (например, `blocked_waiting_first` агрегирует `waiting_for_allowed_st_flip`, `blocked_local_median` агрегирует `local_median_unavailable`, `blocked_stopping` агрегирует `stopping_mode_no_new_entries`). Это упрощает Excel-колонки, не меняя bar-level enum. Не-blocked counters (`lifecycle_starts`, `median_stop_triggered`, `exits_opposite_flip`) — derived из `state_arr` / bar-level int8 mask / trade rows соответственно (см. cross-source инварианты выше).
+
+#### 3.3.3 Disabled-path (mutual-exclusion)
+
+Disabled-path = `trade_filter is None` ИЛИ `trade_filter.enabled is False`:
+
+- `BacktestResult.filter_diagnostics` СТРОГО `None` (нельзя placeholder dict);
+- `PeriodResult.filter_diagnostics` СТРОГО `None`;
+- `PeriodResult.filter_diagnostics_summary` СТРОГО `None`;
+- `SegmentResult` в equal_blocks disabled-path не расширяется фильтром и не получает enabled diagnostics в Phase 2 v0.4.
+
+Это hard-парити правило, требуется test_wp9_diagnostics_export.py:317–336 (active donor: `assert result.filter_diagnostics is None` на disabled cfg). Любое отступление = регрессия.
+
+В отличие от 2.0-TESTER, у нас НЕТ амплитудных / legacy-volume режимов — фильтр либо `zigzag_st_mode + enabled`, либо отсутствует. Будущие combo-режимы (см. §15 backlog) обязаны при добавлении явно расширить этот пункт.
+
+#### 3.3.4 dtype-контракт (бар-level)
+
+Фиксируется ровно по тому, что эмитит active donor (zigzag_st_filter.py:1479–1500). Phase 2 не меняет dtype.
+
+| Ключ | dtype |
+|---|---|
+| trade_filter_enabled | int8 |
+| trade_filter_state | object (str) |
+| trade_filter_state_code | int64 |
+| trade_filter_trigger_source | object (str из {candidate_threshold, confirmed_median, both, none}) |
+| zigzag_reversal_threshold | float64 |
+| candidate_height_pct | float64 |
+| candidate_trigger_threshold | float64 |
+| local_median_N | float64 |
+| local_median_available | int8 (0/1) |
+| local_window | int64 |
+| global_median | float64 |
+| global_stats_available | int8 (0/1) |
+| confirmed_legs_since_start | int64 (dynamic FSM counter; -1 вне active state) |
+| freeze_confirmed_legs | int64 (broadcast config-scalar; constant per run) |
+| median_stop_triggered | int8 (0/1) |
+| stopping_started_at_index | int64 (-1 если не в STOPPING) |
+| filter_allowed_entry | int8 (0/1) |
+| filter_block_reason | object (str из spec §13 enum) |
+| st_flip_dir | int8 |
+
+ВАЖНО: bool-маски — `int8`, не `np.bool_`. Это контракт active donor (см. test_wp9_diagnostics_export.py:300–307: `assert diag[key].dtype == np.int8` для пяти int8-масок). dtype проверяется тестом #25 (см. §10).
+
+#### 3.3.5 positions_raw — регенерация только tester-side
+
+Источник идеи: engine/run.py из C:\2.0 — TESTER (architectural pattern; не keyset). Реализация У НАС:
+
+`RawBacktestArtifacts` НЕ расширяется (как в Phase 1). Tester-side helper, формирующий `filter_diagnostics_summary["counters"]`, регенерирует «сырые» позиции локально:
+
+    # tester-side, только при building summary
+    positions_raw = generate_positions(trend, trade_mode, execution_model)
+    counters = _compute_summary_counters(
+        positions_raw=positions_raw,                  # before-filter
+        positions_filtered=backtest_result.positions, # after-filter
+        filter_diagnostics=backtest_result.filter_diagnostics,
+    )
+
+`positions_raw` живёт ТОЛЬКО внутри этого helper'а; не попадает ни в `BacktestResult.filter_diagnostics`, ни в `RawBacktestArtifacts`, ни в `PeriodResult.filter_diagnostics`. Корректность опирается на детерминизм `generate_positions` (active donor backtest.py:56): её выход в индексе k зависит только от `trend[k-1]` (OPEN_TO_OPEN), поэтому regeneration на том же `trend` даёт identical to «pre-filter» positions.
+
+Spec reference: Appendix A v1.1 §10, §13
+
+---
+
+## 4. Slice offsets, indexing, diagnostics alignment
+
+### 4.1 Legacy path (run_all_periods)
+
+Каждый период берёт last n_period = max(1, floor(n_total * fraction)) bars:
+
+    period_slice = df.iloc[-n_period:]
+    global_offset = n_total - n_period   # абсолютный индекс start в полном df
+
+FSM работает на длине n_period. filter_diagnostics имеют длину len(positions) (с учётом возможной early-exit truncation, в тестере early_exit hardcoded False — см. §6).
+
+local_median_N накапливается causally внутри slice и не заимствует confirmed legs из соседних периодов; global_offset используется только для metadata/diagnostics.
+
+### 4.2 Equal-blocks mode policy
+
+`run_equal_blocks` не получает enabled filter wiring в Phase 2 v0.4.
+
+Config gate:
+
+    if segmentation.mode == "equal_blocks" and trade_filter.enabled:
+        raise ConfigError(
+            "trade_filter.type=zigzag_st_mode is supported only with "
+            "segmentation.mode=legacy in Phase 2"
+        )
+
+Disabled-path (`trade_filter` absent или `enabled=false`) сохраняет текущую equal_blocks логику без новых полей, колонок, листов и без пересчёта ZigZagGlobalStats.
+
+### 4.3 Trade diagnostics indexing (legacy)
+
+Trade-level diagnostics (`entry_filter_state`, `entry_trigger_source`, `exit_reason`) приклеиваются `attach_trade_filter_diagnostics(...)` внутри `run_single_backtest` после `extract_trades`. В legacy `run_period` rebase не нужен: индексы изначально в координатах period slice.
+
+### 4.4 Indexing rule (наследуется из Phase 1 §8.4)
+
+OPEN_TO_OPEN (canonical для тестера тоже):
+
+    entry_signal_idx = max(entry_index - 1, 0)
+    exit_signal_idx  = max(exit_index  - 1, 0)
+
+exit_reason определяется по FSM state на exit_signal_idx, а не на exit_index (см. Phase 1 plan §8.4.1).
+
+Edge-case pending_open_trade_at_end (audit-fix v0.5; spec §13 lines 554-558):
+
+    pending_exit_idx = len(filter_diagnostics["trade_filter_state"]) - 1
+                     # == len(positions) - 1 by length-invariant
+    if exit_index >= pending_exit_idx:
+        exit_signal_idx = SKIP        # exit lookup НЕ выполняется
+        exit_reason     = "pending_open_trade_at_end"
+    else:
+        exit_signal_idx = max(exit_index - 1, 0)
+        # exit_reason из state на exit_signal_idx
+
+Контракт фиксирует defensive `>=` (а не строго `==`), потому что это уже реализованный invariant active donor: `attach_trade_filter_diagnostics` делает `if exit_index >= pending_exit_idx` (`zigzag_st_filter.py:1597`). Spec docstring (`zigzag_st_filter.py:1526`) формулирует правило как `==`; `>=` — out-of-range guard на случай race-condition / bound errors. Тестер наследует эту защиту 1-в-1; никаких параллельных интерпретаций.
+
+Equal-blocks edge `exit_index >= n_bars_segment` out of scope v0.4, потому что enabled filter diagnostics для equal_blocks не материализуются.
+
+### 4.5 Координаты артефактов
+
+| Артефакт | Где хранится | Координаты |
+|---|---|---|
+| BacktestResult.filter_diagnostics (от run_single_backtest) | runtime, до tester-side обработки | period slice |
+| PeriodResult.filter_diagnostics (legacy) | tester result | period slice (= extended, prepend=0 в legacy) |
+| trades_df.{entry_filter_state,entry_trigger_source,exit_reason} | tester result | trade-level columns, attached in period-slice coordinates |
+| PeriodResult.filter_diagnostics_summary | tester result | агрегаты по period slice |
+
+Критический инвариант: len(PeriodResult.filter_diagnostics[k]) == len(result.positions) для каждого legacy period.
+
+Spec reference: Appendix A v1.1 §3.3, §3.4, §10, §13, §15.1, §17
+
+---
+
+## 5. Tester config contract
+
+### 5.1 Choice between strict schema and dict-validation
+
+OWNER DECISION (v0.5.1): зафиксирован **variant (a) — shared module в active `donor/supertrend_optimizer`**. Варианты (b) (прямой импорт из `wf_grid.config`) и (c) (дубликат в `donor TESTER/`) отозваны.
+
+ТЗ §5.4 даёт выбор. Финальное решение: тестер импортирует ТОЛЬКО `TradeFilter*` dataclass'ы и `validate_trade_filter(...)` из shared module под active donor namespace. Полный `load_grid_config`, root schema WF Grid и любые wf_grid.config.loader-функции, валидирующие весь YAML, тестер НЕ импортирует.
+
+Причина. Tester YAML имеет другой root contract (`commission`, `supertrend.{atr_period,multiplier}`, `segmentation.{mode,n_parts}`, `export.false_start_max_bars`, `trade_mode`, `annualization_*`, `market`, `execution_model`, `warmup_*`, `min_trades_required` — см. cli/tester.py:215–237). `load_grid_config` валидирует другой root (`grid`, `walk_forward`, etc.), и его применение к tester YAML приведёт к ложным reject'ам или молчаливому пропуску tester-specific ключей.
+
+Chosen import path (variant a):
+
+    from supertrend_optimizer.core.trade_filter_config import (
+        TradeFilterConfig,
+        TradeFilterZigZagConfig, TradeFilterTriggersConfig, TradeFilterLifecycleConfig, TradeFilterDiagnosticsConfig,
+        validate_trade_filter,   # переехал из wf_grid.config._validate_trade_filter
+    )
+
+`wf_grid.config` после Phase 2 prep refactor импортирует / реэкспортит эти dataclass'ы из active donor — НЕ держит свою копию. Это устраняет циклическую зависимость tester -> wf_grid и обеспечивает один источник истины для trade_filter contract.
+
+Отозванные варианты (для протокола):
+
+- (b) ~~Прямой импорт из `wf_grid.config.schema` + `wf_grid.config.loader._validate_trade_filter`~~. Owner-rejected: `wf_grid` не должен быть транзитивной зависимостью тестера.
+- (c) ~~Duplicate dataclasses в `donor TESTER/`~~. Owner-rejected: классическая drift-trap; нарушает single-source-of-truth для `TradeFilter*` contract.
+
+В variant (a):
+
+- `load_tester_config(...)` имеет собственный allowed-root-keys set; парсит блок `trade_filter` отдельной логикой и затем вызывает `validate_trade_filter(tf, errors, raw_user_keys, caller_pipeline="tester")` — см. §5.5 и описание сигнатуры ниже;
+- любой неизвестный ключ внутри `trade_filter.*` → ConfigError до запуска backtest;
+- raw-YAML presence tracking сохраняется (см. Phase 1 §6.4.1) — тестер не имеет права превращать `auto`+absent quantile в `auto`+default quantile молча;
+- неизвестный ключ на tester-root уровне (например, опечатка `seg_mentation`) тоже отвергается tester'ом — это его ответственность, не WF Grid.
+
+**Финальная сигнатура shared validator (audit-fix v0.5.1 — fixing H-4).**
+Текущая wf_grid функция: `_validate_trade_filter(tf: TradeFilterConfig, errors: list[str], raw_user_keys: frozenset[tuple[str, ...]])` (loader.py:559). Это push-style (накапливает errors в переданный список, caller raises ConfigError по результату). При переносе в shared module — добавляется `caller_pipeline` для контекстной диагностики, семантика **не меняется**:
+
+    def validate_trade_filter(
+        tf: TradeFilterConfig,
+        errors: list[str],
+        raw_user_keys: frozenset[tuple[str, ...]],
+        caller_pipeline: str = "wf_grid",   # "wf_grid" | "tester"
+    ) -> None:
+        """Validates trade_filter block per Appendix A v1.1 §11–11.3.
+        Appends error strings to `errors`; caller raises ConfigError if errors non-empty.
+        `caller_pipeline` reserved for per-pipeline log prefix — does NOT change validation rules.
+        """
+
+`wf_grid/config/loader.py` shim после рефактора:
+
+    from supertrend_optimizer.core.trade_filter_config import validate_trade_filter as _vtf
+
+    def _validate_trade_filter(tf, errors, raw_user_keys):
+        _vtf(tf, errors, raw_user_keys, caller_pipeline="wf_grid")  # thin shim
+
+Tester вызывает shared напрямую: `validate_trade_filter(tf, errors, raw_user_keys, caller_pipeline="tester")`. Нет `parsed_dict`, нет `raw_presence_set` — только стандартные `TradeFilterConfig` + `frozenset[tuple[str, ...]]`.
+
+Refactor implication. Phase 1.5 / Phase 2 prep требует переноса `TradeFilter*` dataclass'ов из `wf_grid/config/schema.py` в `donor/supertrend_optimizer/core/trade_filter_config.py` И переписывания `wf_grid.config.schema` + `wf_grid.config.loader` в re-export shim'ы. Это prep-step ПЕРЕД WP-T2 и фиксируется как pre-requisite в WP-T0 / §16 implementation order.
+
+### 5.2 YAML templates
+
+Disabled (default rollback, добавляется в config_tester.yaml):
+
+    trade_filter:
+      enabled: false
+      type: zigzag_st_mode
+
+Enabled (для experiment runs):
+
+    trade_filter:
+      enabled: true
+      type: zigzag_st_mode
+
+      zigzag:
+        global_stats_source: full_dataset
+        leg_height_mode: pct
+        reversal_threshold: 0.005
+        candidate_trigger_threshold: auto
+        candidate_trigger_quantile: 0.80
+        global_median: auto
+        local_window: 5
+
+      triggers:
+        candidate_threshold:
+          enabled: true
+        confirmed_median:
+          enabled: true
+
+      lifecycle:
+        freeze_confirmed_legs: 5
+        stop_check: confirm_bar_only
+        stopping_exit: opposite_st_flip
+
+      diagnostics:
+        export_state_columns: true
+        export_trigger_columns: true
+
+### 5.3 Validation rules (тестером заимствуются 1:1 у Phase 1)
+
+| Правило | Failure |
+|---|---|
+| trade_filter присутствует, enabled отсутствует | trade_filter.enabled is required |
+| enabled не bool | reject |
+| enabled=true без type | reject |
+| enabled=true, type != zigzag_st_mode | reject |
+| enabled=false, type указан и != zigzag_st_mode | reject |
+| enabled=true без zigzag / triggers / lifecycle | reject |
+| оба triggers disabled при enabled=true | reject |
+| zigzag.global_stats_source != full_dataset | reject |
+| zigzag.leg_height_mode != pct | reject |
+| reversal_threshold отсутствует / None / NaN / <=0 / >=1 / percent string | reject |
+| local_window не int или < 1 | reject |
+| freeze_confirmed_legs не int или < 0 | reject |
+| lifecycle.stop_check != confirm_bar_only | reject |
+| lifecycle.stopping_exit != opposite_st_flip | reject |
+| global_median != auto | reject |
+| numeric candidate_trigger_threshold + NaN/Inf/<=0/>=1/percent string | reject |
+| candidate_trigger_threshold = auto без candidate_trigger_quantile | reject |
+| candidate_trigger_quantile не в (0, 1) | reject |
+| numeric candidate_trigger_threshold + explicit raw-YAML candidate_trigger_quantile | reject (Phase 1 §6.4.1) |
+| freeze_confirmed_legs < local_window | accept, без warning (явный non-rule) |
+
+Disabled-config absence: блок trade_filter отсутствует → фильтр выключен, baseline preserved.
+
+#### 5.3.1 Strict schema (reject unknown keys)
+
+Эталон: docs/zigzag_filter.md §6.3 + tests/cli/test_zz_filters_config.py в C:\2.0 — TESTER. Phase 2 принимает аналогичное правило на уровне tester:
+
+- любой неизвестный ключ внутри trade_filter.* / zigzag.* / triggers.* / lifecycle.* / diagnostics.* → ConfigError с указанием конкретного нелегального ключа и dotted-пути;
+- whitelist ключей жёстко зафиксирован в shared TradeFilter* dataclass'ах (§3.1, либо в shared module после Mode C);
+- проверка выполняется в load_tester_config до merge_cli_and_config и до любого build_zigzag_global_stats — то есть до любых side-effects;
+- ошибка форматируется по образцу Phase 1: ConfigError(f"trade_filter: unknown key {dotted_path!r}; allowed keys: {sorted(allowed)}").
+
+Это закрывает class-of-bugs «опечатка в YAML работает молча».
+
+#### 5.3.2 Raw-YAML presence tracking (явное расширение Phase 1 §6.4.1)
+
+Контракт «numeric threshold + explicit quantile -> reject» опирается на разделение между:
+- absent (ключа нет в YAML вообще) — тогда заводится default из spec;
+- explicit (ключ присутствует в YAML, даже с тем же значением, что был бы default) — это user-intent.
+
+Loader должен пробрасывать raw-presence-set из yaml.safe_load до validator'а отдельным аргументом (не реконструировать сравнением с default). Тест #4 §10 покрывает three-case: numeric+absent / auto+explicit / numeric+explicit.
+
+### 5.4 Раcширение merge_cli_and_config
+
+cli/tester.py:merge_cli_and_config возвращает dict; в Phase 2 он дополнительно прокладывает:
+
+    returned_dict["trade_filter"] = parsed_trade_filter_config_or_None
+
+CLI флагов для управления фильтром в Phase 2 не добавляется (config-only). Это сознательное решение: фильтр конфигурируется единым YAML, чтобы исключить разрозненную полу-конфигурацию через флаги.
+
+### 5.5 Mode-rejection gates (zigzag_st_mode принадлежит конкретным CLI)
+
+ВАЖНО (audit-fix v0.5): mode-rejection gate с `caller_pipeline` whitelist — **plan extension, не spec rule**. Appendix A v1.1 §11 / §16 нигде не пишет, что zigzag_st_mode должен быть запрещён в "не своих" CLI. Это product-level fail-closed gate, owner-approved direction (TZ §5.5), inspired pattern из C:\2.0 — TESTER. В §5.5 Spec reference покрывает только dataclass validation rules (§11.x), которые ВЫЗЫВАЮТСЯ внутри gate; сам whitelist — plan-side decision и помечается как такой в §15.
+
+Эталон: tests/optimization/test_optimizer_rejects_zigzag.py + tests/validation/test_walk_forward_rejects_zigzag.py в C:\2.0 — TESTER. Идея: fail-closed на уровне «не своего» CLI, чтобы трейд-фильтр не активировался по ошибке там, где его сценарий не предусмотрен.
+
+Распределение по pipeline'ам после Phase 1 + Phase 2:
+
+| CLI / pipeline | trade_filter.type=zigzag_st_mode | Действие |
+|---|---|---|
+| Phase 1: WF Grid (wf_grid CLI) | accept (по Appendix A v1.1) | nominal |
+| Phase 2: SuperTrend Tester legacy (run_period / run_all_periods) | accept | nominal |
+| Phase 2: SuperTrend Tester equal_blocks | reject when enabled | ConfigError до stats/backtest |
+| Optimizer (если присутствует в репо как отдельный CLI) | reject ConfigError | gate |
+| Стандартный single-period backtest CLI вне tester wiring | reject ConfigError | gate |
+
+Реализация:
+- shared validator получает обязательный аргумент caller_pipeline ∈ {"wf_grid", "tester", "optimizer", "single"};
+- whitelist разрешённых caller_pipeline для type=zigzag_st_mode = {"wf_grid", "tester"};
+- любой другой caller -> ConfigError(f"trade_filter.type=zigzag_st_mode is not supported in {caller_pipeline!r} pipeline; allowed: {{wf_grid, tester}}");
+- tester дополнительно проверяет segmentation scope: `segmentation.mode == "legacy"` при `trade_filter.enabled=true`; `equal_blocks` -> ConfigError("zigzag_st_mode is supported only with segmentation.mode=legacy in Phase 2");
+- эта проверка выполняется в load_tester_config / cli/tester.py:run_backtest сразу после strict-schema (§5.3.1).
+
+Это снимает риск «случайно включился zigzag_st_mode в optimizer» (наша backlog-направленность — фильтр в optimizer пока не интегрирован). Тест #24 (см. §10) покрывает gate.
+
+Spec reference: Appendix A v1.1 §11, §11.1, §11.2, §11.3, §15.6, §17.2
+
+---
+
+## 6. Backtest engine integration в тестере
+
+### 6.1 Сигнатуры
+
+Тестер использует active donor engine (Mode C, см. §3.1), у которого Phase 1 уже добавил `trade_filter_config`, `zigzag_global_stats`, `global_offset` (run.py:40–65; backtest.py:300–318). Phase 2 на engine-side ничего не добавляет — только wiring tester-side.
+
+run_period(...) (testing/runner.py) расширяется (additive, defaults сохраняют baseline):
+
+    def run_period(
+        df,
+        atr_period, multiplier, trade_mode, commission,
+        warmup_period=0, warmup_time=None,
+        periods_per_year=252.0,
+        execution_model=ExecutionModel.OPEN_TO_OPEN,
+        auto_warmup=False,
+        min_trades_required=1,
+        # NEW (Phase 2)
+        trade_filter_config=None,
+        zigzag_global_stats=None,
+        global_offset=0,
+    ) -> PeriodResult
+
+Внутри передаёт три новых параметра в run_single_backtest. Возвращает PeriodResult с уже подключённым filter_diagnostics (None, если фильтр выключен).
+
+run_all_periods(...) принимает trade_filter_config и zigzag_global_stats и для каждого period slice вычисляет:
+
+    period_slice = df.iloc[-n_period:]
+    period_global_offset = len(df) - n_period
+    result = run_period(period_slice, ..., trade_filter_config=..., zigzag_global_stats=..., global_offset=period_global_offset)
+
+run_equal_blocks(...) в Phase 2 v0.4 не расширяется enabled filter wiring. При direct/internal call с `trade_filter_config.enabled=true` функция должна fail-fast с ConfigError. При `trade_filter_config is None` или `enabled=false` поведение остаётся bit-identical baseline.
+
+Disabled-path (trade_filter_config is None или enabled=false): тестер ведёт себя bit-identical baseline. Это hard parity rule (см. §11).
+
+### 6.2 Early-exit invariant
+
+В legacy тестере early_exit_enabled=False hardcoded в run_period. Phase 2 это поведение не меняет. Synchronous truncation filter_diagnostics (Phase 1 plan §8.2 rule 7) не активируется на canonical тестерном пути, но защитный invariant (len(arr) == len(positions) в BacktestResult.__post_init__) применяется одинаково.
+
+### 6.3 Where filter integrates
+
+Engine-level (active donor — уже работает; Phase 2 НЕ меняет):
+
+    DISABLED (trade_filter is None or enabled=false):
+      trend -> generate_positions -> positions
+            -> calculate_returns -> equity -> extract_trades -> metrics
+      filter_diagnostics = None  (BacktestResult.__post_init__ enforced)
+
+    ENABLED (trade_filter.enabled=true):
+      trend -> zigzag_st_filter.apply(...) -> filtered_positions + filter_diagnostics
+            -> calculate_returns -> equity -> extract_trades -> metrics
+            -> attach_trade_filter_diagnostics(trades_df, filter_diagnostics)
+      filter_diagnostics — bar-level dict с keyset spec §13 (см. §3.3.1);
+      generate_positions НЕ вызывается на enabled-пути (backtest.py:397–415).
+
+Tester-level (Phase 2 wiring — добавляется в этом плане):
+
+    После run_single_backtest:
+      result : BacktestResult       # filter_diagnostics: None | dict spec §13
+      ↓
+      _build_filter_diagnostics_summary(result, trade_mode, execution_model,
+                                        trade_filter_config,
+                                        zigzag_global_stats, global_offset)
+        # ENABLED only — на disabled-пути возвращает None
+        positions_raw = generate_positions(result.trend, trade_mode, execution_model)
+        counters      = _compute_summary_counters(positions_raw,
+                                                  result.positions,
+                                                  result.filter_diagnostics)
+        bars_in_state = _bars_in_state_histogram(result.filter_diagnostics)
+        thresholds    = _echo_thresholds(trade_filter_config, zigzag_global_stats)
+        return {
+            "mode": "zigzag_st_mode",
+            "thresholds": thresholds,
+            "global_offset": global_offset,
+            "counters": counters,
+            "bars_in_state": bars_in_state,
+        }
+      ↓
+      PeriodResult.filter_diagnostics_summary = ↑
+
+Strictly forbidden (наследуется из Appendix A v1.1 §10 + audit-fix v0.3):
+
+- post-фильтрация trades_df после calculate_returns;
+- per-bar boolean mask поверх generate_positions (нарушает ST_STOPPING exit-only / freeze counter / repeated-trigger suppression);
+- хранение `mode`, `thresholds`, `counters`, `global_offset` или любых scalar/dict значений в `BacktestResult.filter_diagnostics` — сломает result.py:189–197 length-инвариант.
+
+Где живёт positions_raw (audit-fix v0.3):
+
+- ТОЛЬКО внутри `_build_filter_diagnostics_summary(...)` на tester-side; локальная переменная;
+- НЕ в `RawBacktestArtifacts` (это сохраняет surface Phase 1 неизменной);
+- НЕ в `BacktestResult.filter_diagnostics`;
+- НЕ в `PeriodResult.filter_diagnostics`.
+
+Корректность: `generate_positions` детерминирована (active donor backtest.py:56–110), её выход в индексе k зависит только от `trend[k-1]` (OPEN_TO_OPEN), поэтому regeneration на том же `trend`, что вернул `run_single_backtest`, даёт identical-to-pre-filter позиции, без необходимости расширять artifacts.
+
+Disabled-path:
+
+- `BacktestResult.filter_diagnostics = None` (engine-level, enforced backtest.py:391);
+- `PeriodResult.filter_diagnostics = None`, `PeriodResult.filter_diagnostics_summary = None`;
+- `_build_filter_diagnostics_summary` возвращает `None` сразу при `trade_filter_config is None or not trade_filter_config.enabled`;
+- ни один Excel-блок / sheet / column фильтра не материализуется (см. §9.1, §9.2, §9.3);
+- bit-identical baseline. Hard parity rule, тестируется #2, #3, #17, #19 (см. test_wp9_diagnostics_export.py:317–336 как эталон Phase 1).
+
+Spec reference: Appendix A v1.1 §10, §13, §15.1, §15.4, §15.7, §17.6
+
+---
+
+## 7. Full-dataset global stats для тестера
+
+### 7.1 CLI / run_batch_tester.py path
+
+Сразу после validate_ohlc_data(df) и до сегментации:
+
+    zigzag_global_stats = None
+    if cfg.trade_filter is not None and cfg.trade_filter.enabled:
+        if cfg.segmentation.mode == "equal_blocks":
+            raise ConfigError("zigzag_st_mode is supported only with segmentation.mode=legacy in Phase 2")
+        zigzag_global_stats = build_zigzag_global_stats(
+            close=df["close"].values,
+            trade_filter_config=cfg.trade_filter,
+        )
+        # Сигнатура active donor: build_zigzag_global_stats(close, trade_filter_config)
+        # (zigzag_st_filter.py:611). Close-only ZigZag — no high/low (Appendix A §3.4).
+        # Init failure (Appendix A §12.3 spec):
+        #   no confirmed legs / global_median NaN/Inf
+        #   auto threshold + n_legs_total < min_legs_for_quantile
+        #   materialized candidate_trigger_threshold NaN/Inf
+        # -> ConfigError ДО любой сегментации.
+
+zigzag_global_stats передаётся только в legacy run (`run_all_periods`). Для `equal_blocks + enabled` конфигурация отвергается до построения stats; для disabled equal_blocks stats не нужны.
+
+### 7.2 Direct function calls (tests, ad-hoc)
+
+run_period(df_slice, ..., zigzag_global_stats=...) принимает уже материализованные stats. Для тестов и debug, если zigzag_global_stats=None при trade_filter_config.enabled=true, поведение fail-closed:
+
+- run_period рейзит ConfigError("zigzag_global_stats required when filter enabled");
+- эта проверка выполняется до run_single_backtest чтобы не запускать ZigZag pivot pass на partial-dataset.
+
+run_period не вычисляет stats сам по df_slice: per-spec §12, global_median — full-dataset statistic, не slice-local. План тестера явно фиксирует, что df_slice, переданный в run_period, считается «full dataset для этого вызова» только тогда, когда caller сам это явно гарантирует (например, тест на синтетических данных).
+
+### 7.3 run_all_periods legacy-mode policy
+
+run_all_periods(df, ..., trade_filter_config, zigzag_global_stats) использует переданный df как full dataset для расчёта zigzag_global_stats, если caller не передал готовые stats:
+
+    if trade_filter_config is not None and trade_filter_config.enabled:
+        if zigzag_global_stats is None:
+            zigzag_global_stats = build_zigzag_global_stats(
+                close=df["close"].values,
+                trade_filter_config=trade_filter_config,
+            )
+            # Same init-failure rules.
+
+Это соответствует §5.2 ТЗ: для CLI/batch full dataset = валидированный df до сегментации; для direct calls — df, переданный в публичную функцию.
+
+run_equal_blocks(...) не материализует zigzag_global_stats в Phase 2 v0.4. Если caller передал enabled trade_filter_config, функция завершает работу ConfigError до backtest.
+
+Spec reference: Appendix A v1.1 §3, §12, §12.1, §12.2, §12.3, §15.1, §15.7, §17.5, §17.6
+
+---
+
+## 8. Signal events semantics
+
+### 8.1 Ограничение текущей build_signal_events
+
+testing/signal_events.py:build_signal_events сейчас:
+
+- работает только на 100% slice (legacy path, run_all_periods вызывает с trend=results[0].result.trend);
+- регистрирует все ST color changes (prev != curr, prev != 0);
+- не различает «ST flip разрешён фильтром» vs «ST flip заблокирован фильтром» vs «фильтр в ST_STOPPING и закрывает позицию».
+
+Когда trade_filter.enabled=true, лист Signals может вводить в заблуждение: показывает все raw ST flips, тогда как реальные сделки совсем другие.
+
+### 8.2 Phase 2 контракт build_signal_events
+
+build_signal_events(...) расширяется новым optional parameter:
+
+    def build_signal_events(
+        df, trend, atr_period, trade_mode, execution_model,
+        filter_diagnostics: Optional[Dict[str, np.ndarray]] = None,  # NEW
+    ) -> pd.DataFrame
+
+Поведение:
+
+1. filter_diagnostics is None (disabled или фильтр не активен) -> текущее поведение bit-identical, никаких новых столбцов. Никаких новых строк (audit-fix v0.3).
+2. filter_diagnostics is not None:
+   - набор строк остаётся ПРЕЖНИМ — `prev != curr and prev != 0` (см. signal_events.py:112). Initialization-флипы 0 -> ±1 в Signals НЕ инжектируются (они skipped в active donor; добавление таких строк сломало бы disabled-baseline-bit-identity и golden snapshots, см. §10 #17, #19);
+   - добавляются ТОЛЬКО новые столбцы:
+     - `filter_state_at_signal` (OFF / WAIT_FIRST_ST_FLIP / ST_ACTIVE_FREEZE / ST_ACTIVE_MONITORING / ST_STOPPING) — берётся из `filter_diagnostics["trade_filter_state"][signal_bar_index]` (string, не int8);
+     - `filter_decision` ∈ { entry_allowed, entry_blocked_filter_off, entry_blocked_waiting_first, entry_blocked_trade_mode, entry_blocked_local_median, entry_blocked_invalid_stats, entry_blocked_stopping } — производное от `filter_block_reason` + `filter_allowed_entry` на `signal_bar_index`. Сценарий `raw_initialization` (для 0 -> ±1) В этом списке НЕТ, так как такие строки не попадают в Signals (см. п.выше);
+     - `filter_block_reason` — копия `filter_diagnostics["filter_block_reason"][signal_bar_index]` (str из spec §13 enum: `none` / `filter_off` / `waiting_for_allowed_st_flip` / `trade_mode_disallowed_flip` / `local_median_unavailable` / `invalid_stats` / `stopping_mode_no_new_entries` / `insufficient_global_stats`);
+     - `filter_trigger_source` — копия `filter_diagnostics["trade_filter_trigger_source"][signal_bar_index]` (str: `candidate_threshold` / `confirmed_median` / `both` / `none`).
+3. Lookup на signal_bar_index (decision bar t), не на execution bar t+1. Это согласовано с правилом Appendix A v1.1 §10 — decision на close, execution на next open.
+4. Empty result (нет ST flips): DataFrame с правильными headers (включая filter columns если enabled) и нулём строк.
+
+ВАЖНО (audit-fix v0.3): Phase 2 НЕ ТРОГАЕТ цикл итерации `for t in range(1, n)` и условие `if curr == prev or prev == 0: continue` (signal_events.py:107–113). Disabled-bit-identity baseline зависит от того, что цикл генерирует РОВНО те же строки. Любая попытка инжектировать 0 -> ±1 как «raw_initialization»-строку отозвана. Для покрытия 0 -> ±1 семантики предусмотрен FSM unit test (см. §10 #15: «0 -> ±1 не открывает в WAIT и не закрывает в STOPPING»), не отдельная Signals-строка.
+
+### 8.3 Защита от misleading Signals sheet
+
+ТЗ §5.5 явно требует: «prevent a misleading Signals sheet that looks like raw ST trades when actual trades were filtered».
+
+OWNER DECISION (v0.5.1): default — **same sheet name `Signals`, NO meta-row, filter columns only**. Black-listed варианты:
+
+- ~~Переименование в `Signals_Filtered`~~ — отозвано: ломает downstream tooling, у которого имя листа hardcoded.
+- ~~Meta-row в первом ряду (`# trade_filter: zigzag_st_mode (enabled)`)~~ — отозвано: ломает обычный `pd.read_excel(header=0)` / openpyxl readers, у которых первая строка трактуется как header.
+
+Финальное решение в плане:
+
+- лист Signals СОХРАНЯЕТ имя `Signals` И при enabled=true, И при disabled. Header строго на первой строке (row 1); никаких meta-строк, prefix-комментариев или дополнительных aux-rows;
+- enabled-run отличается от disabled-run ИСКЛЮЧИТЕЛЬНО наличием четырёх filter-колонок (Filter State at Signal, Filter Decision, Filter Block Reason, Filter Trigger Source) — см. §9.5 точную позицию;
+- downstream tool, который хочет detect'ить filtered run, делает это по факту присутствия колонки `Filter Decision` в header — а не по sheet name или meta-row;
+- false-start sheet (false start) тоже учитывает filter_block_reason для совпадения trade «->» signal: blocked rows фильтруются из false-start логики (false-start про trades, а не про filter blocks);
+- header в signals_df расширяется четырьмя filter-колонками; ТОЧНАЯ позиция в layout — single source of truth: §9.5 (Excel-layer): «после `Is Reversal`, до `Exec Price`». Эта же позиция используется при формировании in-memory `signals_df` — никаких альтернативных слотов (в т.ч. «после st_color_after», как было в черновике v0.2). Audit-fix v0.5: предыдущая формулировка снята.
+
+Совместимость baseline: disabled-run Signals layout ровно такой же, как до Phase 2 (никаких четырёх filter-колонок, никаких meta-rows). Это покрывается golden-test #17 (legacy disabled). Enabled-run с четырьмя filter-колонками — golden-test #18.
+
+Spec reference: Appendix A v1.1 §3.3, §10, §13, §15.4, §17.13
+
+---
+
+## 9. Excel export
+
+### 9.1 Conditional inclusion
+
+Trade-level filter columns (entry_filter_state, entry_trigger_source, exit_reason) добавляются в trade sheets только если выполнены оба условия (наследуется из Phase 1 plan §10.6.1):
+
+1. trade_filter.enabled=true в активной конфигурации;
+2. BacktestResult.filter_diagnostics is not None и attach_trade_filter_diagnostics фактически вызван.
+
+В disabled-path тестера эти столбцы не появляются ни в одном XLSX-листе. Это hard parity rule.
+
+#### 9.1.1 _NA sentinel для close-rows и non-zigzag_st_mode
+
+Эталон: io/excel_tester.py:24 _NA = "N/A" в C:\2.0 — TESTER.
+
+В Signals лист попадают и open-events (для них фильтр имеет смысл) и close-events (для них поля фильтра неприменимы). Phase 2 фиксирует sentinel "N/A" для:
+- close-rows в Signals (filter_state_at_signal, filter_decision, filter_block_reason, filter_trigger_source);
+- любых строк, когда filter_diagnostics is None (но это означает, что колонок и так не будет — т.е. в практике sentinel применяется только в enabled-run на close-rows).
+
+Это:
+- упрощает Excel-сортировку и -фильтрацию для пользователя (одно значение вместо смеси NaN/empty);
+- стабилизирует golden snapshots (NaN от engine может cast'иться в None / "" / 0.0 в зависимости от dtype колонки);
+- совпадает с эталоном из C:\2.0 — TESTER, что облегчает downstream-tooling.
+
+### 9.2 Legacy workbook (result_legacy.xlsx)
+
+Текущие листы и поведение по умолчанию:
+
+- Summary — параметры/метрики 5 периодов (без trade columns);
+- Metrics_<period> (×5) — расширенный block per-period метрик;
+- Trades_<period> (×5) — trades в координатах period slice;
+- Signals — output build_signal_events(..., trend=results[0].result.trend);
+- false start — диагностический лист.
+
+Источник данных для всех новых блоков фильтра в legacy workbook (audit-fix v0.3):
+
+- per-bar таблицы (FilterDiagnostics_100) — `PeriodResult.filter_diagnostics` (bar-level dict spec §13);
+- Summary-блок и filters_summary sheet — `PeriodResult.filter_diagnostics_summary` (агрегаты, см. §3.3.2);
+- ZigZag_Trigger_Events — exact reconstruction из `PeriodResult.filter_diagnostics["trade_filter_trigger_source"]` (см. §9.2.1 формулу);
+- Signals-колонки — bar-level lookup в `filter_diagnostics["..."][signal_bar_index]`.
+
+Phase 2 добавляет:
+
+- enabled-path:
+  - Trades_<period> получают финальные опциональные колонки в фиксированном порядке: Entry Filter State, Entry Trigger Source, Exit Reason (после canonical donor columns; точные display names — см. excel_tester.py:TRADES_DISPLAY_NAMES, расширение в Phase 2);
+  - Summary приобретает дополнительный сводный блок Filter Diagnostics Summary (только при enabled): Filter States Visited (set из `bars_in_state`), Bars OFF/Freeze/Monitoring/Stopping, Lifecycle Starts, Median Stop Triggered, Filter Blocked Entries — все берутся из `PeriodResult.filter_diagnostics_summary`; placement — после стандартного блока metrics, отдельной таблицей;
+  - Signals — расширенные колонки из §8.2 (Filter State at Signal, Filter Decision, Filter Block Reason, Filter Trigger Source); ordering фиксирован: после Is Reversal, до Exec Price;
+  - новый optional лист FilterDiagnostics_100 с per-bar Appendix A §13 keyset для 100% slice (rank-1 analog тестера; gating — diagnostics.export_state_columns: true). Источник — `results[100%].filter_diagnostics`. Для других периодов (75/50/33/25%) per-bar лист не материализуется по умолчанию — только summary в Summary. Это решение наследует Phase 1 plan §10.5.2/§10.5.3 (full bar-level keyset only for rank-1/explicit debug);
+  - новый optional лист ZigZag_Trigger_Events (gated diagnostics.export_trigger_columns: true) — одна строка на каждое событие триггера (candidate / confirmed_median), по образцу Legs sheet из C:\2.0 — TESTER (io/excel_tester.py:_write_legs_sheet:1250–1349). Колонки фиксированы: Trigger ID, Trigger Bar (decision), Trigger Time, Trigger Source, Threshold Used, Quantile Used, Global Median, Local Median N, Candidate Height %, Triggered Lifecycle Start (bool), Linked Trade ID. Reconstruction формула — см. §9.2.1 (audit-fix v0.5). Этот лист — диагностический, на returns/equity не влияет;
+  - новый optional лист filters_summary (gated diagnostics.export_state_columns: true; по образцу io/excel_tester.py:_write_filters_summary_sheet) — две секции: (a) параметры (`summary["mode"]`, `summary["thresholds"]` — включая mandatory `candidate_trigger_source` column "explicit" | "quantile" по owner decision v0.5.1); (b) аггрегаты `summary["counters"]` + `summary["bars_in_state"]` per-period (одна строка на 100/75/50/33/25%). Источник для каждой строки — `results[period].filter_diagnostics_summary`. Опциональная Total row — нет (для legacy не имеет смысла, sliding periods overlap);
+- disabled-path: листы и порядок столбцов bit-identical baseline. Никаких пустых/NaN filter columns. `filter_diagnostics` и `filter_diagnostics_summary` оба `None`, поэтому ни один из новых блоков не материализуется.
+
+### 9.2.1 ZigZag_Trigger_Events reconstruction formula (audit-fix v0.5)
+
+Источник истины: active donor `zigzag_st_filter.py:1234, 1299–1307`. `trade_filter_trigger_source[t]` инициализирован `"none"` для всех баров (line 1234) и устанавливается в `candidate_threshold` / `confirmed_median` / `both` ТОЛЬКО когда `state_at_bar_start == ZigZagFSMState.OFF` (line 1301). Repeated triggers в WAIT_FIRST_ST_FLIP / ST_ACTIVE_FREEZE / ST_ACTIVE_MONITORING / ST_STOPPING подавлены (spec §15.3) — значение остаётся `"none"`.
+
+Следовательно reconstruction trigger events — без heuristic'и:
+
+    trigger_event_rows = [
+        t for t in range(n_bars)
+        if filter_diagnostics["trade_filter_trigger_source"][t] != "none"
+    ]
+
+Контрактный invariant (тестируется тестом #30): для каждого `t in trigger_event_rows` верно `state_arr[t-1] in {OFF}` ИЛИ (`t == 0` AND `state_arr[t] != OFF`). То есть переход из OFF — необходимое условие trigger event, и `trigger_source != "none"` — достаточное.
+
+Что НЕ используется (отозвано из v0.4 черновика): heuristic через `confirmed_legs_since_start` delta. `confirmed_legs_since_start` — динамический счётчик confirmed legs внутри активного lifecycle (`zigzag_st_filter.py:1328`); он шагает на confirm-bar в FREEZE / MONITORING. Это НЕ событие запуска контура B (которое уже отражено в `trigger_source == "confirmed_median"` при OFF→WAIT). Использовать delta этого счётчика для reconstruction trigger events некорректно — он вообще не возрастает в OFF.
+
+Trigger ID нумерация — последовательная по возрастанию `t` для каждого period slice (1, 2, 3, …). Linked Trade ID заполняется на этапе `_link_trades_to_legs` (§9.5.1).
+
+### 9.2.2 False-start sheet
+
+false start лист продолжает работать на 100% slice. Если фильтр enabled:
+
+- сохраняется текущая логика _match_trade_to_signal_row (matching trade «->» signal по time / price);
+- добавляется опциональная колонка Filter Block Reason at Signal справа (после False Start Type), чтобы видеть, был ли false-start фактически permitted фильтром (позитивная диагностика) или это «pre-filter» false start. Это gated diagnostics.export_state_columns: true.
+
+### 9.3 Equal-blocks workbook policy (result_equal_blocks.xlsx)
+
+Текущие листы:
+
+- Summary — sum metrics по сегментам;
+- Metrics_<S1..SN> — per-segment metrics;
+- Trades_<S1..SN> — segment trades (entry/exit rebased to segment coordinates).
+
+Phase 2 v0.4 ничего не добавляет в equal_blocks workbook. При `trade_filter.enabled=true` + `segmentation.mode=equal_blocks` конфигурация отвергается до export. При disabled-path workbook должен быть bit-identical baseline: никаких filter columns, `FilterDiagnostics_S1`, `filters_summary`, `ZigZag_Trigger_Events_S1`.
+
+equal_blocks workbook не имеет Signals листа (потому что build_signal_events v1 не работает в equal_blocks scope; ссылка из docstring signal_events.py). Phase 2 это поведение сохраняет: signals-лист в equal_blocks workbook не добавляется. Если в будущем будет принято расширение, это отдельная задача с явным spec reference.
+
+### 9.4 Empty-trade case
+
+При trade_filter.enabled=true возможен сценарий, когда ни одной сделки не было (например, ZigZag фильтр всё заблокировал). В таком случае:
+
+- Trades_<period> — DataFrame с правильными headers (включая filter columns в фиксированном порядке) и нулём строк;
+- Summary показывает 0 сделок, но summary-блок по фильтру (Bars OFF / Freeze / Monitoring / Stopping) не пустой — он отражает реальное поведение FSM на slice;
+- FilterDiagnostics_100, если включён, материализуется per-bar даже при нуле сделок.
+
+### 9.5 Deterministic column order
+
+В trade sheets:
+
+    [ canonical donor trade columns in current order ]
+    + [ optional filter columns, ONLY if present in df, fixed order: ]
+        Entry Filter State
+        Entry Trigger Source
+        Exit Reason
+    + [ optional triggering-leg columns, ONLY if diagnostics.export_trigger_columns=true: ]
+        Triggering Trigger ID
+        Triggering Trigger Bar
+        Triggering Trigger Source
+        Triggering Threshold Used
+        Triggering Quantile Used
+        Triggering Global Median
+        Triggering Local Median N
+
+В signals sheet (legacy):
+
+    [ canonical donor signal columns up to and including Is Reversal ]
+    + [ optional filter columns, ONLY if filter_diagnostics is not None: ]
+        Filter State at Signal      # close-rows -> "N/A"
+        Filter Decision             # close-rows -> "N/A"
+        Filter Block Reason         # close-rows -> "N/A"
+        Filter Trigger Source       # close-rows -> "N/A"
+    [ canonical donor signal columns from Exec Price onward ]
+
+Disabled run snapshot test (см. §10) пинит exact column sequence без filter columns. Enabled run snapshot test пинит exact column sequence с filter columns.
+
+#### 9.5.1 Trade <-> trigger linker (двухступенчатый)
+
+Эталон: io/excel_tester.py:_link_trades_to_legs в C:\2.0 — TESTER (~80 lines, two-step matching).
+
+Линковка делается ОДИН РАЗ при экспорте, после того как trades_df и trigger_events_df оба сформированы. Алгоритм:
+
+1. Шаг 1 — exact match: для каждого trade ищем trigger_events row, у которого trigger_bar == entry_signal_idx (decision bar). Это покрывает 100% случаев same-bar trigger + flip.
+2. Шаг 2 — backward search: если шаг 1 не нашёл, ищем последний trigger_events row, у которого trigger_bar < entry_signal_idx и trigger_source != NONE и lifecycle_event=ENTER_ACTIVE этого же FSM-цикла. Это покрывает случай, когда trigger сработал на t1, но ST flip случился позже на t2 > t1 (freeze отсчитывается от t1, FSM пропускает первый flip после freeze).
+3. Если ни один шаг не нашёл — Triggering * колонки получают "N/A" (sentinel из §9.1.1). В trades_df enabled-run такого случая быть не должно (любой trade происходит из allowed entry, у которого был trigger в FSM-цикле); отсутствие линка для конкретного trade row = test failure (см. §10 #18). Возможный «легитимный» N/A — pending_open_trade_at_end на последнем баре, если он попал в trades_df без явного trigger (то есть открыт ещё до lifecycle start; в текущей семантике Appendix A это не должно случаться, но колонка устойчива к этому случаю).
+
+Линковка не модифицирует trades_df на «горячем» пути — только при export. Это важно: filter_diagnostics в BacktestResult не зависит от того, делаем ли мы export, и golden tests in-memory snapshots (#10/#11/#12) проходят даже когда экспорт-пакет не запущен.
+
+Spec reference: Appendix A v1.1 §13, §17
+
+---
+
+## 10. Test matrix (Phase 2)
+
+Ниже legacy-only matrix для Phase 2 v0.5 (audit-fix expanded: #1-#25 — оригинальная legacy-only matrix v0.4; #26-#30 — добавлены v0.5: warmup parametric, namespace resolution, deterministic XLSX через нормализованное сравнение, static grep regression gate, trigger reconstruction). Suggested локация: donor TESTER/tests/ (или tests/ в Mode C, рядом с wf_grid/tests/test_wp*_zigzag*.py).
+
+| # | Категория | Тест | Файл | Spec ref |
+|---|---|---|---|---|
+| 1 | Smoke | импорт donor TESTER/... (или wrapper модулей в Mode C) после добавления filter wiring | test_phase2_tester_import_smoke.py | §17 |
+| 2 | Disabled parity | trade_filter отсутствует -> bit-identical baseline (positions, returns, equity, trades, metrics, exports) для legacy; equal_blocks workbook также не меняется как disabled regression guard | test_phase2_tester_disabled_baseline.py | §11.1, §17.1.1 |
+| 3 | Disabled parity | trade_filter.enabled=false -> bit-identical baseline для legacy и equal_blocks disabled branch | test_phase2_tester_disabled_enabled_false.py | §11.1, §17.1.1 |
+| 4 | Config | unknown key / invalid type / percent string / lifecycle wrong enum / both triggers off / numeric+explicit-quantile reject => ConfigError до запуска backtest | test_phase2_tester_config_validation.py | §11, §11.1..§11.3, §17.2.3 |
+| 5 | Engine integration legacy | run_period / run_all_periods enabled: positions меняются ZigZag FSM до calculate_returns | test_phase2_tester_legacy_filter_before_returns.py | §10, §17.1.24 |
+| 6 | Equal-blocks enabled gate | `segmentation.mode=equal_blocks` + `trade_filter.enabled=true` -> ConfigError до build_zigzag_global_stats / run_equal_blocks / export | test_phase2_tester_equal_blocks_filter_rejected.py | §11, §16 |
+| 7 | No post-filtering | extract_trades всегда вызывается с filtered_positions; нет post-extract_trades deletion of trade rows | test_phase2_tester_no_post_filtering.py | §10, §16 |
+| 8 | Close-only invariance | enabled legacy: искусственно искажённые high/low (например high=close*10, low=0) дают bit-identical positions / filter_diagnostics | test_phase2_tester_close_only_invariance.py | §3.4, §17.1.3 |
+| 9 | Global stats reuse | build_zigzag_global_stats вызвана один раз на full dataset; те же stats используются всеми legacy periods; global_median не пересчитывается per-period | test_phase2_tester_global_stats_reuse.py | §12 |
+| 10 | Legacy diagnostics align | для каждого period result len(filter_diagnostics[k]) == len(positions) | test_phase2_tester_legacy_diagnostics_length.py | §13 |
+| 11 | Legacy summary counters sanity | для каждого period проверяются ВСЕ шесть инвариантов §3.3.2: (1) passed+blocked==raw_st_flips; (2) sum(blocked_*)==blocked_entry_signals; (3) lifecycle_starts == count(state_arr transitions WAIT->FREEZE); (4) median_stop_triggered == sum(filter_diagnostics["median_stop_triggered"]); (5) exits_opposite_flip == count(trade rows where exit_reason=="filter_stopping_opposite_flip"); (6) sum(bars_in_state.*) == len(filter_diagnostics["trade_filter_state"]) == len(positions) | test_phase2_tester_legacy_summary_counters.py | §13, §3.3.2 |
+| 12 | Trade diagnostics | legacy trade rows получают корректные entry_filter_state / entry_trigger_source / exit_reason | test_phase2_tester_trade_diagnostics_attachment.py | §13, §17 |
+| 13 | OPEN_TO_OPEN indexing pinned | entry_signal_idx = max(entry_index-1, 0), exit_signal_idx = max(exit_index-1, 0); ST_STOPPING на decision bar даёт filter_stopping_opposite_flip даже если execution bar уже OFF; явный edge-case `exit_index >= len(positions)-1` -> exit_reason="pending_open_trade_at_end" БЕЗ exit lookup (audit-fix v0.5; см. §4.4 формулу с defensive `>=`) | test_phase2_tester_indexing_open_to_open.py | §10, §15.4 |
+| 14 | trade_mode narrowing | trade_mode=long: short flip в WAIT_FIRST_ST_FLIP пропускается; следующий long flip открывает LONG. trade_mode=short: симметрично | test_phase2_tester_trade_mode_narrowing.py | §4.2, §9, §17.1.11, §17.1.12 |
+| 15 | ST_STOPPING semantics | в ST_STOPPING новые entries запрещены; открытая позиция закрывается на ближайшем обратном ST flip; 0 -> ±1 не закрывает | test_phase2_tester_stopping_semantics.py | §4.5, §15.7, §17.1.21, §17.1.22 |
+| 16 | Signals semantics | Signals лист в legacy enabled run: filter columns присутствуют, raw ST flip без filter approval помечен entry_blocked_*; disabled run — bit-identical baseline без filter columns | test_phase2_tester_signals_filter_decisions.py | §3.3, §10, §13 |
+| 17 | Legacy export disabled parity (golden) | result_legacy.xlsx disabled run bit-identical baseline; нет filter columns; column order pinned | test_phase2_tester_legacy_export_disabled_golden.py | §11.1, §17.1.1 |
+| 18 | Legacy export enabled preservation (golden) | result_legacy.xlsx enabled run: filter columns в фиксированном порядке после canonical donor columns; ни одна не дропнута; FilterDiagnostics_100 лист появляется при флаге, отсутствует без флага | test_phase2_tester_legacy_export_enabled_golden.py | §13 |
+| 19 | Equal-blocks disabled parity (golden) | result_equal_blocks.xlsx disabled run bit-identical baseline; нет filter columns / new sheets | test_phase2_tester_equal_blocks_disabled_golden.py | §11.1, §17.1.1 |
+| 20 | Empty-trade enabled legacy run | enabled legacy run с конфигурацией, при которой 0 сделок: trade sheets пустые, но c корректными headers (включая filter columns); summary блок фильтра не пустой | test_phase2_tester_empty_trades_enabled.py | §13, §17 |
+| 21 | CLI compatibility | run_batch_tester.py и cli/tester.py с disabled config работают как раньше (current config_tester.yaml без блока trade_filter) | test_phase2_tester_cli_backward_compat.py | §11.1, §17.1.1 |
+| 22 | Init failure | enabled config + insufficient legs / NaN global_median / NaN materialized threshold / no confirmed legs => ConfigError до запуска любого backtest | test_phase2_tester_global_stats_init_failure.py | §12.3 |
+| 23 | Determinism | два последовательных legacy batch-run на одном CSV+config дают bit-identical XLSX (включая ordering, summary, diagnostics) | test_phase2_tester_determinism.py | §16 |
+| 24 | Mode-rejection gate | trade_filter.type=zigzag_st_mode передан в каждый «не свой» CLI / pipeline (optimizer / single-period backtest вне tester wiring) -> ConfigError с whitelist {wf_grid, tester}; tester equal_blocks enabled -> ConfigError; WF Grid и Tester legacy — accept | test_phase2_tester_mode_rejection_gate.py | §5.5, §11.1 |
+| 25 | filter_diagnostics keyset/dtype contract (spec §13) | для enabled legacy run строгое равенство keyset (audit-fix v0.5): `set(filter_diagnostics.keys()) == EXPECTED_KEYSET`, где EXPECTED_KEYSET = 17 spec §13 ключей (§3.3.1) + 2 служебных (`trade_filter_state_code`, `st_flip_dir`) = 19 ключей ровно. Проверки: (a) **set equality** (НЕ subset), (b) shape == (len(positions),) для каждого; (c) dtype per §3.3.4; (d) values из spec enum-whitelist для `trade_filter_trigger_source` и `filter_block_reason`; (e) mutual-exclusion: disabled run -> `filter_diagnostics is None` И `filter_diagnostics_summary is None`; (f) regression-gate: в enabled-run dict отсутствуют 2.0-TESTER ключи (`mode`, `thresholds`, `counters`, `allow_entry`, `filtered_reason`, `zz_st_armed`, `zz_st_locked_*`, etc.) | test_phase2_tester_diagnostics_dtype_contract.py | §3.3.1, §3.3.3, §3.3.4, spec v1.1 §13 |
+| 26 | Warmup × filter (parametric) | enabled legacy run параметризован по `warmup_period in [0, 50, 200]`. Проверка: FSM запускается с bar 0 независимо от warmup (`trade_filter_enabled[0] == 1`); ratio metrics рассчитаны после warmup (canonical donor поведение); filter_diagnostics длина == len(positions) для каждого warmup variant; bit-identical positions/trades между runs с одинаковым warmup. Защищает от случайного сдвига FSM на `effective_warmup` (что нарушит §15.1) | test_phase2_tester_warmup_filter.py | §15.1, §17.6 |
+| 27 | Mode-C namespace resolution gate | runtime assert: `import supertrend_optimizer.engine.run as r; assert "donor TESTER" not in r.__file__` (или эквивалентная проверка, что bare `from supertrend_optimizer....` resolves в `donor/`, а не в `donor TESTER/`). Без этого Mode C не verified — stale engine может молча всплыть от порядка sys.path | test_phase2_tester_namespace_resolution.py | §3.1, §13 |
+| 28 | Deterministic XLSX (normalized comparison) | два последовательных legacy batch-run на одном CSV+config дают равные XLSX в **нормализованном** сравнении: sheet names list, sheet content (cell values, dtypes), column orders, formulas, named styles. Сравнение НЕ byte-identical (zip metadata / openpyxl version нюансы могут отличаться); используется openpyxl-loader + structured diff. Покрывает legacy disabled и enabled paths | test_phase2_tester_determinism_normalized.py | §16 |
+| 29 | Static grep regression gate | grep по `donor TESTER/**/*.py`: запретительный список = `'allow_entry'`, `'filtered_reason'`, `'zz_st_armed'`, `'zz_st_locked_'`, `'zz_st_expired_'`, `'zz_st_regime_'`; запрет на старое имя функции `compute_zigzag_global_stats`; запрет на 7-tuple unpack `run_backtest_fast`; запрет на `CLOSE_TO_CLOSE` в tester paths. Любое совпадение -> test fail с file:line. Защита от случайного reintroduction 2.0-TESTER keyset / stale engine references | test_phase2_tester_static_grep_gate.py | §3.3, §13, §14 WP-T3 |
+| 30 | ZigZag_Trigger_Events reconstruction | для enabled legacy run: для каждого `t` где `filter_diagnostics["trade_filter_trigger_source"][t] != "none"` верно `state_arr[t-1] in {OFF}` ИЛИ `t == 0` (см. §9.2.1 формулу). Обратное: для каждого `t` где state-transition `OFF -> non-OFF` верно `trigger_source[t] != "none"` (если переход — реальный trigger, а не direct OFF→OFF stuck). Покрывает active donor invariant из `zigzag_st_filter.py:1301` | test_phase2_tester_trigger_reconstruction.py | §9.2.1, spec §13, §15.3 |
+
+Spec reference: Appendix A v1.1 §17, §18
+
+---
+
+## 11. Disabled-path rollback / parity strategy
+
+1. Default value trade_filter.enabled = false (или блок отсутствует) во всех shipped configs (config_tester.yaml).
+2. Phase 2 hard contract: disabled run производит byte-identical XLSX с baseline (snapshot pre-Phase-2). Это checking baseline workbook capture перед началом любых правок Phase 2 (analog WP1 в Phase 1):
+   - donor TESTER/tests/baselines/result_legacy.baseline.xlsx
+   - donor TESTER/tests/baselines/result_equal_blocks.baseline.xlsx
+3. Golden tests (#17, #19) сравнивают полный XLSX (sheet names, column orders, cell values, formulas/formatting) с baseline: #17 legacy disabled, #19 equal_blocks disabled regression guard.
+4. Любая регрессия в disabled-path = блокирующий incident; rollback-policy: revert последнего PR до зелёного baseline.
+5. Rollback в production: переключить trade_filter.enabled на false (или удалить блок). Никаких side-effects не остаётся (config-only включение).
+
+Spec reference: Appendix A v1.1 §11, §11.1, §17.1, §18
+
+---
+
+## 12. Acceptance gates
+
+План считается успешно реализованным, когда:
+
+1. Appendix A v1.1 приложен; каждый work-package содержит Spec reference.
+2. Disabled-path bit-identical baseline по обоим workbooks (legacy + equal_blocks), всем sheet'ам, всем metrics, signals, false-start, trades, и dimensional invariants.
+3. Все legacy-only тесты #1–#30 зелёные (см. §10; audit-fix v0.5 расширил matrix с 25 до 30 тестов).
+4. Все functional + technical критерии Appendix A v1.1 §17 проходят на тестере там, где они применимы к legacy path. OOS/equal_blocks-specific пункты out of scope v0.4.
+5. build_zigzag_global_stats(...) вызвана один раз на full dataset (CLI / batch); не пересчитывается per-period.
+6. Init-failure (Appendix A §12.3) фиксируется до запуска backtest; нет частично-материализованных stats.
+7. extract_trades сигнатура не меняется; trade-level diagnostics приклеиваются post-extract_trades через attach_trade_filter_diagnostics(...).
+8. BacktestResult.filter_diagnostics length-инвариант (len(arr) == len(positions)) выполнен после early-exit truncation — даже если в тестере early_exit_enabled=False hardcoded.
+9. Close-only ZigZag: проверка наследуется из Phase 1 (Mode C — единственный путь, см. §3.1; нет тестерной копии zigzag_st_filter.py) + invariance unit gate (#8 матрицы).
+10. Trade-level OPEN_TO_OPEN indexing pinned для legacy unit-тестом (#13).
+11. ST_STOPPING exit-only по обратному ST flip; 0 -> ±1 не открывает в WAIT и не закрывает в STOPPING; same-bar trigger + allowed flip -> entry на t+1.
+12. Signals лист legacy enabled run различает raw ST flips и filter decisions; disabled run — без filter columns, bit-identical baseline.
+13. Legacy enabled/disabled XLSX golden tests (#17–#18) зелёные; equal_blocks disabled golden (#19) зелёный; enabled equal_blocks reject gate (#6) зелёный.
+14. Empty-trade enabled legacy run даёт корректные headers и непустой summary блок фильтра (#20).
+15. run_batch_tester.py и CLI single-run backward-compatible с current config_tester.yaml без блока trade_filter (#21).
+16. Mode decision §3.1 зафиксирован как Mode C (audit-fix v0.3). Mode C namespace strategy зафиксирована owner-approved variant (b)+(c) (v0.5.1; §15 #9): hard-delete duplicates + runtime import-origin assert (#27); rename и PYTHONPATH-only отозваны. Все §15 #1-#9 закрыты owner sign-off — план готов к старту WP-T0.
+17. Phase 1 поведение WF Grid не задето — отдельный smoke-test (wf_grid/tests/...) проходит без изменений.
+18. (Audit-fix v0.5) Cross-source sanity инварианты §3.3.2 (#11) зелёные: passed+blocked == raw_st_flips, sum(blocked_*) == blocked_entry_signals, lifecycle_starts ↔ state_arr transitions, median_stop_triggered ↔ bar-level mask sum, exits_opposite_flip ↔ trade rows count, sum(bars_in_state) == len(positions).
+19. (Audit-fix v0.5) Namespace resolution gate (#27) и static grep regression gate (#29) зелёные; `docs/wp_t3_tester_dedup_log.md` committed.
+20. (Audit-fix v0.5) Trigger reconstruction (#30) зелёный: для каждого `t` где `trigger_source != "none"` верно `state_arr[t-1] == OFF` (или `t == 0`); `confirmed_legs_since_start` delta heuristic не используется.
+21. (Audit-fix v0.5) Deterministic XLSX через нормализованное сравнение (#28) зелёный; byte-identical across OS НЕ требуется.
+22. (Audit-fix v0.5) Warmup × filter parametric (#26): FSM запускается с bar 0 для warmup_period in [0, 50, 200].
+
+Spec reference: Appendix A v1.1 §17, §18
+
+---
+
+## 13. File impact table
+
+Контекст (audit-fix v0.3): Mode C — единственный жизнеспособный (см. §3.1). Поэтому строки про `donor TESTER/supertrend_optimizer/{engine,core}/...` в режиме «sync copy» отозваны: эти файлы будут либо удалены, либо превращены в shim'ы `from supertrend_optimizer.engine.* import ...`. Основная работа Phase 2 — wiring tester (config, runner, signals, excel_tester) + verification active donor engine.
+
+| File | Change | Behavior change | Disabled-path impact |
+|---|---|---|---|
+| donor TESTER/config_tester.yaml | Добавить опциональный блок trade_filter (commented disabled template) | Документирует контракт фильтра | None (block отсутствует) |
+| donor TESTER/run_batch_tester.py | Импорт build_zigzag_global_stats; reject `equal_blocks + enabled`; вычисление zigzag_global_stats=build_zigzag_global_stats(close, cfg.trade_filter) после validate_ohlc_data только для legacy enabled; передача trade_filter_config и zigzag_global_stats в run_all_periods | Materializes stats once per legacy batch run | cfg.trade_filter is None => stats=None, behavior unchanged |
+| donor TESTER/supertrend_optimizer/cli/tester.py | load_tester_config(...) парсит и валидирует trade_filter (импорт TradeFilter* + _validate_trade_filter, см. §5.1; НЕ load_grid_config); merge_cli_and_config(...) прокидывает trade_filter в return dict; run_backtest(...) reject'ит equal_blocks enabled, строит zigzag_global_stats и передаёт в legacy runner | strict schema reject unknown keys; init-failure до legacy backtest | absent block => no-op |
+| **donor/supertrend_optimizer/core/trade_filter_config.py** | **NEW file (единственное разрешённое изменение active donor, owner decision v0.5.1 §15 #1, audit-fix v0.5.1)**: `TradeFilterConfig`, `TradeFilterZigZagConfig`, `TradeFilterTriggersConfig`, `TradeFilterLifecycleConfig`, `TradeFilterDiagnosticsConfig`, `TradeFilterTriggerToggleConfig` dataclass'ы + `validate_trade_filter(tf, errors, raw_user_keys, caller_pipeline=None)` функция (адаптация из `wf_grid/config/loader.py:_validate_trade_filter`). После создания — WP-T2 step 0b/0c переписывает wf_grid re-export | New file; Phase 1 WF Grid engine не затронут | None (shared module, disabled tester path не использует) |
+| **wf_grid/config/schema.py** | **WP-T2 prep step 0b**: `TradeFilter*` dataclass'ы заменяются на re-export из `supertrend_optimizer.core.trade_filter_config`. Файл становится shim'ом | API backward-compatible (re-export) | Phase 1 WF Grid тесты без изменений (gate WP-T2 step 0c) |
+| **wf_grid/config/loader.py** | **WP-T2 prep step 0b**: `_validate_trade_filter` заменяется на вызов/re-export из `supertrend_optimizer.core.trade_filter_config.validate_trade_filter`. Файл становится shim'ом | API backward-compatible | Phase 1 WF Grid тесты без изменений |
+| donor TESTER/supertrend_optimizer/utils/config.py | Хелпер `_default_trade_filter_cfg()` — нормализатор отсутствующего блока в `TradeFilterConfig(enabled=False)`. Step реализуется в WP-T2 (audit-fix v0.5: ранее помечено как "Опционально"; теперь обязательно для consistent disabled-path normalization) | New helper | None |
+| donor TESTER/supertrend_optimizer/testing/runner.py | run_period, run_all_periods принимают trade_filter_config, zigzag_global_stats, global_offset; пробрасывают в run_single_backtest; PeriodResult получает filter_diagnostics + filter_diagnostics_summary; run_equal_blocks fail-fast при enabled filter и остаётся unchanged при disabled | FSM строит filtered positions per legacy slice (через active donor) | defaults None => behavior unchanged |
+| donor TESTER/supertrend_optimizer/engine/run.py | ОТОЗВАНО (Mode A). Файл удаляется ИЛИ становится shim: `from supertrend_optimizer.engine.run import run_single_backtest`. Engine integration уже в active donor (run.py:40–65) | n/a | n/a |
+| donor TESTER/supertrend_optimizer/engine/result.py | ОТОЗВАНО (Mode A). Shim или удаление. Active donor (result.py:53–197) уже содержит filter_diagnostics field + length-invariant | n/a | n/a |
+| donor TESTER/supertrend_optimizer/core/backtest.py | ОТОЗВАНО (Mode A). Shim или удаление. Active donor (backtest.py:300–415) уже содержит RawBacktestArtifacts + filter integration + FSM call | n/a | n/a |
+| donor TESTER/supertrend_optimizer/core/zigzag_st_filter.py | ОТОЗВАНО (Mode A). Active donor zigzag_st_filter.py:611 (build_zigzag_global_stats), :1100 (apply), :1479–1500 (spec §13 keyset emit), :1514 (attach_trade_filter_diagnostics) — единственный источник | n/a | n/a |
+| donor TESTER/supertrend_optimizer/testing/signal_events.py | Новый optional param filter_diagnostics; добавление 4 columns; lookup на signal_bar_index. Цикл итерации и `prev == 0` skip НЕ меняются (audit-fix v0.3, см. §8.2) | Signals sheet shows filter decisions | filter_diagnostics=None => unchanged |
+| donor TESTER/supertrend_optimizer/io/excel_tester.py | Расширение TRADES_DISPLAY_NAMES, SIGNALS_DISPLAY_NAMES, FALSE_START_COLUMNS; conditional inclusion filter columns only in legacy workbook; new sheet writers FilterDiagnostics_100, ZigZag_Trigger_Events, filters_summary; источник данных для summary — `filter_diagnostics_summary`, для bar-level — `filter_diagnostics` (§9.2) | Legacy XLSX export carries diagnostics when enabled | disabled => no new columns / no new sheets |
+| donor TESTER/tests/test_phase2_*.py | Новая matrix (см. §10) — 30 тестов (audit-fix v0.5) | New tests | None |
+| donor TESTER/tests/baselines/*.xlsx | Capture pre-Phase-2 disabled XLSX | Reference for golden tests | None |
+| donor TESTER/tests/baselines/README.md | Reference dataset metadata: CSV path, sha256, row count, datetime span (audit-fix v0.5; обязательно для воспроизводимости golden tests) | New file | None |
+| docs/wp_t3_tester_dedup_log.md | WP-T3 deliverable (audit-fix v0.5): file-by-file diff log по `donor TESTER/supertrend_optimizer/{engine,core}/...` — для каждого файла указано: deleted / converted-to-shim / unchanged-no-callers; reviewer-friendly формат | New file | None |
+| wf_grid/tests/test_phase2_tester_independence.py (опц.) | Smoke: WF Grid поведение не изменилось от Phase 2 правок | Defensive test | None |
+
+Phase 2 НЕ модифицирует engine/core/result файлы `donor/supertrend_optimizer/` (active donor engine остаётся stable). **Единственное разрешённое исключение (owner decision v0.5.1 §15 #1, audit-fix v0.5.1)**: prep-refactor WP-T2 steps 0a-0d создаёт новый модуль `donor/supertrend_optimizer/core/trade_filter_config.py` (перенос `TradeFilter*` dataclass'ов и `_validate_trade_filter` из `wf_grid`) и делает `wf_grid/config/schema.py` + `wf_grid/config/loader.py` re-export shim'ами. Это аддитивный prep-refactor (новый файл + переписывание импортов в wf_grid); математика engine не меняется; Phase 1 WF Grid тесты обязаны пройти без изменений (gate в WP-T2 step 0c-0d). Все остальные файлы в `donor/supertrend_optimizer/` — LOCKED, Phase 2 их не трогает. Если в `donor TESTER/supertrend_optimizer/` сейчас лежат stale копии engine-файлов, WP-T3 решает их судьбу (hard-delete vs shim) — без переписывания математики.
+
+---
+
+## 14. Work packages (Phase 2)
+
+### WP-T0. Spec lock + plan approval
+
+Goal. Зафиксировать Phase 2 plan и Appendix A v1.1 как двойной anchor.
+
+Steps.
+1. Mode C зафиксирован этим планом (audit-fix v0.3); owner approval по A / B / C больше не требуется.
+2. ~~Approval owner на active open questions §15.~~ Закрыто v0.5.1: все §15 #1-#9 переведены в "Закрытые вопросы" (см. шапку: Owner decisions on active questions §15). Pre-implementation gate: ни одного active question в §15.
+3. Plan published as docs/zigzag_st_tester_phase2_implementation_plan.txt v0.5.1.
+
+Tests / gates. Plan review: каждый work-package содержит Spec reference. Owner sign-off на §15 #1-#9 зафиксирован в шапке плана v0.5.1. WP-T0 закрывается, как только plan v0.5.1 published И owner-decisions-таблица в шапке affirmed.
+
+Spec reference: Appendix A v1.1 §0, §11, §18
+
+### WP-T1. Tester baseline capture
+
+Goal. Снимок текущего поведения тестера до любых правок Phase 2.
+
+Steps.
+1. Запустить run_batch_tester.py на reference dataset с current config_tester.yaml (без trade_filter).
+2. Сохранить result_legacy.xlsx и result_equal_blocks.xlsx в donor TESTER/tests/baselines/.
+3. Сохранить in-memory snapshots: BacktestResult.metrics, trades_df, equity_curve, positions, signals_df.
+4. Reference dataset metadata (CSV path, hash, row count, datetime span).
+
+Tests / gates. Re-run disabled path (через Phase 2 wiring) => bit-identical baseline во всех артефактах.
+
+Spec reference: Appendix A v1.1 §11.1, §17.1.1, §18
+
+### WP-T2. Tester config schema + validation
+
+Goal. Strict tester support для trade_filter без изменения disabled поведения.
+
+Pre-requisite refactor (owner-approved variant (a), v0.5.1; см. §5.1):
+- 0a. Перенести `TradeFilterConfig`, `TradeFilterZigZagConfig`, `TradeFilterTriggersConfig`, `TradeFilterLifecycleConfig`, `TradeFilterDiagnosticsConfig`, `TradeFilterTriggerToggleConfig` и `_validate_trade_filter` из `wf_grid/config/schema.py` + `wf_grid/config/loader.py` в новый module `donor/supertrend_optimizer/core/trade_filter_config.py` (с переименованием `_validate_trade_filter` → `validate_trade_filter`). Имена dataclass'ов **не меняются** — wf_grid re-exports their canonical names; см. §5.1 shim pattern.
+- 0b. Переписать `wf_grid.config.schema` / `wf_grid.config.loader` так, чтобы они re-export'или эти символы из active donor module (zero-copy shim).
+- 0c. Убедиться, что Phase 1 WF Grid тесты (`wf_grid/tests/test_wp2_config_trade_filter.py`, `test_wp3_zigzag_global_stats.py`) проходят без изменений (re-export должен быть полностью прозрачным).
+- 0d. Smoke-run: `wf_grid` e2e зелёный — Phase 1 поведение НЕ задето.
+
+Steps.
+1. Импортировать `TradeFilter*` dataclass и `validate_trade_filter` ИСКЛЮЧИТЕЛЬНО из active donor namespace (`from supertrend_optimizer.core.trade_filter_config import ...`); НИКАКИХ импортов из `wf_grid.config.*`; НИКАКИХ копий dataclass'ов в `donor TESTER/`; НИКАКОГО `load_grid_config`.
+2. Расширить cli/tester.py:load_tester_config(...) — парсинг блока trade_filter, allowed-keys set, raw-key presence tracking из Phase 1 plan §6.4.1.
+3. Прокинуть cfg.trade_filter через merge_cli_and_config(...) в final params dict.
+4. Добавить disabled template в config_tester.yaml (commented).
+5. Реализовать validation rules §5.3.
+
+Tests / gates.
+- Unknown key reject.
+- Invalid reversal_threshold reject (None / NaN / 0 / 1 / "0.5%").
+- Both triggers disabled при enabled reject.
+- Wrong lifecycle enums reject.
+- Numeric+explicit-quantile reject через raw YAML presence.
+- enabled=false с type=zigzag_st_mode accept; с другим type reject.
+- segmentation.mode=equal_blocks + trade_filter.enabled=true reject до build_zigzag_global_stats / backtest.
+- freeze_confirmed_legs < local_window accept без warning/error.
+- Disabled run = baseline.
+- Three-case raw presence test (Phase 1 plan §6.4.1).
+
+Spec reference: Appendix A v1.1 §11, §11.1, §11.2, §11.3, §15.6, §17.2
+
+### WP-T3. Verify / reuse active donor engine + import switch
+
+Goal (audit-fix v0.3). НЕ повторно реализовывать engine integration. Active donor (`donor/supertrend_optimizer/...`) уже содержит работающие:
+- `engine/run.py:run_single_backtest(..., trade_filter_config, zigzag_global_stats, global_offset)` (run.py:40–65);
+- `core/backtest.py:run_backtest_fast` -> RawBacktestArtifacts + filter integration (backtest.py:300–415);
+- `core/zigzag_st_filter.py`: build_zigzag_global_stats (line 611), apply (line ~1100), §13 keyset emit (line 1479–1500), attach_trade_filter_diagnostics (line 1514);
+- `engine/result.py:BacktestResult.filter_diagnostics + __post_init__` length-invariant (result.py:53, 189–197).
+
+WP-T3 сводится к ВЕРИФИКАЦИИ + ПЕРЕКЛЮЧЕНИЮ ИМПОРТОВ.
+
+Owner-approved namespace strategy (§15 #9 закрыт v0.5.1): **(b) hard-delete/quarantine stale duplicates + (c) runtime import-origin assert**. Rename `donor TESTER/supertrend_optimizer` -> `..._tester` НЕ выполняется в Phase 2 (слишком большой scope). PYTHONPATH-only без hard-delete тоже отозван.
+
+Steps.
+0. **__init__.py packaging fix (audit-fix v0.5.1 — BLOCKER, выполнить ПЕРВЫМ)**. Обнаружена асимметрия упаковки:
+   - `donor TESTER/supertrend_optimizer/__init__.py` **СУЩЕСТВУЕТ** (regular Python package, `__version__ = "2.0.0"`).
+   - `donor/supertrend_optimizer/__init__.py` **ОТСУТСТВУЕТ** (namespace package по Python 3.3+ implicit rules).
+   Без исправления этой асимметрии стратегия hard-delete **НЕ гарантирует** рабочий fallback в `donor/`: если `supertrend_optimizer` разрезолвился как regular package из `donor TESTER/`, Python ищет sub-modules только внутри него и НЕ опускается в `donor/supertrend_optimizer/` за удалёнными модулями.
+   **Требуемый fix перед hard-delete (step 1)**:
+   - 0a. Создать `donor/supertrend_optimizer/__init__.py` с минимальным содержимым (например, `"""SuperTrend Optimizer engine package."""`). Это делает `donor/supertrend_optimizer/` regular package.
+   - 0b. Обеспечить `donor/` **перед** `donor TESTER/` во всех sys.path-конфигурациях: pytest `conftest.py` (корневой), `pyproject.toml` / `setup.cfg` testpaths / pythonpath, CI entrypoints. Порядок должен быть explicit, а не implicit.
+   - 0c. После 0a+0b — запустить быстрый smoke `python -c "import supertrend_optimizer; print(supertrend_optimizer.__file__)"` и убедиться, что путь указывает на `donor/supertrend_optimizer/__init__.py`, а НЕ на `donor TESTER/...`.
+   - 0d. **Расширить runtime assert (step 5 ниже)**: проверять `supertrend_optimizer.__file__` (top-level package) дополнительно к `supertrend_optimizer.engine.run.__file__`. Оба должны резолвиться из `donor/`.
+   - 0e. Только после прохождения 0a-0d — выполнять hard-delete/shim в steps 1-3.
+   Failure mode без этого fix: hard-delete stale engine файлов из `donor TESTER/` приведёт к `ModuleNotFoundError` при runtime, т.к. regular package из `donor TESTER/` ищет модули только в своём dir.
+1. Audit `donor TESTER/supertrend_optimizer/`: какие файлы дублируют active donor (`engine/run.py`, `engine/result.py`, `core/backtest.py`, `core/zigzag_st_filter.py`, `core/trades.py`, `core/supertrend.py` etc.). Зафиксировать каждый дубликат с diff против active donor — для понимания, насколько они расходятся (важно для reviewer'а, чтобы убедиться, что ничего не теряется при удалении).
+2. **Hard-delete или shim-конвертация** (owner decision v0.5.1):
+   - если файл имеет ВНЕШНИЕ caller'ы из `donor TESTER/.../testing|cli|io|run_batch_tester.py` — конвертировать в shim вида `from supertrend_optimizer.engine.run import run_single_backtest` (zero-copy re-export);
+   - если caller'ов нет — удалить полностью (`git rm`);
+   - решение по каждому файлу фиксируется в `docs/wp_t3_tester_dedup_log.md` (DELETED / CONVERTED_TO_SHIM / UNCHANGED_NO_CALLERS).
+   - Quarantine alternative: если файл имеет внешние caller'ы, но shim-конверсия не тривиальна — перенести в `donor TESTER/_quarantine/...` и зафиксировать как "to be removed in follow-up". Это последний resort, требует комментария owner в diff log.
+3. Перевести `testing/runner.py`, `cli/tester.py`, `testing/signal_events.py`, `io/excel_tester.py`, `run_batch_tester.py` на импорты из active donor namespace (`supertrend_optimizer.engine.run`, `supertrend_optimizer.engine.result`, `supertrend_optimizer.core.backtest`, `supertrend_optimizer.core.zigzag_st_filter`).
+4. Grep-gate verification (расширен audit-fix v0.5; реализуется как тест #29):
+   - ни одного stale 7-tuple unpack `run_backtest_fast` в `donor TESTER/**`;
+   - ни одного импорта `compute_zigzag_global_stats` (старое имя) — только `build_zigzag_global_stats`;
+   - ни одного `CLOSE_TO_CLOSE` reference в `donor TESTER/**` (закрыто §15 #2);
+   - ни одной `from donor TESTER.supertrend_optimizer.{engine,core}` строки, кроме shim'ов;
+   - **Audit-fix v0.5 — 2.0-TESTER keyset literals** в writer-paths `BacktestResult.filter_diagnostics` / `PeriodResult.filter_diagnostics`: запретительный список = `'allow_entry'`, `'filtered_reason'`, `'zz_st_armed'`, `'zz_st_locked_'`, `'zz_st_expired_'`, `'zz_st_regime_'`. Любое совпадение -> WP-T3 fail.
+5. **Namespace resolution gate (deliverable test #27; owner-approved v0.5.1 как mandatory; расширен audit-fix v0.5.1 WP-T3 step 0d)**: после import-switch session-level runtime assert в `donor TESTER/tests/conftest.py` проверяет ОБА уровня:
+   ```python
+   import supertrend_optimizer as _so_pkg
+   import supertrend_optimizer.engine.run as _so_run
+   from pathlib import Path
+   _donor_root = Path("<abspath_to_donor/>")
+   assert _donor_root in Path(_so_pkg.__file__).parents, f"supertrend_optimizer top-level resolved from wrong location: {_so_pkg.__file__}"
+   assert _donor_root in Path(_so_run.__file__).parents, f"supertrend_optimizer.engine.run resolved from wrong location: {_so_run.__file__}"
+   ```
+   Необходимость проверки top-level `__file__` (step 0d): если `donor TESTER/supertrend_optimizer/__init__.py` резолвится первым, Python создаст пакет в `donor TESTER/`; sub-module проверка engine.run окажется достаточной ТОЛЬКО если stale `engine/run.py` уже удалён — но до удаления assert на engine.run ничего не поймает. Обе проверки вместе — защищают независимо от порядка шагов WP-T3.
+6. **Audit-fix v0.5 — WP-T3 deliverable**: `docs/wp_t3_tester_dedup_log.md` с file-by-file diff log: для каждого дубликата в `donor TESTER/supertrend_optimizer/{engine,core}/` записывается решение — `DELETED` / `CONVERTED_TO_SHIM` / `UNCHANGED_NO_CALLERS` + краткое обоснование. Reviewer-friendly формат: один table row на файл. Без этого deliverable WP-T3 не закрывается.
+7. Smoke-run: WF Grid e2e зелёный (active donor не задет — Phase 2 в нём НИЧЕГО не меняет).
+
+Tests / gates.
+- Tester import smoke (test #1).
+- Disabled run bit-identical baseline (#2, #3, #17, #19).
+- В enabled path `generate_positions` не вызывается на engine-side (покрывается no-post-filtering / active donor integration checks).
+- BacktestResult.filter_diagnostics length-invariant (даже при early_exit_enabled=False) — наследуется из result.py:189–197.
+- WF Grid regression smoke (#-T-independence из §13 file impact table).
+- **Audit-fix v0.5**: namespace resolution gate (#27); static grep regression gate (#29) — оба добавлены к WP-T3 как hard gates; deliverable `wp_t3_tester_dedup_log.md` committed.
+
+Spec reference: Appendix A v1.1 §10, §13, §16, §17.1, §17.6
+
+### WP-T4. Tester runner integration (legacy)
+
+Goal. run_period и run_all_periods принимают config / stats / global_offset и пробрасывают в engine.
+
+Steps.
+1. Добавить новые optional params в run_period(...) и run_all_periods(...) (defaults None/0).
+2. В run_all_periods(...): если trade_filter_config.enabled and zigzag_global_stats is None -> материализовать stats из переданного df (full-dataset for this call).
+3. Per-period вычислять period_global_offset = len(df) - n_period.
+4. Передавать stats / config / offset в run_period -> run_single_backtest.
+5. Расширить PeriodResult: optional filter_diagnostics, filter_diagnostics_summary.
+
+Tests / gates.
+- Test #5 (filter before returns).
+- Test #9 (stats reuse).
+- Test #10 (legacy diagnostics length).
+- Test #14 (trade_mode narrowing).
+
+Spec reference: Appendix A v1.1 §10, §12, §13, §17
+
+### WP-T5. Equal-blocks enabled-filter rejection gate
+
+Goal. Явно запретить enabled ZigZag-фильтр в `segmentation.mode=equal_blocks`, сохранив текущий disabled equal_blocks baseline.
+
+Steps.
+1. В cli/tester.py и run_batch_tester.py после merge config добавить fail-fast gate: `segmentation.mode == "equal_blocks"` AND `trade_filter.enabled` -> ConfigError.
+2. В run_equal_blocks(...) добавить defensive guard для direct calls: enabled trade_filter_config -> ConfigError.
+3. Убедиться, что disabled equal_blocks path не получает новых filter columns / sheets / diagnostics fields.
+4. Не строить `build_zigzag_global_stats` для rejected equal_blocks enabled config.
+
+Tests / gates.
+- Test #6 (equal_blocks enabled rejected).
+- Test #19 (equal_blocks disabled export parity).
+
+Spec reference: Appendix A v1.1 §11, §16, §17.1
+
+### WP-T6. Signal events filter awareness
+
+Goal. build_signal_events различает raw ST flips и filter decisions.
+
+Steps.
+1. Добавить optional filter_diagnostics parameter (см. §8.2).
+2. При filter_diagnostics is not None: добавить 4 columns (filter_state_at_signal, filter_decision, filter_block_reason, filter_trigger_source).
+3. В cli/tester.py:run_backtest и run_batch_tester.py передавать results[0].filter_diagnostics как 5-й аргумент в build_signal_events.
+4. Empty-result case: headers с filter columns присутствуют, нуль строк.
+
+Tests / gates.
+- Test #16 (signals semantics).
+- Test #20 (empty-trade enabled run; signals может быть непустым даже при 0 trades).
+
+Spec reference: Appendix A v1.1 §3.3, §10, §13, §15.4
+
+### WP-T7. Excel export integration (legacy)
+
+Goal. Conditional inclusion filter columns + new optional sheets, deterministic order.
+
+Steps.
+1. Расширить display name maps TRADES_DISPLAY_NAMES, SIGNALS_DISPLAY_NAMES.
+2. Реализовать helper _append_filter_columns_to_trades(df, filter_diagnostics, enabled) с правилами Phase 1 plan §10.6.1.
+3. Добавить summary-блок Filter Diagnostics Summary в legacy Summary лист. Только при enabled.
+4. Реализовать optional sheet writer FilterDiagnostics_100 (legacy). Gating: diagnostics.export_state_columns: true AND enabled.
+5. False-start: добавить optional column Filter Block Reason at Signal (gated тем же флагом).
+6. Deterministic column order pinned snapshot tests.
+
+Tests / gates.
+- Test #17, #18, #19 (golden tests: legacy disabled/enabled + equal_blocks disabled guard).
+- Test #20 (empty-trade enabled legacy).
+
+Spec reference: Appendix A v1.1 §13, §17
+
+### WP-T8. Test matrix + acceptance
+
+Goal. Реализовать тесты #1–#30 (§10; audit-fix v0.5 расширил matrix с 25 до 30 тестов).
+
+Preconditions (audit-fix v0.5):
+- WP-T1 baseline captured (`donor TESTER/tests/baselines/result_legacy.baseline.xlsx`, `result_equal_blocks.baseline.xlsx`).
+- `donor TESTER/tests/baselines/README.md` зафиксировал reference dataset metadata: CSV path, sha256 hash, row count, datetime span.
+- WP-T3 deliverable `docs/wp_t3_tester_dedup_log.md` committed.
+- WP-T4 / WP-T5 / WP-T6 / WP-T7 завершены.
+
+Steps.
+1. Implement tests #1–#30, run on reference dataset.
+2. Capture golden snapshots для #17/#18/#19 (legacy disabled / legacy enabled / equal_blocks disabled). Snapshots коммитятся в репо как часть PR.
+3. Verify все 30 тестов зелёные на reference dataset.
+4. CI integration: ВСЕ 30 тестов входят в default test selection; ни один не помечен skip / xfail.
+
+Forbidden (audit-fix v0.5):
+- Silent regeneration golden snapshots без owner review. Любое обновление #17/#18/#19 требует явного `--update-golden` флага И owner sign-off в PR description.
+- Skipping тестов на CI окружении (включая Windows). Если platform-specific нюансы (XLSX byte difference и т.п.) — фиксить нормализованным сравнением (#28), не xfail.
+- Публикация WP-T9 rollout до того, как все 30 тестов зелёные.
+
+Tests / gates. Все 30 зелёные на reference dataset; golden snapshots committed; CI configuration не содержит skip-фильтров.
+
+Spec reference: Appendix A v1.1 §17, §18
+
+### WP-T9. Rollout / rollback
+
+Goal. Безопасный rollout под disabled default.
+
+Steps.
+1. trade_filter.enabled=false остаётся default в shipped configs.
+2. Этапы: WP-T0 -> WP-T1 -> WP-T2 -> WP-T3 -> WP-T4 -> WP-T5 -> WP-T6 -> WP-T7 -> WP-T8 -> WP-T9.
+3. Включение фильтра в production только в explicit experiment config после прохождения WP-T8.
+4. Rollback: config flip на enabled=false (или удаление блока).
+
+Tests / gates. WP-T1 baseline restored after every patch on disabled-path; CI baseline parity (#17, #19) зелёные; enabled equal_blocks rejection (#6) зелёный.
+
+Spec reference: Appendix A v1.1 §11, §11.1, §17.1, §18
+
+---
+
+## 15. Risks, open questions, owner approval points
+
+Закрытые вопросы (audit-fix v0.3, v0.5 + owner decisions v0.5.1):
+
+- ~~§3.1 Mode decision~~ — закрыто как Mode C (см. §3.1). Mode A и Mode B отозваны: engine integration уже целиком в active donor (run.py / backtest.py / result.py / zigzag_st_filter.py).
+- ~~CLOSE_TO_CLOSE в donor TESTER/~~ — закрыто как «не сохраняем». Active donor (backtest.py:95–100) отвергает любой execution_model кроме OPEN_TO_OPEN; cli/tester.py больше не принимает `close_to_close`. Phase 2 фиксирует то же самое в тестере; никаких параллельных веток / Mode A copy with adaptation.
+- ~~prepend_warning формула «freeze_confirmed_legs * typical_leg_length_bars»~~ — отозвана (mixed units / wrong dimensional analysis). В v0.3 была заменена causal-confirmed-legs heuristic; в v0.4 весь prepend-warning блок out of scope вместе с enabled equal_blocks integration.
+- ~~§15 #6 — np.quantile method "linear" pinning~~ (audit-fix v0.5) — закрыто. Pinned spec §12.1 lines 475-477 + active donor zigzag_st_filter.py:611. Numpy version pinning — verify-step в CI (через `setup.py` / `requirements.txt` matching между `donor/` и `donor TESTER/`), НЕ owner approval.
+- ~~§15 #5 — equal_blocks enabled-filter scope~~ — закрыто owner direction (TZ v0.4): out of scope Phase 2; reject-gate в WP-T5.
+- ~~ZigZag_Trigger_Events reconstruction формула через `confirmed_legs_since_start` delta~~ (audit-fix v0.5) — отозвана. `confirmed_legs_since_start` — динамический счётчик внутри active lifecycle (`zigzag_st_filter.py:1328`), он не отражает событие запуска контура B. Реальный trigger event marker — `trade_filter_trigger_source[t] != "none"`, который в active donor устанавливается только при `state_at_bar_start == OFF` (zigzag_st_filter.py:1234, 1301), repeated triggers suppressed (spec §15.3). См. §9.2.1 финальную формулу.
+- ~~§15 #1 — Tester schema location~~ (owner decision v0.5.1) — закрыто. Chosen variant (a): shared module под `donor/supertrend_optimizer/core/trade_filter_config.py`. `wf_grid.config` после Phase 2 prep refactor re-export'ит. Тестер импортирует ТОЛЬКО из active donor namespace. Pre-requisite refactor зафиксирован в WP-T2 step 0a-0d. Варианты (b) и (c) отозваны.
+- ~~§15 #2 — Signals sheet renaming~~ (owner decision v0.5.1) — закрыто. Chosen: same sheet `Signals`, NO meta-row, filter columns only. Renaming в `Signals_Filtered` отозван (downstream tool compatibility); meta-row отозван (`pd.read_excel(header=0)` compatibility). См. §8.3 финальную формулировку.
+- ~~§15 #3 — FilterDiagnostics_* granularity~~ (owner decision v0.5.1) — закрыто. Default `FilterDiagnostics_100` (только 100% slice) accepted; материализация для остальных periods — future extension, отдельного config-флага в Phase 2 НЕ вводим.
+- ~~§15 #4 — Min trades behaviour / INVALID_METRIC_VALUE~~ (owner decision v0.5.1) — закрыто. Owner-affirmed: фильтр НЕ вводит "смягчённую" политику метрик. Enabled run, у которого фильтр сократил `num_trades < min_trades_required`, ПРАВИЛЬНО производит ratio metrics = INVALID_METRIC_VALUE. Это not bug, документируется в `docs/zigzag_st_filter.md` (§18 deliverable).
+- ~~§15 #7 — `candidate_trigger_source` в summary~~ (owner decision v0.5.1) — закрыто. Field REQUIRED (не Optional) в `filter_diagnostics_summary["thresholds"]`. Echo "explicit" | "quantile" из ZigZagGlobalStats. Mandatory column в filters_summary sheet (§9.2).
+- ~~§15 #8 — Filter columns position в Signals~~ (owner decision v0.5.1) — закрыто. Position confirmed: «после `Is Reversal`, до `Exec Price`» (§9.5). Golden snapshot #18 capture НЕ требует переснятия.
+- ~~§15 #9 — Mode C namespace strategy~~ (owner decision v0.5.1) — закрыто. Chosen: **(b) hard-delete/quarantine stale duplicates + (c) runtime import-origin assert**. (a) rename отозван (большой scope для Phase 2). PYTHONPATH-only без hard-delete отозван. WP-T3 фиксирует hard-delete как mandatory step; namespace resolution gate (#27) реализуется в `donor TESTER/tests/conftest.py` как session-level assert.
+
+Активные вопросы (требуют owner approval): **НЕТ**. Все §15 #1-#9 закрыты owner sign-off v0.5.1. План готов к старту WP-T0.
+
+Residual risks (audit-fix v0.5; не блокирующие, но требуют осознанной защиты):
+
+- **Namespace collision sys.path-зависимая.** Top-level пакет `supertrend_optimizer` объявлен и в `donor/`, и в `donor TESTER/`. При параллельной разработке dev environment / CI / packaging может молча выбрать stale stub в `donor TESTER/supertrend_optimizer/{engine,core}/`. Mitigation — runtime assert (#27) + grep-gate (#29) + hard-delete duplicates по выбору (b)/(c) выше.
+- **PERIOD_SPLITS hardcoded `0.33` (intentional, not 1/3).** runner.py:72-78 фиксирует tuple. Любая «оптимизация» на `1/3` ломает baseline-bit-identity (#17). Plan implicit-наследует это решение из Phase 1; явный non-goal: «не менять period fractions в Phase 2».
+- **`recalc_trade_metrics` ratio metrics = `INVALID_METRIC_VALUE` при 0 trades (вопрос #4 — ЗАКРЫТ v0.5.1).** Enabled-filter run может агрессивно отфильтровать всё; sharpe/sortino/cagr будут `INVALID_METRIC_VALUE`. Owner decision (v0.5.1 §15): принять текущее поведение — фильтр не вводит отдельную «смягчённую» политику метрик. Residual risk: пользователь может удивиться INVALID в filtered-run отчёте; mitigation — добавить nota bene в Excel export summary sheet (future extension, не Phase 2 scope).
+- **Disabled template в config_tester.yaml — class-of-bugs «accidental enable».** Если пользователь раскомментирует template и оставит `enabled: false`, baseline сохраняется. Если случайно `enabled: true` без обновления `segmentation.mode: legacy` — защита через #6 (rejection gate). Reasoning chain работает, но хрупкий; mitigation — добавить inline comment-warning в template ("changing enabled to true REQUIRES segmentation.mode: legacy").
+- **`run_equal_blocks` defensive guard размещение.** WP-T5 step 2 ставит fail-fast в начало `run_equal_blocks`, ДО slicing loop. Если guard просочится внутрь loop по segment'ам, equal_blocks rejected будет давать частично-проинициализированные segments перед ошибкой; mitigation — explicit acceptance test #6 проверяет, что ConfigError raised ДО первого `extract_segment`-вызова.
+
+Backlog (out of scope Phase 2, фиксируется как future work):
+- `tools/zigzag_st_calibrator.py` — отдельный CLI tool (по образцу C:\2.0 — TESTER `tools/zigzag_calibrator.py`), который запускает только calibration-once (`build_zigzag_global_stats`) и печатает рекомендуемые `candidate_trigger_threshold` / `quantile` / `global_median` + диагностику распределения leg-heights. Полезен в эксперимент-пайплайне для подбора threshold перед длинным backtest. Реализуется отдельным PR;
+- `trade_filter.type=zigzag_st_and_volume` — combo-mode по образцу C:\2.0 — TESTER (collapse priority table). Требует расширения §3.3.3 (mutual-exclusion), §3.3.1 (volume_* ключи в bar-level — ИЛИ в `filter_diagnostics_summary`, что предпочтительнее), §5.3 (validation rules для volume sub-block), §9 (Excel: дополнительные volume-колонки). Out of scope Phase 2;
+- enabled ZigZag-фильтр для equal_blocks workbook (включая SegmentResult diagnostics, FilterDiagnostics_S1, prepend warning, signals sheet) — future work только после отдельного owner approval.
+
+---
+
+## 16. Suggested implementation order
+
+    WP-T0  spec lock + owner approvals (§3.1 закрыт; §15 #1-#4, #7-#9 закрыты v0.5.1)
+       |
+    WP-T1  baseline XLSX capture (disabled run)
+       |
+    WP-T2  pre-requisite refactor: shared TradeFilter* module в active donor (variant a, §5.1);
+           wf_grid -> re-export shim; затем config schema + validation (TradeFilter* import только из active donor, raw-presence, three-case test)
+       |
+    WP-T3  verify / reuse active donor engine + import switch (Mode C)
+       |
+    WP-T4  legacy runner integration (run_period / run_all_periods)
+       |
+    WP-T5  equal_blocks enabled-filter rejection gate
+       |
+    WP-T6  signal events filter awareness (БЕЗ raw_initialization, см. §8.2)
+       |
+    WP-T7  legacy excel export integration (golden snapshots, conditional cols, optional sheets — источник: filter_diagnostics + filter_diagnostics_summary)
+       |
+    WP-T8  full legacy-only test matrix (30 tests, см. §10; audit-fix v0.5 expanded)
+       |
+    WP-T9  rollout / rollback gates
+
+WP-T3 не стартует без WP-T0, WP-T1, WP-T2. WP-T7 не стартует без WP-T6 (signals depend on diagnostics flow). WP-T8 — финальный gate перед WP-T9.
+
+---
+
+## 17. Definition of Done (Phase 2)
+
+План реализован, когда:
+
+1. Appendix A v1.1 приложен; каждый WP-T содержит Spec reference: Appendix A v1.1 §....
+2. Owner sign-off на §15 (все active questions #1-#9) зафиксирован в шапке плана v0.5.1 (блок "Owner decisions on active questions §15"). На момент WP-T8 acceptance в §15 НЕТ ни одного active question.
+3. config_tester.yaml содержит disabled template; CLI и batch принимают enabled config.
+4. Тестер использует один и тот же `zigzag_st_filter.py` / `RawBacktestArtifacts` / `BacktestResult.filter_diagnostics`, что WF Grid Phase 1 (Mode C). Никаких sync-copy / Mode A веток. Namespace strategy реализована owner-approved variant (v0.5.1 §15 #9): hard-delete duplicates + namespace assert (#27); rename НЕ выполнен в Phase 2.
+5. Disabled-path bit-identical baseline для legacy и equal_blocks workbooks (golden tests #17, #19).
+6. Enabled legacy path: filter columns / new sheets present in deterministic order (golden test #18). Enabled equal_blocks config rejected before stats/backtest (#6).
+7. build_zigzag_global_stats(...) материализуется один раз на full dataset; init-failure до backtest.
+8. FSM строит filtered_positions (не post-mask, не post-фильтр trades).
+9. Trade-level diagnostics indexing pinned для OPEN_TO_OPEN (entry + exit) legacy unit-тестом, включая `pending_open_trade_at_end` edge-case (`exit_index >= len(positions) - 1`, audit-fix v0.5 §4.4).
+10. Close-only invariance unit gate зелёный (искажённые high/low не меняют ZigZag-relevant outputs).
+11. ST_STOPPING / WAIT_FIRST_ST_FLIP × trade_mode / same-bar trigger+flip / 0 -> ±1 semantics покрыты тестами на тестере.
+12. Signals лист (legacy enabled) различает raw ST flips и filter decisions; disabled run без filter columns, baseline-bit-identical. Filter columns в Signals layout — единая позиция «после Is Reversal, до Exec Price» (audit-fix v0.5 §9.5; §8.3 переписан как pointer на §9.5). Sheet name `Signals` сохраняется в обоих режимах (owner decision v0.5.1 §15 #2); meta-row и переименование в `Signals_Filtered` отозваны.
+13. Empty-trade enabled run даёт корректные headers и summary блок фильтра (#20).
+14. CLI и batch backward-compatible с current config_tester.yaml без блока trade_filter (#21).
+15. WF Grid Phase 1 e2e не задет.
+16. (Audit-fix v0.5) `filter_diagnostics_summary["counters"]` cross-source sanity invariants зелёные (#11): для всех counters, не только `blocked_*`. `filter_diagnostics_summary["thresholds"]` содержит REQUIRED поле `candidate_trigger_source` ("explicit" | "quantile") — owner decision v0.5.1 §15 #7.
+17. (Audit-fix v0.5) `set(filter_diagnostics.keys()) == EXPECTED_KEYSET` (равенство 19 ключей; #25).
+18. (Audit-fix v0.5) WP-T3 deliverables — `docs/wp_t3_tester_dedup_log.md` committed; namespace resolution gate (#27) зелёный; static grep regression gate (#29) зелёный.
+19. (Audit-fix v0.5) ZigZag_Trigger_Events reconstruction формула (§9.2.1) задокументирована; тест #30 зелёный.
+20. (Audit-fix v0.5) Deterministic XLSX через нормализованное сравнение (#28) зелёный; byte-identical across OS не требуется (zip metadata / openpyxl нюансы допустимы).
+21. (Audit-fix v0.5) `donor TESTER/tests/baselines/README.md` фиксирует reference dataset metadata (CSV path, sha256, row count, datetime span).
+
+---
+
+## 18. Deliverables (per ТЗ docs/tz_phase2_tester_zigzag_filter_plan.txt §8)
+
+1. Этот документ (Phase 2 plan) — docs/zigzag_st_tester_phase2_implementation_plan.txt.
+2. Tester call-graph audit с before/after сигнатурами — §2 + §6.1 + §13.
+3. File impact table — §13.
+4. Config example для disabled и enabled runs — §5.2.
+5. Full test matrix с конкретными именами файлов — §10.
+6. Owner decisions list — §15 + WP-T0.
+7. User-facing summary документ docs/zigzag_st_filter.md (по образцу C:\2.0 — TESTER docs/zigzag_filter.md). Содержит: краткое описание фильтра для конечного пользователя, схему FSM (5 состояний), перечисление YAML-параметров с примерами, перечисление колонок и листов Excel-экспорта, debug-режим (diagnostics.export_state_columns / export_trigger_columns), миграционный гайд (как включить фильтр на существующем config_tester.yaml), список причин блокировки (FILTER_REASON_WHITELIST + расшифровка), краткое описание calibration (build_zigzag_global_stats), ссылку на authoritative spec docs/zigzag_st_trade_filter_spec_v1_1.txt. Этот документ НЕ конкурирует со spec, а служит entry-point для пользователя; spec остаётся source of truth.
+
+Никакого кода фильтра и engine integration в этом deliverable нет — это план, готовый к ручному review и к implementation в отдельных PR.
+
+---
+
+Spec reference: Appendix A v1.1 §0, §10, §11, §12, §13, §16, §17, §18

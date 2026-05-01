@@ -1,0 +1,1034 @@
+================================================================================
+IMPLEMENTATION PLAN v.3 — daily_reset в активный ZigZag-ST-фильтр
+================================================================================
+
+Финальная сводная версия. Закрывает аудиты:
+  - аудит плана v1 (Schema-shim, index plumbing, whitelist drift, FSM exit_reason).
+  - аудит плана v2 (заимствования из donor zigzag/).
+  - аудит плана v2.1 (apply order, TESTER strict keyset, override normalization,
+    validator scope, pandas import, keyword-only vs trailing optional, TESTER summary).
+  - правка §0.14 после v2.2 (синхронизация табличного решения с §6.1).
+
+Дата: 2026-04-30.
+Базовая ветка: активный код в `donor/supertrend_optimizer/` + `wf_grid/`.
+Карантин: `donor zigzag/`, `donor TESTER/` — `donor TESTER/` входит в scope (см. §15),
+`donor zigzag/` — донор для заимствований, в репозитории не меняется.
+
+
+================================================================================
+§0. Решения, фиксируемые до старта реализации
+================================================================================
+
+0.1   Default `trade_filter.zigzag.daily_reset = False`.
+      Acceptance-инвариант «без поля → baseline bit-identical».
+
+0.2   Dataclass-изменения вносятся в shared
+      `donor/supertrend_optimizer/core/trade_filter_config.py`.
+      Single source of truth для Phase 1 (WF Grid) и Phase 2 (TESTER).
+      `wf_grid/config/schema.py` — re-export shim, не трогаем.
+
+0.3   non-monotonic DatetimeIndex + `enabled=true` → ConfigError (fail-closed).
+      Сознательное расхождение с donor zigzag (там warn+fallback).
+      В WF Grid full_index гарантированно монотонен; нарушение = баг данных,
+      должно быть видно сразу.
+
+0.4   non-DatetimeIndex + `enabled=true` → ConfigError.
+      Пользователь явно включил календарную опцию; RangeIndex/IntegerIndex
+      в этом контексте бессмысленны.
+
+0.5   `enabled=False` → helper возвращает np.zeros(n, dtype=bool) ДО любых
+      проверок индекса. Критично для baseline bit-identity и для тестов
+      с pd.RangeIndex.
+
+0.6   `index` — trailing optional `Optional[pd.Index] = None` без `*`-разделителя
+      в `run_backtest_fast`. Сохраняет positional-совместимость 13+ существующих
+      вызовов. Intended keyword use, но не строго keyword-only.
+
+0.7   legs[], last_confirmed_idx, last_confirmed_height НЕ сбрасываются
+      на reset-баре. Накопительная история подтверждённых ног нужна для
+      local_median_N. Подтверждено donor zigzag (там legs[] тоже выживают
+      через reset).
+
+0.8   Diagnostic keys daily_reset_enabled / daily_reset_event публикуются
+      ВСЕГДА (массивы 0 при default). Упрощает schema XLSX.
+      Требует обновления Phase 2 TESTER strict keyset до 21 ключа (см. §15).
+
+0.9   Алгоритм нормализации индекса заимствован 1:1 из
+      `donor zigzag/engine/run.py:98-102`. Проверенная tz-логика, прошедшая
+      WF на реальных данных.
+
+0.10  6 unit-тестов helper'а заимствуются из
+      `donor zigzag/tests/core/test_zigzag_filter.py:316-369`.
+      Уже покрывают Moscow midnight, UTC midnight, weekend gap,
+      crypto 24/7, non-datetime, tz-naive.
+
+0.11  apply() получает test-override параметр `daily_reset_event`
+      по аналогии с `per_bar`. Pattern из donor zigzag для FSM-unit-тестов
+      без построения OHLC-фикстур.
+
+0.12  Хранение события — только bool[]. Без промежуточного int64[]
+      session_ids (в отличие от donor zigzag).
+
+0.13  Phase 2 TESTER tests/contracts входят в scope этой работы.
+      Альтернатива «compat-режим без ключей» противоречит §0.8.
+      Обновляем strict keyset до 21 ключа, value-whitelist
+      `_VALID_BLOCK_REASONS` пополняется значением "daily_reset".
+
+0.14  В apply() вводится pre-compute `n` из per_bar/trend/close ДО
+      compute_zigzag_per_bar для корректной передачи daily_reset_event.
+      Финальная _validate_apply_inputs остаётся ПОСЛЕ построения per_bar
+      и проверяет n_validated == n_pre_computed как sanity-инвариант.
+      Полная процедура — в §6.1.
+
+0.15  daily_reset_event override в apply() нормализуется через
+      `np.asarray(arr, dtype=bool)` + проверка `ndim == 1`. List/2D
+      упадут позже на .astype(np.int8); ловим раньше.
+
+0.16  daily_reset bool-validation работает только для enabled=true config.
+      Validator имеет early-return на enabled=false (line 373); это
+      совпадает с §11.1 spec — disabled config не валидирует zigzag-блок.
+
+
+================================================================================
+§1. YAML-config
+================================================================================
+
+В `config.yaml` блок `trade_filter.zigzag` дополнить (опционально, для
+документации):
+
+    trade_filter:
+      zigzag:
+        daily_reset: false   # сброс ZigZag+FSM на первой баре нового
+                             # календарного дня (default)
+
+В production-конфигах поле НЕ указывать до прохождения тестов — пусть
+берётся default из dataclass.
+
+
+================================================================================
+§2. Schema/loader
+================================================================================
+
+§2.1 Shared dataclass
+---------------------
+Файл: `donor/supertrend_optimizer/core/trade_filter_config.py:54-72`.
+
+    @dataclass
+    class TradeFilterZigZagConfig:
+        ...
+        local_window: int = 5
+        daily_reset: bool = False   # NEW
+
+§2.2 Shared whitelist
+---------------------
+Файл: тот же, `TRADE_FILTER_ALLOWED_KEYS["trade_filter.zigzag"]`
+(строки 136–140). Добавить "daily_reset".
+
+§2.3 Парсер
+-----------
+Файл: тот же, `build_trade_filter_config_from_raw` (строки 226–234).
+
+    daily_reset=zigzag_raw.get("daily_reset", False),
+
+§2.4 Валидатор — bool-check ВНУТРИ enabled=true ветки
+------------------------------------------------------
+Файл: тот же, `validate_trade_filter`. Добавить ПОСЛЕ блока local_window
+(строка ~482), т.е. в enabled-only ветке (после early-return на line 373):
+
+    dr = zz.daily_reset
+    if not isinstance(dr, bool):
+        errors.append(
+            f"trade_filter.zigzag.daily_reset must be bool (true/false), "
+            f"got {type(dr).__name__!r}"
+        )
+
+Семантика: при enabled=false любое значение daily_reset в YAML не
+валидируется (как и весь остальной zigzag-блок). Закрепить в docstring
+и тесте 9.1: `test_daily_reset_invalid_type_only_rejected_when_enabled_true`.
+
+§2.5 ВТОРОЙ whitelist в loader.py
+---------------------------------
+Файл: `wf_grid/config/loader.py:168-176`.
+В `_ALLOWED_KEYS["trade_filter.zigzag"]` добавить "daily_reset".
+
+КРИТИЧНО: без этого strict-validator уронит config — это дублирующая
+структура, обе нужно расширять синхронно.
+
+§2.6 Drift-инвариант
+--------------------
+Тест-инвариант, проверяющий что оба whitelist'а синхронно содержат
+"daily_reset" (защита от drift при будущих правках).
+
+
+================================================================================
+§3. Протащить index по цепочке
+================================================================================
+
+§3.1 run_backtest_fast — trailing optional
+-------------------------------------------
+Файл: `donor/supertrend_optimizer/core/backtest.py:300`.
+
+В текущей сигнатуре нет `*`-разделителя; добавляя `*` сейчас, мы ломаем
+все positional-вызовы. Поэтому index добавляется как trailing optional
+(последний параметр, default None, intended keyword use, технически
+positional-capable):
+
+    def run_backtest_fast(
+        open_prices, high, low, close,
+        atr_period, multiplier, trade_mode, commission,
+        early_exit_enabled, early_exit_max_drawdown, early_exit_check_bars,
+        execution_model=ExecutionModel.OPEN_TO_OPEN,
+        precomputed_atr=None,
+        trade_filter_config=None,
+        zigzag_global_stats=None,
+        global_offset=0,
+        index=None,                       # NEW: trailing optional
+    ) -> RawBacktestArtifacts:
+
+На enabled-пути (строки 397–409) пробросить `index=index` в `_zz_apply(...)`.
+
+§3.2 run_single_backtest
+-------------------------
+Файл: `donor/supertrend_optimizer/engine/run.py:208-225`.
+
+run_single_backtest уже принимает index (свой собственный параметр).
+Добавить проброс в run_backtest_fast:
+
+    _artifacts = run_backtest_fast(
+        ...
+        global_offset=global_offset,
+        index=index,                      # NEW
+    )
+
+§3.3 apply()
+-------------
+Файл: `donor/supertrend_optimizer/core/zigzag_st_filter.py:1093`.
+
+В apply() уже есть `*` (line 1094), поэтому новые параметры строго
+keyword-only:
+
+    def apply(
+        *,
+        trend, trade_mode, trade_filter_config, zigzag_global_stats,
+        close=None, open_prices=None, global_offset=0, execution_model=None,
+        per_bar=None,
+        index=None,                              # NEW
+        daily_reset_event=None,                  # NEW: test-override
+    ) -> ZigZagSTFilterResult:
+
+§3.4 import pandas as pd
+-------------------------
+Файл: `donor/supertrend_optimizer/core/zigzag_st_filter.py`.
+
+Текущий файл импортирует только numpy as np (line 52) и НЕ имеет pandas.
+Helper использует pd.Index/pd.DatetimeIndex — добавить:
+
+    # zigzag_st_filter.py, после line 52
+    import pandas as pd
+
+§3.5 Совместимость без правок
+------------------------------
+- step_executor.py уже передаёт index=ext_index/index=train_index в
+  run_single_backtest (строки 245, 415) — здесь правок нет.
+- 13+ существующих вызовов run_backtest_fast без index сохраняются
+  при default=None (test_wp7, test_wp10, test_wp11, donor/tests).
+
+
+================================================================================
+§4. Helper _infer_daily_reset_event
+================================================================================
+
+Размещение: `donor/supertrend_optimizer/core/zigzag_st_filter.py`,
+рядом с `_validate_close_and_threshold`.
+
+    def _infer_daily_reset_event(
+        index: Optional[pd.Index],
+        n: int,
+        *,
+        enabled: bool,
+    ) -> np.ndarray:
+        """Calendar-day reset event mask (bool[n]).
+
+        Source: алгоритм нормализации заимствован 1:1 из
+        ``donor zigzag/engine/run.py:_infer_session_ids`` (plan v2.0 §10.1).
+        Отличия от донора:
+        - возвращает bool[]-event, а не int64[]-session_ids;
+        - short-circuit при enabled=False (baseline bit-identity);
+        - non-monotonic / non-datetime → ConfigError (fail-closed).
+        """
+        # 0.5: short-circuit ДО любых проверок индекса
+        if not enabled:
+            return np.zeros(n, dtype=bool)
+
+        # 0.4: type-gate
+        if not isinstance(index, pd.DatetimeIndex):
+            raise ConfigError(
+                "trade_filter.zigzag.daily_reset=true requires DatetimeIndex; "
+                f"got {type(index).__name__}"
+            )
+        if len(index) != n:
+            raise ConfigError(
+                f"daily_reset: index length {len(index)} != n={n}"
+            )
+
+        # 0.3: monotonic-gate
+        if not index.is_monotonic_increasing:
+            raise ConfigError(
+                "trade_filter.zigzag.daily_reset=true requires "
+                "monotonic-increasing DatetimeIndex; got non-monotonic"
+            )
+
+        # Нормализация — 1:1 из donor zigzag/engine/run.py:98-102.
+        # CRITICAL: tz_localize(None), не tz_convert(None) — иначе
+        # MSK 23:55 сместится в UTC 20:55 и граница полуночи сломается.
+        if index.tz is not None:
+            normalized = index.tz_localize(None).normalize()
+        else:
+            normalized = index.normalize()
+
+        days = normalized.astype("int64").to_numpy()
+        event = np.zeros(n, dtype=bool)
+        if n >= 2:
+            event[1:] = days[1:] != days[:-1]
+        # event[0] всегда False — нет «предыдущего бара»
+        return event
+
+Edge-cases (закрепляются тестами §9.2):
+- n == 0 → np.zeros(0, dtype=bool) без падений.
+- n == 1 → np.array([False]).
+- DST-переход внутри одного дня → event[t] = False.
+- Weekend gap (пятница→понедельник) → один transition.
+
+
+================================================================================
+§5. Reset в close-only ZigZag pass
+================================================================================
+
+§5.1 Сигнатуры (keyword-only через `*`)
+----------------------------------------
+
+    def _run_close_only_zigzag_pass(
+        close: np.ndarray,
+        reversal_threshold: float,
+        *,
+        daily_reset_event: Optional[np.ndarray] = None,
+    ) -> _CloseOnlyPassResult: ...
+
+    def compute_zigzag_per_bar(
+        close: np.ndarray,
+        reversal_threshold: float,
+        local_window: int,
+        *,
+        daily_reset_event: Optional[np.ndarray] = None,
+    ) -> ZigZagPerBar: ...
+
+§5.2 Reset-блок в основном цикле
+---------------------------------
+
+Вставить ПЕРВОЙ операцией в `for t in range(1, n):` — ДО проверки
+pathological-bar (текущие строки 281–291):
+
+    for t in range(1, n):
+        c = float(arr[t])
+
+        # --- DAILY RESET (must run BEFORE pathological/main logic) -----
+        # Comment-обоснование заимствовано из
+        # donor zigzag/zigzag_filter.py:401-407:
+        # "Calendar-day boundary is OHLC-agnostic. Even on a NaN/inf bar
+        #  the session boundary is real and operational state must be
+        #  cleared; otherwise the first valid bar of the new day will
+        #  not re-seed."
+        # NB: legs[], last_confirmed_idx, last_confirmed_height — НЕ
+        # сбрасываются (накопительная история нужна для local_median_N;
+        # подтверждено донором).
+        if daily_reset_event is not None and daily_reset_event[t]:
+            if math.isfinite(c) and c > 0.0:
+                run_min_bar = t; run_min_price = c
+                run_max_bar = t; run_max_price = c
+                last_pivot_bar = t; last_pivot_price = c
+                run_ext_bar = t; run_ext_price = c
+            else:
+                # Pathological bar на reset: убиваем in-flight candidate,
+                # но не пере-seed'им — следующий валидный бар сам поднимет
+                # seed (как обычная UNKNOWN-ветка).
+                run_min_price = float("nan"); run_max_price = float("nan")
+                last_pivot_price = float("nan"); run_ext_price = float("nan")
+            direction = _LEG_DIR_UNKNOWN
+
+        # --- PATHOLOGICAL BAR (existing logic, unchanged) --------------
+        if not math.isfinite(c) or c <= 0.0:
+            confirmed_leg_idx_at_t[t] = last_confirmed_idx
+            last_confirmed_leg_height_pct[t] = last_confirmed_height
+            continue
+        ...
+
+§5.3 Семантические следствия
+-----------------------------
+- direction = UNKNOWN после reset → candidate_height_pct[t] остаётся NaN
+  (см. строки 415–421) → contour-A trigger на reset-баре не сработает.
+- confirm_event[t] == 0 (UNKNOWN-ветка не делает confirm) → contour-B
+  trigger на reset-баре не сработает. Это ключевой инвариант:
+  «вчерашний candidate не подтверждается на первом баре нового дня».
+- confirmed_leg_idx_at_t[t] остаётся cumulative (= last_confirmed_idx)
+  → local_median_N дня 2 продолжает учитывать леги дня 1.
+
+§5.4 Совместимость
+-------------------
+При daily_reset_event=None или np.zeros(n, dtype=bool) reset-блок не
+выполняется → bit-identity с baseline.
+
+
+================================================================================
+§6. Reset в FSM (apply()) — ПЕРЕСОБРАНО ПОД АУДИТ C1
+================================================================================
+
+Текущий код имеет порядок (строки 1165–1207):
+  1. compute per_bar (если не передан)
+  2. _validate_apply_inputs (резолвит n)
+
+Нам нужно: знать n ДО helper'а (для возврата np.zeros(n)) и передать
+daily_reset_event В helper (compute_zigzag_per_bar).
+
+§6.1 Новый порядок
+-------------------
+
+    def apply(*, trend, trade_mode, trade_filter_config, zigzag_global_stats,
+              close=None, open_prices=None, global_offset=0,
+              execution_model=None, per_bar=None,
+              index=None, daily_reset_event=None):
+
+        # ----- 1. Pre-compute n из самого надёжного источника ----------
+        # Приоритет: per_bar (test-override) > trend > close.
+        if per_bar is not None:
+            n = int(per_bar.candidate_height_pct.shape[0])
+        elif trend is not None:
+            n = int(np.asarray(trend).shape[0])
+        elif close is not None:
+            n = int(np.asarray(close).shape[0])
+        else:
+            raise ConfigError(
+                "apply() requires at least one of: per_bar, trend, close"
+            )
+
+        # ----- 2. Resolve daily_reset_enabled из config ----------------
+        zigzag_cfg = _extract_zigzag_field(trade_filter_config, "zigzag")
+        daily_reset_enabled = bool(
+            _extract_zigzag_field(zigzag_cfg, "daily_reset", False)
+        ) if zigzag_cfg is not None else False
+
+        # ----- 3. Resolve daily_reset_event ----------------------------
+        if daily_reset_event is None:
+            daily_reset_event = _infer_daily_reset_event(
+                index, n, enabled=daily_reset_enabled
+            )
+        else:
+            # 0.15: нормализуем override через np.asarray + ndim check
+            daily_reset_event = np.asarray(daily_reset_event, dtype=bool)
+            if daily_reset_event.ndim != 1:
+                raise ConfigError(
+                    f"apply() daily_reset_event must be 1-D, "
+                    f"got ndim={daily_reset_event.ndim}"
+                )
+            if daily_reset_event.shape[0] != n:
+                raise ConfigError(
+                    f"apply() daily_reset_event length "
+                    f"{daily_reset_event.shape[0]} != n={n}"
+                )
+
+        # ----- 4. Compute per_bar (production path) с reset-событием ---
+        if per_bar is None:
+            if close is None:
+                raise ConfigError(
+                    "apply() requires either 'close' or 'per_bar'"
+                )
+            # ... existing reversal_threshold/local_window resolution ...
+            per_bar = compute_zigzag_per_bar(
+                close=np.asarray(close, dtype=np.float64),
+                reversal_threshold=reversal_threshold,
+                local_window=int(local_window),
+                daily_reset_event=daily_reset_event,    # NEW
+            )
+
+        # ----- 5. Финальная валидация ----------------------------------
+        n_validated = _validate_apply_inputs(
+            trend=trend, per_bar=per_bar,
+            zigzag_global_stats=zigzag_global_stats,
+            trade_filter_config=trade_filter_config,
+            trade_mode=trade_mode,
+        )
+        # 0.14: sanity — pre-computed n должен совпасть с валидированным
+        if n_validated != n:
+            raise ConfigError(
+                f"[BUG] apply() pre-computed n={n} != "
+                f"validated n={n_validated}"
+            )
+
+        # ----- 6. Остальная логика (FSM, diagnostics) — без изменений --
+        ...
+
+§6.2 Reset FSM в основном цикле
+--------------------------------
+
+В `for t in range(n):` (строка 1271) — ПЕРВОЙ операцией, ДО snapshot
+state_at_bar_start:
+
+    for t in range(n):
+        # --- DAILY RESET (must be first) -------------------------------
+        if daily_reset_event[t]:
+            state = ZigZagFSMState.OFF
+            confirmed_legs_since_start = -1
+            held_pos = 0
+            _stopping_start = -1
+
+        state_at_bar_start = state
+        ...
+
+§6.3 Политика «flat from next bar» (автоматически)
+---------------------------------------------------
+- На бар t reset → state = OFF.
+- В цикле далее: if state in (OFF, WAIT): next_pos = 0
+  → filtered_positions[t+1] = 0.
+- filtered_positions[t] уже записан на предыдущей итерации — отражает
+  позицию, активную во время бара t. Не трогаем.
+
+§6.4 Edge-cases
+----------------
+- t == 0: daily_reset_event[0] всегда False (см. §4.2) → reset на первом
+  баре slice не происходит.
+- Одновременный reset + valid trigger + allowed flip на одном баре:
+  после reset state=OFF, held_pos=0; дальше FSM-логика бара выполняется
+  как обычно: OFF + (a_trig or b_trig) → WAIT, WAIT + flip → FREEZE.
+  Новый lifecycle может стартовать прямо на reset-баре — это допустимо
+  и желательно (не теряем сигналы на стыке дней).
+
+
+================================================================================
+§7. Diagnostics
+================================================================================
+
+§7.1 Два новых ключа в filter_diagnostics
+------------------------------------------
+В filter_diagnostics_out (строки 1479–1501):
+
+    "daily_reset_enabled": np.full(n, int(daily_reset_enabled), dtype=np.int8),
+    "daily_reset_event": daily_reset_event.astype(np.int8),
+
+Оба ключа публикуются ВСЕГДА (инвариант 0.8).
+
+§7.2 Категория "filter_daily_reset" в attach_trade_filter_diagnostics
+----------------------------------------------------------------------
+Файл: `donor/supertrend_optimizer/core/zigzag_st_filter.py:1597-1609`.
+
+Приоритетная ветка ВЫШЕ ST_STOPPING:
+
+    daily_reset_arr = filter_diagnostics.get("daily_reset_event")  # NEW
+    ...
+    for row in trades_df.itertuples(index=False):
+        ...
+        if exit_index >= pending_exit_idx:
+            exit_reasons.append("pending_open_trade_at_end")
+        else:
+            exit_signal_idx = max(exit_index - 1, 0)
+            fsm_at_exit = (
+                str(state_arr[exit_signal_idx]) if exit_signal_idx < n_diag
+                else "UNKNOWN"
+            )
+            # Priority: daily_reset > stopping > st_flip
+            reset_at_exit = (
+                daily_reset_arr is not None
+                and exit_signal_idx < len(daily_reset_arr)
+                and int(daily_reset_arr[exit_signal_idx]) == 1
+            )
+            if reset_at_exit:
+                exit_reasons.append("filter_daily_reset")
+            elif fsm_at_exit == "ST_STOPPING":
+                exit_reasons.append("filter_stopping_opposite_flip")
+            else:
+                exit_reasons.append("st_flip")
+
+§7.3 Категория "daily_reset" в filter_block_reason
+---------------------------------------------------
+Файл: тот же, priority chain (строки 1444–1462).
+
+Высший приоритет (priority 0):
+
+    # Priority 0 (highest): daily_reset
+    if daily_reset_event[t]:
+        filter_block_reason_arr[t] = "daily_reset"
+
+    # Priority 1: local_median_unavailable
+    elif (
+        state_at_bar_start == ZigZagFSMState.ST_ACTIVE_MONITORING
+        and confirmed and not median_valid
+    ):
+        filter_block_reason_arr[t] = "local_median_unavailable"
+
+    # Priority 2-4: flip-based reasons
+    elif flip_dir != 0:
+        if state == ZigZagFSMState.ST_STOPPING:
+            filter_block_reason_arr[t] = "stopping_mode_no_new_entries"
+        elif state == ZigZagFSMState.OFF:
+            filter_block_reason_arr[t] = "filter_off"
+        elif state == ZigZagFSMState.WAIT_FIRST_ST_FLIP:
+            filter_block_reason_arr[t] = "trade_mode_disallowed_flip"
+
+§7.4 Summary builders
+----------------------
+
+§7.4.1 WF Grid: `wf_grid/wf/step_executor.py:103-186`
+
+    dre = filter_diagnostics.get("daily_reset_event")
+    if dre is not None:
+        summary["daily_reset_count"] = int(np.sum(np.asarray(dre) == 1))
+
+§7.4.2 Phase 2 TESTER: `donor/supertrend_optimizer/testing/runner.py`
+        (`_compute_summary_counters`, строки 177–243)
+
+    def _compute_summary_counters(...):
+        ...
+        # NEW: daily_reset counter
+        daily_reset_event = filter_diagnostics.get("daily_reset_event")
+        daily_reset_count = (
+            int(np.sum(daily_reset_event == 1))
+            if daily_reset_event is not None else 0
+        )
+        return {
+            ...,
+            "daily_reset_count": daily_reset_count,
+        }
+
+И в `_build_filter_diagnostics_summary` (строка 275) пробросить эту
+метрику в финальный summary dict.
+
+§7.5 Совместимость с существующими тестами
+-------------------------------------------
+- WF Grid: `test_full_section13_keyset_present` использует
+  `missing = required - actual` → новые ключи НЕ ломают тест.
+- WF Grid: `test_no_legacy_keys` запрещает только "trigger_source"
+  → не затронут.
+- _INTERNAL_ONLY_KEYS = {"trade_filter_state_code"} → daily_reset_*
+  не входит, экспозиция OK.
+- Phase 2 TESTER: strict 19-key set ломается → ОБЯЗАТЕЛЬНО обновить
+  до 21 ключа (см. §15).
+
+
+================================================================================
+§8. OOS prepend / trim
+================================================================================
+
+§8.1 Без правок step_executor.py
+---------------------------------
+`step_executor.py:307-309` уже режет любые ключи синхронно:
+
+    filter_diagnostics_oos = {
+        k: v[oos_boundary:] for k, v in _ext_filter_diag.items()
+    }
+
+daily_reset_event[oos_boundary:] подхватится автоматически.
+
+§8.2 Семантика на boundary
+---------------------------
+- daily_reset_event считается на extended-slice
+  ext_index = full_index[ext_start:test_end].
+- День меняется внутри prepend → reset срабатывает в prepend → FSM
+  приходит в OOS в OFF + flat.
+- День меняется ровно на границе prepend↔OOS →
+  daily_reset_event[oos_boundary] == 1 → reset на первом OOS-баре.
+- prepend_applied == 0 → daily_reset_event[0] == False
+  (нет «предыдущего дня»). Корректно.
+
+§8.3 Force-flat (`_apply_oos_force_flat`)
+------------------------------------------
+Не трогает diagnostics, только oos_returns/positions/equity.
+Совместим без правок: carry-in трейд, закрытый по reset в prepend,
+в ext_trades_df имеет exit_index < oos_boundary → не попадает в
+carry-mask → force-flat не срабатывает (корректно).
+
+
+================================================================================
+§9. Тесты — WF Grid
+================================================================================
+
+§9.1 Config / schema
+---------------------
+- test_daily_reset_default_false
+  YAML без поля → cfg.trade_filter.zigzag.daily_reset == False.
+
+- test_daily_reset_explicit_true_parses
+  daily_reset: true парсится в True.
+
+- test_daily_reset_invalid_type_only_rejected_when_enabled_true
+  Invalid type rejected при enabled=true; при enabled=false валидация
+  пропускается (инвариант 0.16).
+
+- test_daily_reset_in_both_whitelists
+  "daily_reset" в обоих whitelist'ах синхронно (drift-guard, см. §2.6).
+
+§9.2 Helper — 6 заимствованных + 4 наших
+-----------------------------------------
+Источник заимствований: `donor zigzag/tests/core/test_zigzag_filter.py:316-369`.
+
+Адаптации (класс TestInferDailyResetEvent):
+- test_tz_naive_index — tz-naive 23:55 → 00:05 boundary.
+- test_non_datetime_index_returns_zeros — модифицировать:
+  enabled=False → all-False; enabled=True + RangeIndex → ConfigError.
+- test_tz_aware_index_moscow_midnight — CRITICAL: tz_localize vs tz_convert.
+- test_tz_aware_index_utc_midnight — UTC midnight boundary.
+- test_weekend_gap_single_boundary — Friday → Monday, один transition.
+- test_crypto_24_7_same_day — все бары в одном дне → all-False.
+
+Дополнительно (не из донора):
+- test_helper_disabled_short_circuit — enabled=False + RangeIndex/
+  non-monotonic не падают (инвариант 0.5).
+- test_helper_dst_intraday_no_reset — DST-переход внутри дня → no reset.
+- test_helper_non_monotonic_raises — enabled=True + non-monotonic →
+  ConfigError (политика 0.3).
+- test_helper_n0_n1_edge — n=0, n=1 → массивы корректной длины.
+
+§9.3 ZigZag pass
+-----------------
+- test_zigzag_candidate_does_not_cross_day — UP-candidate из дня 1 не
+  подтверждается в день 2.
+- test_zigzag_legs_history_survives_reset — confirmed legs из дня 1
+  учитываются в local_median_N дня 2 (инвариант 0.7).
+- test_zigzag_pass_disabled_bit_identical — daily_reset_event=None ≡
+  all-zeros ≡ all-False → bit-identical legs/heights/confirms.
+- test_zigzag_pass_reset_on_pathological_bar — reset-бар одновременно
+  pathological → in-flight state очищается, seed не пере-устанавливается.
+
+§9.4 FSM (test-pattern из donor zigzag)
+----------------------------------------
+Pattern: прямой вызов apply(per_bar=fake, daily_reset_event=injected,
+index=None).
+
+- test_fsm_wait_resets_on_new_day — WAIT_FIRST_ST_FLIP → OFF.
+- test_fsm_freeze_resets_on_new_day — ST_ACTIVE_FREEZE + N legs → OFF + -1.
+- test_fsm_monitoring_resets_on_new_day — ST_ACTIVE_MONITORING → OFF.
+- test_fsm_stopping_resets_on_new_day — ST_STOPPING + open pos → OFF,
+  held_pos=0, _stopping_start=-1.
+- test_fsm_position_flat_from_next_bar — held_pos=+1 на t-1, reset на t
+  → filtered_positions[t]=+1, [t+1]=0.
+- test_fsm_simultaneous_reset_and_trigger — reset + valid A-trigger +
+  allowed flip на одном баре → новый lifecycle стартует на t.
+- test_fsm_apply_test_override_daily_reset_event — apply(daily_reset_event=arr)
+  использует массив, не вызывая helper.
+- test_apply_daily_reset_event_override_list_normalized — list →
+  bool-array (0.15).
+- test_apply_daily_reset_event_override_2d_raises — 2-D → ConfigError (0.15).
+- test_apply_daily_reset_event_override_wrong_length_raises — length
+  mismatch → ConfigError.
+- test_apply_pre_computed_n_matches_validated_n — n из per_bar/trend/close
+  совпадает с _validate_apply_inputs (инвариант 0.14).
+
+§9.5 Diagnostics
+-----------------
+- test_filter_diagnostics_keyset_invariant_under_default — keyset =
+  _SECTION_13_REQUIRED_KEYS ∪ {"daily_reset_enabled", "daily_reset_event"}.
+- test_daily_reset_arrays_dtype_int8 — оба ключа int8.
+- test_daily_reset_count_in_summary — _compute_filter_diagnostics_summary
+  агрегирует daily_reset_count.
+- test_attach_trade_diagnostics_exit_reason_filter_daily_reset — трейд
+  закрытый по reset → exit_reason == "filter_daily_reset".
+- test_filter_block_reason_daily_reset_priority — reset + одновременный
+  flip → filter_block_reason == "daily_reset" (priority 0).
+- test_attach_trade_diagnostics_priority_chain — reset > stopping > st_flip.
+
+§9.6 OOS prepend (паттерн из donor zigzag)
+-------------------------------------------
+- test_oos_prepend_diag_lengths_after_trim — длины всех diagnostics
+  после [oos_boundary:] равны len(oos_positions).
+- test_oos_prepend_reset_on_boundary — день меняется на границе
+  prepend↔OOS → daily_reset_event[oos_boundary]==1.
+- test_oos_prepend_zero_no_reset_on_first_bar — prepend_applied == 0 →
+  daily_reset_event[0] == False.
+- test_oos_prepend_carry_in_closed_by_reset — carry-in трейд закрытый
+  в prepend → не попадает в force-flat carry-mask.
+- test_daily_reset_event_monotonic_per_step — на каждом extended-сегменте
+  календарные дни монотонно неубывают (адаптация из донора).
+
+§9.7 Regression / compatibility
+--------------------------------
+- test_run_backtest_fast_index_default_None — старый callback без index
+  работает на disabled и enabled.
+- test_apply_with_index_None_and_daily_reset_false — enabled + index=None
+  + default false → не падает (short-circuit).
+- test_apply_with_index_None_and_daily_reset_true_raises — enabled +
+  index=None + daily_reset=True → ConfigError.
+- test_baseline_bit_identity_when_daily_reset_false — на реальном датасете
+  positions/returns/equity_curve bit-identical baseline до изменений.
+- test_phase2_tester_smoke_unchanged — Phase 2 TESTER smoke проходит
+  существующий test-suite (зависимость через shared dataclass).
+
+
+================================================================================
+§10. Acceptance criteria
+================================================================================
+
+AC-1   daily_reset: false (default) → positions, returns, equity_curve,
+       trades_df bit-identical baseline'у.
+
+AC-2   daily_reset: true + tz-aware DatetimeIndex → ZigZag и FSM
+       сбрасываются на первом баре новой календарной даты в локальном
+       времени индекса.
+
+AC-3   tz-aware index использует tz_localize(None).normalize()
+       (Moscow 23:55 / 00:05 дают reset, а не сдвинутая UTC-граница).
+
+AC-4   daily_reset виден в diagnostics: daily_reset_event,
+       daily_reset_enabled, exit_reason="filter_daily_reset",
+       filter_block_reason="daily_reset", daily_reset_count в WF Grid
+       summary И в Phase 2 TESTER summary.
+
+AC-5   Длины positions, returns, equity_curve, всех ключей
+       filter_diagnostics равны между собой; OOS-trim корректен.
+
+AC-6   daily_reset: true + non-DatetimeIndex или non-monotonic →
+       ConfigError до запуска WF (fail-closed).
+
+AC-7   Confirmed-leg history (legs[], last_confirmed_idx, local_median_N)
+       сохраняется через reset — local_median_N дня 2 учитывает леги
+       дня 1.
+
+AC-8   Оба whitelist'а (_ALLOWED_KEYS и TRADE_FILTER_ALLOWED_KEYS)
+       синхронно содержат daily_reset.
+
+AC-9   13+ существующих вызовов run_backtest_fast без index продолжают
+       работать.
+
+AC-10  Phase 2 TESTER: обновлённые тесты test_phase2_* зелёные (см. §15).
+
+AC-11  Test-override daily_reset_event (list / 1-D ndarray) принимается;
+       2-D и неправильная длина → ConfigError.
+
+AC-12  Унаследованный из донора tz-test (test_tz_aware_index_moscow_midnight)
+       проходит — guard против регрессии tz_localize → tz_convert.
+
+AC-13  Phase 2 TESTER strict keyset = 21 ключ; _VALID_BLOCK_REASONS
+       содержит "daily_reset".
+
+AC-14  Apply pre-computed n совпадает с валидированным n.
+
+AC-15  daily_reset_event override как list / 1-D ndarray принимается;
+       2-D и неправильная длина → ConfigError.
+
+
+================================================================================
+§11. Затронутые файлы
+================================================================================
+
+| Файл                                                              | Что меняется                                                              |
+|-------------------------------------------------------------------|---------------------------------------------------------------------------|
+| donor/supertrend_optimizer/core/trade_filter_config.py            | dataclass + whitelist + parser + bool-validator (4 правки)               |
+| wf_grid/config/loader.py                                          | дублирующий whitelist                                                     |
+| donor/supertrend_optimizer/core/zigzag_st_filter.py               | import pandas, helper, расширение pass/per_bar/apply, переупорядочивание  |
+|                                                                   | apply, attach_trade_filter_diagnostics, filter_block_reason chain         |
+| donor/supertrend_optimizer/core/backtest.py                       | trailing index параметр, проброс в _zz_apply                              |
+| donor/supertrend_optimizer/engine/run.py                          | проброс index в run_backtest_fast                                         |
+| wf_grid/wf/step_executor.py                                       | daily_reset_count в WF summary                                            |
+| donor/supertrend_optimizer/testing/runner.py                      | daily_reset_count в TESTER summary, _compute_summary_counters             |
+| config.yaml                                                       | (опционально) явное daily_reset: false для документации                   |
+| wf_grid/tests/test_daily_reset.py                                 | новый файл, ~35 тестов                                                    |
+| donor TESTER/tests/test_phase2_tester_diagnostics_dtype_contract.py | EXPECTED_KEYSET до 21 ключа, _VALID_BLOCK_REASONS расширение            |
+
+НЕ трогаются:
+- wf_grid/config/schema.py — re-export shim.
+- donor zigzag/ — quarantined.
+
+
+================================================================================
+§12. Заимствования из donor zigzag/
+================================================================================
+
+| Что заимствуется                                          | Источник                                              | Куда идёт                                  |
+|-----------------------------------------------------------|-------------------------------------------------------|--------------------------------------------|
+| Алгоритм нормализации tz-aware/tz-naive (5 строк)         | donor zigzag/engine/run.py:98-102                     | _infer_daily_reset_event (§4)              |
+| Comment-обоснование "calendar boundary OHLC-agnostic"     | donor zigzag/zigzag_filter.py:401-407                 | _run_close_only_zigzag_pass (§5.2)        |
+| 6 unit-тестов helper'а (MSK, UTC, weekend, crypto и т.д.) | donor zigzag/tests/core/test_zigzag_filter.py:316-369 | test_daily_reset.py (§9.2)                |
+| Test-pattern "direct FSM call with injected event array"  | donor zigzag/tests/core/test_zigzag_session_reset_armed.py | test_daily_reset.py (§9.4)             |
+| Test-pattern "WF-segment days monotonic"                  | donor zigzag/tests/engine/test_zigzag_opus_equal_blocks.py:232-250 | test_daily_reset.py (§9.6)        |
+
+НЕ заимствуется:
+- int64-storage session_ids → у нас bool[]-event напрямую.
+- structural_reset_event → у нас close-only ZigZag.
+- _disarm + FIRED_* int-enum → у нас FSM-states + строки.
+- Политика non-monotonic → warn+fallback → у нас ConfigError.
+
+
+================================================================================
+§13. Порядок реализации (incremental, после каждого шага — green test-suite)
+================================================================================
+
+1. API-сигнатуры без логики:
+   - run_backtest_fast.index=None
+   - apply.index=None, daily_reset_event=None
+   - _run_close_only_zigzag_pass.daily_reset_event=None
+   - import pandas as pd в zigzag_st_filter.py
+   Прогон pytest — должны быть зелёные на всех тестах
+   (default None / all-False — bit-identical).
+
+2. Schema/loader/whitelist + validator + тесты §9.1.
+
+3. Helper _infer_daily_reset_event + тесты §9.2 (6 из донора + 4 наших).
+
+4. Apply re-order (§6.1) — без новой reset-логики, только перестановка.
+   Прогон pytest — все существующие тесты test_wp7/9/10/11_* зелёные.
+
+5. Reset в close-only ZigZag pass + тесты §9.3.
+
+6. Reset в FSM + тесты §9.4 (включая test-override pattern).
+
+7. Diagnostics keys + категоризация exit/block_reason
+   (WF + TESTER summary) + тесты §9.5.
+
+8. Phase 2 TESTER updates (§15) — keyset, block_reason whitelist,
+   summary builder. Прогон donor TESTER/tests — зелёным.
+
+9. OOS-prepend smoke + тесты §9.6.
+
+10. Regression-тесты §9.7. Финальный прогон полного suite
+    (wf_grid/tests + donor/tests + donor TESTER/tests).
+    Verify AC-1…AC-15.
+
+После каждого шага коммит. Между шагами — green suite.
+
+
+================================================================================
+§14. Сводка отличий v3 от предыдущих версий (для справки ревьюеру)
+================================================================================
+
+v1 → v2 (после первого аудита):
+- Schema-changes перенесены в shared trade_filter_config.py.
+- Добавлен явный шаг index → run_backtest_fast (был пропущен).
+- Зафиксированы политики fail-closed для non-DatetimeIndex/non-monotonic.
+- Зафиксирован short-circuit при daily_reset=False.
+- Зафиксировано сохранение legs[] через reset.
+- Добавлены exit_reason="filter_daily_reset" и filter_block_reason="daily_reset".
+- diagnostics keys публикуются всегда.
+
+v2 → v2.1 (после переоценки donor zigzag):
+- Helper алгоритм заимствован 1:1 из donor zigzag.
+- 6 unit-тестов helper'а заимствованы.
+- apply() получает test-override daily_reset_event (паттерн донора).
+- Добавлен AC-11/AC-12.
+
+v2.1 → v2.2 (после второго аудита):
+- C1: apply order пересобран — pre-compute n → daily_reset_event →
+  per_bar → validate.
+- C2: Phase 2 TESTER tests/contracts входят в scope.
+- H3: TESTER _VALID_BLOCK_REASONS пополняется "daily_reset".
+- H4: override нормализуется через np.asarray + ndim check.
+- H5: bool-validation работает только для enabled=true.
+- M6: import pandas as pd в списке затронутых строк.
+- M7: index — trailing optional, не keyword-only.
+- M8: TESTER runner.py получает daily_reset_count.
+- §15 — отдельный раздел про Phase 2 TESTER.
+
+v2.2 → v3 (точечная правка §0.14):
+- Решение 0.14 переформулировано: pre-compute n + финальная валидация
+  ПОСЛЕ построения per_bar (sanity n_validated == n_pre_computed).
+  Синхронизация с §6.1.
+
+
+================================================================================
+§15. Phase 2 TESTER — ОТДЕЛЬНЫЙ РАЗДЕЛ
+================================================================================
+
+§15.1 Обоснование
+------------------
+Phase 2 TESTER pipeline использует тот же shared zigzag_st_filter.apply()
+через donor/supertrend_optimizer/testing/runner.py::run_period.
+После §0.8 ("keys публикуются всегда") strict keyset тестов TESTER падает.
+
+Текущий контракт:
+  Файл: donor TESTER/tests/test_phase2_tester_diagnostics_dtype_contract.py
+
+  EXPECTED_KEYSET = frozenset({...})  # ровно 19 ключей, line 33-59
+
+  _VALID_BLOCK_REASONS = {
+      "filter_off", "waiting_first_st_flip", "trade_mode_mismatch",
+      "local_median_unavailable", "invalid_stats", "stopping_state",
+      "none", "",
+  }  # line 70-75
+
+  test_exact_keyset_equality (line 132): set(diag.keys()) == EXPECTED_KEYSET.
+  test_filter_block_reason_values_from_whitelist (line 206): значения
+                                                ⊆ _VALID_BLOCK_REASONS.
+
+§15.2 Изменения
+----------------
+
+§15.2.1 EXPECTED_KEYSET → 21 ключ
+Добавить:
+    "daily_reset_enabled",      # Lifecycle (3)
+    "daily_reset_event",        # Lifecycle (3)
+Обновить комментарий "Lifecycle (2)" → "Lifecycle (4)".
+
+§15.2.2 _VALID_BLOCK_REASONS расширение
+Добавить:
+    "daily_reset",              # NEW
+
+Заметка: значения "waiting_first_st_flip", "trade_mode_mismatch",
+"stopping_state", "invalid_stats" в этом whitelist'е НЕ совпадают
+с фактическими значениями в apply() ("trade_mode_disallowed_flip",
+"stopping_mode_no_new_entries"). Это pre-existing drift. Не чиним
+в рамках этой работы — только добавляем "daily_reset".
+
+§15.2.3 TESTER summary в runner.py:_compute_summary_counters
+Добавить daily_reset_count (см. §7.4.2).
+
+§15.2.4 Дополнительный TESTER-тест
+В тот же файл:
+
+    def test_daily_reset_keys_present(self):
+        """daily_reset_enabled и daily_reset_event всегда присутствуют
+        (§13 + plan v3)."""
+        df = _make_synthetic_ohlc()
+        r = _run_enabled(df)
+        assert "daily_reset_enabled" in r.filter_diagnostics
+        assert "daily_reset_event" in r.filter_diagnostics
+        n_pos = len(r.result.positions)
+        assert len(r.filter_diagnostics["daily_reset_enabled"]) == n_pos
+        assert len(r.filter_diagnostics["daily_reset_event"]) == n_pos
+        # default-disabled config → all zeros
+        assert np.all(r.filter_diagnostics["daily_reset_enabled"] == 0)
+        assert np.all(r.filter_diagnostics["daily_reset_event"] == 0)
+
+§15.3 Smoke-тесты в donor TESTER/
+----------------------------------
+Дополнительно прогнать smoke-suite Phase 2:
+- test_phase2_tester_disabled_baseline.py — disabled-path остался None
+  (mutual-exclusion).
+- test_phase2_tester_close_only_invariance.py — bit-identity для
+  daily_reset=False.
+- test_phase2_tester_indexing_open_to_open.py — semantic-инвариант
+  не сломан.
+
+§15.4 Альтернатива (НЕ рекомендуется)
+--------------------------------------
+Перейти на §0.8 "keys публикуются ТОЛЬКО при daily_reset=true".
+Снимает требование обновлять TESTER keyset, но усложняет XLSX schema
+и нарушает принцип «одна форма выдачи независимо от опции».
+
+Рекомендация: идти с обновлением TESTER (§15.1–15.3). Объём работ
+≈ 30 минут, риск минимален.
+
+
+================================================================================
+§16. Финальный go/no-go
+================================================================================
+
+Go — план v3 закрывает все аудиты, согласован с реальным кодом, явно
+описывает обновление Phase 2 TESTER, и сохраняет baseline bit-identity
+для daily_reset=False.
+
+Главный риск — НЕ в логике reset'а, а в дисциплине обновления TESTER
+tests (§15). Без них donor TESTER/tests/ упадёт на CI на первой же
+enabled-конфигурации. Поэтому §13 #7–#8 (Phase 2 TESTER updates)
+обязательны и должны идти в той же серии коммитов, что и §7
+(diagnostics keys).
+
+После реализации §15 → план v3 production-ready.
+
+================================================================================
+КОНЕЦ ДОКУМЕНТА
+================================================================================

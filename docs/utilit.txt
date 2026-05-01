@@ -1,0 +1,417 @@
+Теперь у меня полная картина библиотеки. Это **донорский движок** (бэктест + метрики + WF + warmup), а grid-оркестратор будет написан отдельно и будет импортировать эти utils. Составляю план с учётом этого контекста.
+
+---
+
+Ниже — **подробный план фиксов**. Это **не код**, а пошаговая инструкция: что, где, зачем, в каком порядке. Всё учитывает, что потребитель — **grid-оптимизатор** (полный перебор сетки параметров, не Optuna), который будет вызывать `run_single_backtest` в цикле и ранжировать результаты.
+
+---
+
+# ПЛАН ФИКСОВ: utils для grid-оптимизации
+
+## Порядок работ
+
+Фиксы упорядочены по **зависимостям** (нижние слои первыми) и **критичности**. Каждый фикс — отдельный атомарный шаг, который можно протестировать изолированно.
+
+---
+
+## ФАЗА 1: Фундамент — то, что может дать **неверные числа** прямо сейчас
+
+### 1.1. `config.py` — валидация результата `safe_load`
+
+**Файл:** `utils/config.py`
+
+**Что сделать:**
+- После `yaml.safe_load(f)` добавить проверку: если результат `None` (пустой файл) — `raise ConfigError("YAML file is empty or contains only comments")`
+- Если результат не `dict` (а `list`, `str`, `int`, ...) — `raise ConfigError(f"Expected YAML dict at top level, got {type(config).__name__}")`
+- Импортировать `ConfigError` из `exceptions.py`
+- Обновить docstring: в Raises добавить `ConfigError`
+
+**Почему для grid критично:**
+Grid-скрипт первым делом загружает конфиг. Если конфиг битый — весь прогон должен **немедленно** упасть с понятной ошибкой, а не через 30 минут при обращении к ключу.
+
+**Тесты:**
+- Пустой YAML файл → `ConfigError`
+- YAML с содержимым `[1, 2, 3]` → `ConfigError`
+- YAML со скаляром `42` → `ConfigError`
+- YAML `null` → `ConfigError`
+- Валидный dict → возвращается как есть
+
+---
+
+### 1.2. `time_utils.py` — `calculate_median_timedelta`: монотонность + защита от delta ≤ 0
+
+**Файл:** `utils/time_utils.py`, функция `calculate_median_timedelta`
+
+**Что сделать:**
+- После проверки `isinstance(index, pd.DatetimeIndex)` добавить: если `not index.is_monotonic_increasing` → `raise ValueError("index must be sorted in ascending order (is_monotonic_increasing=False). Sort your DataFrame before passing to this function.")`
+- После вычисления `median_delta`: если `median_delta <= pd.Timedelta(0)` → `raise ValueError(f"Median timedelta is {median_delta} — expected positive value. Check for duplicate timestamps or corrupted index.")`
+
+**Почему для grid критично:**
+Grid вызывает `run_single_backtest` → `resolve_warmup_bars` → `convert_time_to_bars` → `calculate_median_timedelta`. Если медиана 0, warmup = `max(1, ceil(inf))` → или 1, или крэш. Если индекс не отсортирован — медиана мусор → warmup мусор → **все метрики в grid-таблице искажены молча**.
+
+**Тесты:**
+- Индекс с дубликатами `[t, t, t+1d]` → median > 0, ок
+- Индекс `[t, t, t]` (все одинаковые) → median = 0 → `ValueError`
+- Перемешанный индекс → `ValueError`
+- Корректный монотонный индекс → ок
+
+---
+
+### 1.3. `time_utils.py` — `convert_time_to_bars`: обработка нефинитных результатов
+
+**Файл:** `utils/time_utils.py`, функция `convert_time_to_bars`
+
+**Что сделать:**
+- После `bars = time_delta / median_delta`: проверить `if not np.isfinite(bars)` → `raise ValueError(f"Cannot convert time to bars: result is {bars}. Check median_delta={median_delta}")`
+- Таким образом `max(1, bars_int)` **никогда** не маскирует inf/NaN
+
+**Почему для grid критично:**
+Если warmup_time задан в конфиге (например `"7d"`) и данные плохие — grid получает warmup=1 вместо ошибки → метрики считаются почти без warmup → Sharpe/Sortino **систематически завышены** по всей сетке.
+
+**Тесты:**
+- Нормальный 5min индекс + `"1h"` → 12 баров
+- `"1d"` на дневном индексе → 1 бар
+- Индекс из 2 точек с delta=0 — уже отловится в 1.2
+
+---
+
+### 1.4. `engine/run.py` — убрать фиктивный `pd.DatetimeIndex(index)` при `warmup_time`
+
+**Файл:** `engine/run.py`, строка 127
+
+**Что сделать:**
+- Если `warmup_time is not None` и `not isinstance(index, pd.DatetimeIndex)` → `raise ValueError("warmup_time requires DatetimeIndex. Got {type(index).__name__}. Use warmup_period (integer bars) instead.")`
+- Оставить `pd.DatetimeIndex(index)` **только** если `warmup_time is None` (для `resolve_warmup_bars` с чисто `warmup_period` — `DatetimeIndex` не нужен, но и не мешает; хотя лучше передавать `index as is` и добавить isinstance check в `resolve_warmup_bars`)
+
+**Альтернативный вариант (проще):**
+- В `resolve_warmup_bars` при ветке `warmup_time is not None` проверять `isinstance(index, pd.DatetimeIndex)` → если нет, `raise TypeError`
+- В `engine/run.py` убрать обёртку `pd.DatetimeIndex(index)`
+
+**Почему для grid критично:**
+Grid-скрипт может работать на данных с `RangeIndex` (synthetic). Если при этом в конфиге задан `warmup_time: "7d"` → фиктивные наносекундные даты → warmup = 1 бар → **все 10000+ прогонов grid получают неверный warmup**.
+
+**Тесты:**
+- `RangeIndex` + `warmup_time="7d"` → `ValueError` / `TypeError`
+- `DatetimeIndex` + `warmup_time="7d"` → корректное число баров
+- `RangeIndex` + `warmup_period=100` → работает (без обращения к `convert_time_to_bars`)
+
+---
+
+### 1.5. `warmup.py` — валидация `atr_period_range` в `calculate_warmup`
+
+**Файл:** `utils/warmup.py`, функция `calculate_warmup`, строка 57
+
+**Что сделать:**
+- Заменить `atr_period_max = atr_range[1] if atr_range else DEFAULT_ATR_PERIOD_MAX` на:
+
+```
+if atr_range is not None:
+    if not isinstance(atr_range, (list, tuple)) or len(atr_range) < 2:
+        raise ConfigError(
+            f"optimization.atr_period_range must be [min, max], got: {atr_range!r}"
+        )
+    atr_period_max = int(atr_range[1])
+else:
+    atr_period_max = DEFAULT_ATR_PERIOD_MAX
+```
+
+- Импортировать `ConfigError`
+
+**Почему для grid критично:**
+Grid-конфиг — единственное место, где задаётся сетка ATR. Если `atr_period_range` — одно число, строка, `None` внутри list, и т.д. — `IndexError` или `TypeError` **в середине** прогона. С валидацией — понятная ошибка **до старта**.
+
+**Тесты:**
+- `atr_period_range: [5, 55]` → ok, 55
+- `atr_period_range: 55` (скаляр) → `ConfigError`
+- `atr_period_range: [5]` (один элемент) → `ConfigError`
+- `atr_period_range: null` → используется `DEFAULT_ATR_PERIOD_MAX`
+- Отсутствие ключа → используется `DEFAULT_ATR_PERIOD_MAX`
+
+---
+
+### 1.6. `warmup.py` — исправить docstring `calculate_warmup`
+
+**Файл:** `utils/warmup.py`, строки 38–46
+
+**Что сделать:**
+- Заменить в docstring:
+  - `warmup = base + auto` → `warmup = max(base, auto)`
+- Привести в соответствие с фактическим кодом строки 66
+
+**Почему для grid критично:**
+Разработчик grid-скрипта, читающий docstring, будет ожидать **сумму** (бо́льший warmup), а получит **максимум**. Это приводит к неверным ручным проверкам и путанице при дебаге.
+
+---
+
+## ФАЗА 2: Согласованность между модулями — то, что ведёт к **рассинхрону** в grid pipeline
+
+### 2.1. `constants.py` — согласовать `TRADE_MODES` с `core/backtest.py`
+
+**Файл:** `utils/constants.py`, строка 102
+
+**Что сделать:**
+- Добавить `"revers"` в `TRADE_MODES`: `TRADE_MODES: Final[tuple] = ("both", "revers", "long", "short")`
+- Добавить комментарий: `# "revers" and "both" are aliases: both enable long+short with reversal`
+
+**Почему для grid критично:**
+Grid-скрипт будет итерировать по `TRADE_MODES` для перебора режимов. Если `"revers"` нет в списке, а движок его ожидает — grid не покроет этот режим. Или наоборот: если grid валидирует конфиг по `TRADE_MODES`, а пользователь пишет `trade_mode: revers` — отказ.
+
+---
+
+### 2.2. `warmup.py` — удалить мёртвый `calculate_warmup_tester`
+
+**Файл:** `utils/warmup.py`, строки 116–140
+
+**Что сделать:**
+- **Удалить** функцию `calculate_warmup_tester` полностью
+- Если когда-то потребуется упрощённый API для тестера — это делается через `calculate_warmup` с минимальным конфигом `{"optimization": {"atr_period_range": [x, y]}, "validation": {"warmup_period": 0, "warmup_period_auto": True/False}}`
+
+**Почему для grid критично:**
+Мёртвый код с **другой формулой** — ловушка. Разработчик grid может найти его и использовать, получив **другой** warmup чем у optimizer. Одна формула — `calculate_warmup` + `apply_auto_warmup_to_config`. Точка.
+
+---
+
+### 2.3. `enums.py` — поправить комментарий про CALENDAR
+
+**Файл:** `utils/enums.py`, строка 35
+
+**Что сделать:**
+- Изменить комментарий с `# 365.25 days/year (crypto, forex 24/7)` на `# 365.25 days/year (crypto, 24/7 markets)`
+- Убрать `forex` из описания CALENDAR, т.к. дефолт для forex — TRADING (и есть отдельный обоснованный комментарий строки 41–48)
+
+---
+
+### 2.4. `constants.py` — пометить неиспользуемые константы
+
+**Файл:** `utils/constants.py`
+
+**Что сделать:**
+- `MIN_STD_THRESHOLD` — либо **использовать** в `core/metrics.py` вместо хардкода `1e-12` (строка 99 metrics.py), либо пометить `# UNUSED — candidate for removal`
+- `MIN_DATA_POINTS`, `RECOMMENDED_MIN_DATA_POINTS` — аналогично: нигде не enforce; если grid-скрипт будет проверять минимум баров, он должен использовать эти константы — добавить комментарий `# Not currently enforced — intended for caller validation`
+- `DEFAULT_MAX_PRICE_CHANGE_PERCENT` — не используется — пометить
+
+Это не баги, но **чистка для grid-разработчика**, чтобы он знал, на что можно полагаться, а что — просто декларации.
+
+---
+
+## ФАЗА 3: Робастность walk-forward для grid
+
+### 3.1. `time_utils.py` — `find_index_for_timestamp`: assert монотонности
+
+**Файл:** `utils/time_utils.py`, функция `find_index_for_timestamp`
+
+**Что сделать:**
+- Добавить в начало: `if not index.is_monotonic_increasing: raise ValueError("find_index_for_timestamp requires sorted index")`
+- Или: вынести проверку монотонности в общую функцию `_validate_datetime_index(index)` и вызывать из `calculate_median_timedelta`, `find_index_for_timestamp`, `duration_to_bars_via_index`
+
+**Почему для grid:**
+Walk-forward в grid может вызываться на slice данных, который теоретически перемешан. `searchsorted` на неотсортированном индексе **молча** даёт неверные позиции → неверные train/test границы → **все WF-метрики мусор**.
+
+---
+
+### 3.2. `time_utils.py` — документировать overlap поведение WF при step < test
+
+**Файл:** `utils/time_utils.py`, docstring `make_walk_forward_slices`
+
+**Что сделать:**
+- Добавить в docstring: `Note: When step_size < test_size, test windows will overlap. This is allowed but may bias OOS aggregate statistics. Grid consumers should be aware and decide whether to de-duplicate or average overlapping OOS results.`
+
+---
+
+### 3.3. `time_utils.py` — обновить docstring `make_walk_forward_slices` (убрать устаревшее `NotImplementedError`)
+
+**Файл:** `utils/time_utils.py`, строки 524–526
+
+**Что сделать:**
+- Строка `NotImplementedError: If anchor != "start" (not yet implemented)` → заменить на `ValueError: If anchor is not "start" or "end"`
+- Anchor "end" **реализован** — docstring лжёт
+
+---
+
+## ФАЗА 4: INVALID_METRIC_VALUE — контракт для grid
+
+### 4.1. `constants.py` — добавить explicit контракт-комментарий
+
+**Файл:** `utils/constants.py`, строки 14–21
+
+**Что сделать:**
+- Расширить комментарий:
+
+```
+# INVALID_METRIC_VALUE = -999.0
+# CONTRACT for grid consumers:
+#   Any trial with objective metric == INVALID_METRIC_VALUE MUST be excluded
+#   from ranking. Do NOT sort/argmax without filtering.
+#   Suggested filter: result.metrics[objective] > INVALID_METRIC_VALUE + 1.0
+#
+# MAX_VALID_METRIC = 9999.0  
+# CONTRACT: Any metric > MAX_VALID_METRIC is treated as outlier / numerical artifact.
+#   Suggested filter: result.metrics[objective] < MAX_VALID_METRIC
+```
+
+**Почему для grid критично:**
+Grid **не** использует Optuna pruning/objectives. Grid-скрипт собирает все `BacktestResult.metrics[objective]` в список/DataFrame и делает `sort_values`. Без явного контракта разработчик grid может забыть отфильтровать `-999` → sentinel окажется на дне (при `max()` — ок), но при `min()` (Drawdown, risk-adjusted) — будет выбран **как лучший**. Контракт должен быть **в коде**, не только в голове.
+
+---
+
+### 4.2. Рассмотреть: перейти с sentinel `-999.0` на `float('nan')`
+
+**Это рекомендация**, не обязательный фикс. Описание:
+- `np.nan` естественно исключается из `np.nanmean`, `np.nanmax`, pandas `sort_values(na_position='last')`
+- Grid-скрипт на pandas будет автоматически **игнорировать** невалидные метрики
+- Минус: нужен рефактор **всех** мест, где `== INVALID_METRIC_VALUE` → `np.isnan`
+
+**Решение**: оставить на этапе grid-написания. Если sentinel-подход уже работает во всём проекте — не ломать; но добавить helper:
+
+```python
+def is_valid_metric(value: float) -> bool:
+    return np.isfinite(value) and value > INVALID_METRIC_VALUE + 1.0 and value < MAX_VALID_METRIC
+```
+
+Добавить в `utils/constants.py` или в отдельный `utils/metric_helpers.py`.
+
+---
+
+## ФАЗА 5: Защитное кодирование и логирование
+
+### 5.1. `warmup.py` — `apply_auto_warmup_to_config`: deepcopy
+
+**Файл:** `utils/warmup.py`, строка 111
+
+**Что сделать:**
+- Заменить `cfg_eff = copy.copy(cfg)` на `cfg_eff = copy.deepcopy(cfg)`
+
+**Почему для grid критично:**
+Grid может вызывать `apply_auto_warmup_to_config` один раз, а потом **модифицировать** `cfg_eff["optimization"]["atr_period_range"]` для текущей итерации. С shallow copy — оригинал мутируется → следующая итерация получает **изменённый** конфиг. С deepcopy — безопасно.
+
+---
+
+### 5.2. Добавить logging в ключевые точки
+
+**Файлы:** `config.py`, `warmup.py`, `time_utils.py`
+
+**Что сделать:**
+
+В `config.py` → `load_config`:
+- `logger.info(f"Config loaded from {path}: {len(config)} top-level keys")`
+
+В `warmup.py` → `calculate_warmup`:
+- `logger.debug(f"Warmup resolved: base={base}, auto={auto if auto_on else 'off'}, final={warmup}, n={n}")`
+
+В `time_utils.py` → `make_walk_forward_slices` (в конце):
+- `logger.info(f"WF slices generated: {len(windows)} windows, scheme={scheme}, anchor={anchor}")`
+
+В `time_utils.py` → `convert_time_to_bars`:
+- `logger.debug(f"Time-to-bars: '{time_str}' → {bars_int} bars (median_delta={median_delta})")`
+
+**Почему для grid:**
+Grid — 10000+ итераций. При проблеме нужно быстро найти, какой warmup был, сколько WF-окон, какая медиана. Без логов — слепой дебаг.
+
+---
+
+### 5.3. `time_utils.py` — `parse_time_string`: задокументировать `M` = минуты
+
+**Файл:** `utils/time_utils.py`, docstring `parse_time_string`
+
+**Что сделать:**
+- Добавить: `WARNING: "M" is treated as minutes, NOT months. For months, use parse_duration_string("Nmo"). This parser only handles short time units (d/h/m/s).`
+
+---
+
+### 5.4. `warmup.py` — `clamp`: guard `min_val <= max_val`
+
+**Файл:** `utils/warmup.py`, функция `clamp`
+
+**Что сделать:**
+- Добавить: `assert min_val <= max_val, f"clamp: min_val={min_val} > max_val={max_val}"`
+
+---
+
+## ФАЗА 6: Тесты
+
+### 6.1. Новые тесты для `config.py`
+
+- `test_load_config_empty_file` → ConfigError
+- `test_load_config_yaml_list` → ConfigError
+- `test_load_config_yaml_scalar` → ConfigError
+- `test_load_config_yaml_null` → ConfigError
+- `test_load_config_valid_dict` → ok
+- `test_load_config_file_not_found` → FileNotFoundError
+- `test_load_config_invalid_yaml` → yaml.YAMLError
+
+### 6.2. Новые тесты для `time_utils.py`
+
+- `test_median_timedelta_unsorted_index` → ValueError
+- `test_median_timedelta_zero_delta` → ValueError
+- `test_median_timedelta_duplicates_nonzero` → ok
+- `test_convert_time_to_bars_inf_result` → ValueError
+- `test_find_index_unsorted` → ValueError
+- `test_duration_to_bars_nonunique_timestamps` → проверить граничный эффект
+
+### 6.3. Новые тесты для `warmup.py`
+
+- `test_calculate_warmup_atr_range_scalar` → ConfigError
+- `test_calculate_warmup_atr_range_one_element` → ConfigError
+- `test_calculate_warmup_atr_range_none_in_list` → ConfigError / TypeError
+- `test_apply_auto_warmup_deep_mutation_safety` → модифицировать nested dict в returned config → оригинал не изменён
+
+### 6.4. Интеграционный тест: grid-сценарий
+
+- `test_grid_invalid_metric_not_selected`: прогнать 3 прогона, один возвращает `INVALID_METRIC_VALUE` → при отборе лучшего он **исключён**
+- `test_grid_warmup_time_with_range_index` → ValueError
+- `test_grid_wf_slices_no_data_leakage`: для каждого WFWindowSlice: `train_end_idx <= test_start_idx` (строго)
+
+---
+
+## Порядок выполнения (зависимости)
+
+```
+1.1 config.py          ← нет зависимостей
+1.2 median_timedelta   ← нет зависимостей
+1.3 convert_time_to_bars ← зависит от 1.2
+1.4 engine/run.py warmup_time guard ← зависит от 1.2, 1.3
+1.5 calculate_warmup atr_range ← нет зависимостей
+1.6 docstring warmup   ← нет зависимостей
+
+2.1 TRADE_MODES        ← нет зависимостей
+2.2 remove tester warmup ← после 1.5, 1.6
+2.3 enums comment      ← нет зависимостей
+2.4 unused constants    ← нет зависимостей
+
+3.1 find_index monotonic ← нет зависимостей
+3.2 WF overlap docs     ← нет зависимостей
+3.3 WF docstring fix    ← нет зависимостей
+
+4.1 INVALID_METRIC contract ← нет зависимостей
+4.2 is_valid_metric helper  ← после 4.1
+
+5.1 deepcopy           ← нет зависимостей
+5.2 logging            ← нет зависимостей
+5.3 parse_time M docs  ← нет зависимостей
+5.4 clamp assert       ← нет зависимостей
+
+6.* тесты              ← после соответствующих фиксов
+```
+
+Фазы 1.1–1.6 можно делать **параллельно** (независимые файлы). Фаза 2 — после Фазы 1. Фазы 3, 4, 5 — параллельно между собой. Тесты — последними по каждому блоку.
+
+---
+
+## Чего **не** делаем
+
+- **Не переходим на pydantic для конфига** сейчас: это крупный рефактор; для grid достаточно `isinstance(dict)` + точечная валидация ключей в `calculate_warmup`
+- **Не меняем sentinel `−999.0` на `nan`**: слишком много потребителей; вместо этого — helper + контракт
+- **Не трогаем `core/metrics.py`** (кроме optional 2.4 про epsilon): metrics — отдельный модуль, его фиксить в другом PR
+- **Не добавляем schema validation** всего YAML: это задача grid-скрипта при загрузке конфига; в `load_config` — только «не None и dict»
+
+сё остальное — ВМЕСТЕ с grid
+Все остальные фиксы из плана естественно вписываются в разработку grid:
+
+Когда при разработке grid	Какие фиксы подтянутся
+Пишешь загрузку данных и конфига	time_utils монотонность (1.2, 3.1), логирование (5.2)
+Пишешь цикл перебора параметров	INVALID_METRIC_VALUE контракт (4.1), helper is_valid_metric (4.2)
+Подключаешь warmup_time	Guard в engine (1.4), convert_time_to_bars inf-check (1.3)
+Подключаешь walk-forward	WF docstring (3.3), overlap docs (3.2)
+Пишешь ранжирование результатов	Sentinel vs NaN решение (4.2)
+Пишешь тесты grid	Все тесты фазы 6
+Прогоняешь первый полный прогон	deepcopy (5.1), logging (5.2) — поймёшь по необходимости

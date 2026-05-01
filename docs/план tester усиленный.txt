@@ -1,0 +1,439 @@
+Аудит и усиленный план реализации ветки tester в проекте 3.1_wf_grid
+=====================================================================
+
+Дата актуализации: 2026-04-24
+
+Статус: GO WITH CHANGES.
+
+Главное правило
+---------------
+
+Реализация tester должна быть additive:
+
+- копировать только новые директории cli/, testing/, io/;
+- добавить только две недостающие функции в существующие файлы;
+- не перезаписывать общий движок supertrend_optimizer из donor TESTER;
+- не копировать data.csv из donor TESTER;
+- не копировать donor TESTER/supertrend_optimizer/__init__.py, если его не было в текущем donor.
+
+Запрещено выполнять команды вида:
+
+    Copy-Item -Recurse "donor TESTER\supertrend_optimizer\*" "donor\supertrend_optimizer\"
+
+Такой wildcard-copy перезапишет core/, data/, engine/, utils/ и может вернуть look-ahead
+семантику close_to_close в WF-grid.
+
+
+Почему нельзя массово перезаписывать donor
+------------------------------------------
+
+Одноименные файлы в donor TESTER и текущем donor/supertrend_optimizer отличаются.
+Текущая версия donor местами строже и безопаснее:
+
+- utils/enums.py содержит только ExecutionModel.OPEN_TO_OPEN и комментарий о том,
+  что CLOSE_TO_CLOSE удален из-за look-ahead bias.
+- engine/run.py явно бросает ValueError, если execution_model != OPEN_TO_OPEN.
+- utils/warmup.py содержит валидацию atr_period_range через ConfigError.
+- data/timeframe.py содержит более строгую обработку annualization_factor /
+  periods_per_year, unsorted/tz/NaT индексов и suppress_warnings.
+
+Итог: TESTER-файлы core/backtest.py, core/trades.py, engine/run.py, utils/enums.py,
+data/timeframe.py и utils/warmup.py нельзя заменять целиком.
+
+
+Блокеры перед реализацией
+-------------------------
+
+B1. io/__init__.py
+
+В donor TESTER/supertrend_optimizer/io/ нет __init__.py. Импорты могут работать как
+namespace-package, но для согласованности нужно создать пустой файл:
+
+    donor/supertrend_optimizer/io/__init__.py
+
+B2. close_to_close в cli/tester.py
+
+После копирования cli/tester.py нужно:
+
+- убрать "close_to_close" из choices у аргумента --execution-model;
+- после чтения execution_model из YAML явно отвергать любое значение кроме None
+  и "open_to_open" через ConfigError.
+
+Цель: пользователь должен получить понятную ошибку, а не traceback на
+ExecutionModel("close_to_close").
+
+B3. close_to_close в run_batch_tester.py
+
+Перед созданием ExecutionModel в run_batch_tester.py нужно явно проверить:
+
+- None -> использовать ExecutionModel.OPEN_TO_OPEN;
+- "open_to_open" -> разрешить;
+- любое другое значение -> ConfigError с понятным текстом.
+
+B4. coerce_annualization_config_value
+
+Рекомендуемый контракт: минимальный, только для tester CLI.
+
+Функция нужна физически, потому что cli/tester.py импортирует ее напрямую.
+Но она не должна становиться общей точкой annualization для WF-grid.
+
+Реализация:
+
+- bool запрещен;
+- int разрешен;
+- float разрешен только если это целое конечное число;
+- str "auto" разрешен;
+- str с целым числом разрешен;
+- прочее -> ValueError.
+
+В docstring указать: "for tester CLI only". Для общей логики WF-grid продолжает
+использоваться существующая resolve_periods_per_year_from_config().
+
+B5. Manifest и backup
+
+В проекте нет .git, поэтому до правок обязательно:
+
+- создать backup_pre_tester_<ts>/;
+- сохранить zip donor/supertrend_optimizer/;
+- сохранить копии run.py, config.yaml, data.csv;
+- создать pre_tester_manifest.txt с SHA256 для:
+  - donor/supertrend_optimizer/core/backtest.py
+  - donor/supertrend_optimizer/core/trades.py
+  - donor/supertrend_optimizer/engine/run.py
+  - donor/supertrend_optimizer/utils/enums.py
+  - donor/supertrend_optimizer/data/timeframe.py
+  - donor/supertrend_optimizer/utils/warmup.py
+  - run.py
+  - config.yaml
+  - data.csv
+
+После правок создать post_tester_manifest.txt и проверить, что запрещенные к
+перезаписи файлы core/backtest.py, core/trades.py, engine/run.py, utils/enums.py
+остались побитово одинаковыми.
+
+Важно: data/timeframe.py и utils/warmup.py НЕ должны совпадать по hash после
+реализации, потому что в них сознательно добавляются новые функции. Для этих двух
+файлов контроль другой: diff должен содержать только ожидаемый hunk с новой функцией
+и, при необходимости, минимальным импортом. Существующие функции и их сигнатуры не
+должны измениться.
+
+
+Что переносить
+--------------
+
+Из donor TESTER/supertrend_optimizer/ в donor/supertrend_optimizer/:
+
+- cli/__init__.py
+- cli/tester.py
+- testing/__init__.py
+- testing/runner.py
+- testing/signal_events.py
+- io/excel_format_helpers.py
+- io/excel_tester.py
+- новый пустой io/__init__.py
+
+В корень проекта:
+
+- config_tester.yaml
+- run_batch_tester.py
+- run_tester.bat
+
+Не переносить:
+
+- donor TESTER/data.csv
+- donor TESTER/supertrend_optimizer/__init__.py
+- donor TESTER/supertrend_optimizer/core/*
+- donor TESTER/supertrend_optimizer/engine/*
+- donor TESTER/supertrend_optimizer/utils/enums.py
+- donor TESTER/supertrend_optimizer/utils/warmup.py целиком
+- donor TESTER/supertrend_optimizer/data/timeframe.py целиком
+
+
+Что добавить в существующие файлы
+---------------------------------
+
+1. donor/supertrend_optimizer/utils/warmup.py
+
+Добавить calculate_warmup_tester дословно по смыслу TESTER:
+
+    def calculate_warmup_tester(n: int, atr_period: int, warmup_period_auto: bool = False) -> int:
+        if warmup_period_auto:
+            auto = clamp(int(n * DEFAULT_WARMUP_FRACTION), MIN_AUTO_WARMUP, MAX_AUTO_WARMUP)
+            return max(auto, atr_period)
+        return atr_period
+
+Не менять calculate_warmup(), apply_auto_warmup_to_config() и их сигнатуры.
+
+2. donor/supertrend_optimizer/data/timeframe.py
+
+Добавить coerce_annualization_config_value рядом с annualization helpers.
+Не менять resolve_periods_per_year_from_config().
+
+Docstring должен явно сказать, что функция нужна для tester CLI и возвращает
+int или "auto".
+
+
+Правка run_batch_tester.py
+--------------------------
+
+После копирования в корень добавить sys.path до первого импорта supertrend_optimizer.*.
+Блок должен стоять сразу после from pathlib import Path:
+
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).parent / "donor"))
+
+Также добавить B3-защиту для execution_model.
+
+
+run_tester.bat
+--------------
+
+На первом проходе оставить как в donor TESTER, чтобы не отклоняться от эталона:
+
+- %1 = CSV;
+- CONFIG жестко config_tester.yaml.
+
+Расширение до %2 CONFIG и %3 output-dir считать отдельной задачей.
+
+
+Уточнение про io/ и excel_walk_forward.py
+-----------------------------------------
+
+Перенос io/ нужен для tester.
+
+Побочно он закрывает висячий импорт в donor/supertrend_optimizer/excel_walk_forward.py:
+
+    supertrend_optimizer.io.excel_format_helpers
+
+Но excel_walk_forward.py не входит в текущий WF-grid pipeline и не должен становиться
+объектом ремонта в этой задаче. Не пытаться чинить его дополнительные импорты
+validation/scoring/imputation.
+
+
+Улучшенный порядок реализации
+-----------------------------
+
+0. Pre-check:
+   - python --version работает;
+   - data.csv существует;
+   - Excel-файлы результатов не открыты в Excel;
+   - pre_tester_manifest.txt создан.
+
+1. Backup:
+   - создать backup_pre_tester_<ts>/;
+   - zip donor/supertrend_optimizer/;
+   - сохранить копии run.py, config.yaml, data.csv.
+
+2. Добавить calculate_warmup_tester в utils/warmup.py.
+
+3. Добавить coerce_annualization_config_value в data/timeframe.py.
+
+4. Скопировать io/:
+   - excel_format_helpers.py
+   - excel_tester.py
+   - создать пустой __init__.py
+
+5. Скопировать testing/ один в один из TESTER.
+
+6. Скопировать cli/ один в один из TESTER, затем исправить cli/tester.py:
+   - удалить "close_to_close" из argparse choices;
+   - добавить YAML-validation execution_model через ConfigError.
+
+7. Скопировать в корень:
+   - config_tester.yaml
+   - run_batch_tester.py
+   - run_tester.bat
+
+8. Исправить run_batch_tester.py:
+   - добавить sys.path.insert(... donor ...);
+   - добавить явную защиту от close_to_close перед ExecutionModel(...).
+
+9. Post-change manifest:
+   - пересчитать SHA256;
+   - убедиться, что core/backtest.py, core/trades.py, engine/run.py, utils/enums.py
+     не изменились;
+   - убедиться, что data.csv не изменился.
+   - для data/timeframe.py и utils/warmup.py проверить diff, а не совпадение hash:
+     допускаются только новые функции coerce_annualization_config_value и
+     calculate_warmup_tester плюс минимально необходимые импорты.
+
+10. Smoke-проверки.
+
+
+Финальный чек-лист артефактов
+-----------------------------
+
+Позитивные артефакты:
+
+[ ] backup_pre_tester_<ts>/ создан.
+[ ] pre_tester_manifest.txt создан.
+[ ] post_tester_manifest.txt создан.
+[ ] donor/supertrend_optimizer/utils/warmup.py содержит calculate_warmup_tester.
+[ ] donor/supertrend_optimizer/data/timeframe.py содержит coerce_annualization_config_value.
+[ ] diff donor/supertrend_optimizer/utils/warmup.py содержит только ожидаемый hunk.
+[ ] diff donor/supertrend_optimizer/data/timeframe.py содержит только ожидаемый hunk.
+[ ] donor/supertrend_optimizer/io/__init__.py существует и пустой.
+[ ] donor/supertrend_optimizer/io/excel_format_helpers.py существует.
+[ ] donor/supertrend_optimizer/io/excel_tester.py существует.
+[ ] donor/supertrend_optimizer/testing/__init__.py существует.
+[ ] donor/supertrend_optimizer/testing/runner.py существует.
+[ ] donor/supertrend_optimizer/testing/signal_events.py существует.
+[ ] donor/supertrend_optimizer/cli/__init__.py существует.
+[ ] donor/supertrend_optimizer/cli/tester.py существует и содержит B2-правки.
+[ ] config_tester.yaml лежит в корне.
+[ ] run_batch_tester.py лежит в корне и содержит sys.path-инъекцию.
+[ ] run_tester.bat лежит в корне.
+
+Негативные артефакты:
+
+[ ] donor/supertrend_optimizer/__init__.py не появился, если его не было до начала.
+[ ] donor/supertrend_optimizer/core/backtest.py hash совпадает с pre-manifest.
+[ ] donor/supertrend_optimizer/core/trades.py hash совпадает с pre-manifest.
+[ ] donor/supertrend_optimizer/engine/run.py hash совпадает с pre-manifest.
+[ ] donor/supertrend_optimizer/utils/enums.py hash совпадает с pre-manifest.
+[ ] data.csv hash совпадает с pre-manifest.
+[ ] cli/tester.py не содержит "close_to_close" в argparse choices.
+[ ] config_tester.yaml не содержит execution_model или содержит только open_to_open.
+
+
+Smoke-проверки
+--------------
+
+S1. Import tester:
+
+    python -c "import sys, pathlib; sys.path.insert(0, str(pathlib.Path('donor').resolve())); import supertrend_optimizer.cli.tester; import supertrend_optimizer.testing.runner; import supertrend_optimizer.io.excel_tester; print('tester imports ok')"
+
+Ожидается:
+
+    tester imports ok
+
+S2. Batch tester:
+
+    python run_batch_tester.py --csv data.csv --config config_tester.yaml
+
+Ожидается:
+
+- в логах "Batch SuperTrend Tester";
+- equal_blocks печатает S1..S7;
+- legacy печатает 100%, 75%, 50%, 33%, 25%;
+- exit code 0.
+
+S3. XLSX:
+
+- появились test_result_equal_blocks_eqblk_*.xlsx;
+- появились test_result_legacy_*.xlsx;
+- оба файла не пустые и открываются в Excel.
+
+S4. WF-grid regression:
+
+    python run.py --config config.yaml
+
+Ожидается:
+
+- ошибок нет;
+- создан новый data_wf_grid_results_<ts>.xlsx;
+- напечатаны grid diagnostics.
+
+S5. Tests:
+
+    pytest wf_grid/tests
+
+Ожидается зеленая базовая линия. Если до правок тесты уже были красные, результат
+сравнивать с pre-run.
+
+S6. Negative CLI close_to_close:
+
+PowerShell:
+
+    $env:PYTHONPATH='donor'
+    python -m supertrend_optimizer.cli.tester --csv data.csv --atr 14 --mult 3.0 --mode long --out x.xlsx --execution-model close_to_close
+
+cmd.exe:
+
+    set PYTHONPATH=donor
+    python -m supertrend_optimizer.cli.tester --csv data.csv --atr 14 --mult 3.0 --mode long --out x.xlsx --execution-model close_to_close
+
+Ожидается:
+
+- exit code != 0;
+- argparse отклоняет аргумент;
+- нет traceback.
+
+Без PYTHONPATH=donor этот тест из корня проекта может завершиться ModuleNotFoundError,
+и это не проверит argparse. Поэтому PYTHONPATH здесь обязателен.
+
+Важно: на Windows не использовать /tmp/x.xlsx; использовать локальный путь x.xlsx
+или .\tmp\x.xlsx.
+
+S7. Negative YAML close_to_close:
+
+- создать временную копию config_tester_bad.yaml;
+- добавить execution_model: close_to_close;
+- запустить:
+
+    python run_batch_tester.py --csv data.csv --config config_tester_bad.yaml
+
+Ожидается:
+
+- понятная ошибка ConfigError;
+- нет traceback на ExecutionModel(...).
+
+S8. Idempotency:
+
+Повторный запуск:
+
+    python run_batch_tester.py --csv data.csv --config config_tester.yaml
+
+Ожидается:
+
+- создается новый timestamp-файл;
+- если файл открыт в Excel, PermissionError обработан понятным сообщением.
+
+
+Сводка рисков close_to_close
+----------------------------
+
+Поверхность: argparse --execution-model
+Файл: cli/tester.py
+Риск: choices пускает close_to_close
+Митигация: удалить close_to_close из choices.
+
+Поверхность: YAML execution_model
+Файл: cli/tester.py
+Риск: значение попадает в config без валидации
+Митигация: явный ConfigError для любого значения кроме open_to_open.
+
+Поверхность: ExecutionModel(...)
+Файл: run_batch_tester.py
+Риск: ValueError/traceback
+Митигация: предварительная проверка и ConfigError.
+
+Поверхность: enum
+Файл: utils/enums.py
+Риск: возврат CLOSE_TO_CLOSE при перезаписи TESTER-версией
+Митигация: не трогать файл, hash должен совпасть.
+
+Поверхность: engine guard
+Файл: engine/run.py
+Риск: снятие защиты при перезаписи TESTER-версией
+Митигация: не трогать файл, hash должен совпасть.
+
+
+Главная защита от регрессии WF-grid
+-----------------------------------
+
+Копировать только три подпапки по одной:
+
+    cli
+    testing
+    io
+
+И вручную добавлять только два маленьких hunk-а в:
+
+    donor/supertrend_optimizer/data/timeframe.py
+    donor/supertrend_optimizer/utils/warmup.py
+
+Любое изменение core/, engine/, utils/enums.py или data.csv считается ошибкой реализации
+и требует отката из backup.

@@ -1,0 +1,29 @@
+5 обязательных P0
+Это те, без которых я бы не выпускал даже в paper-trading:
+
+pipeline-level data validation
+hard gate по ok_ratio / survivorship
+stricter scoring policy при малом n_passed
+cleanup defensive fallback metrics
+trades export for top-N, не только top-1
+
+ещё 6–8 важных P1
+Они не так критичны, как P0, но заметно повышают надёжность:
+6. заменить production assert на raise
+7. donor/grid sentinel static check (INVALID_METRIC_VALUE, MAX_VALID_METRIC)
+8. assign_step_status: NaN/invalid num_trades не должен давать ok
+9. adaptive или более жёсткий score_discrimination threshold
+10. явный warmup_sufficient / prepend sufficiency flag
+11. benchmark comparison vs buy-and-hold
+12. commission/slippage sensitivity columns
+13. legacy mode: не давать Tier-3 candidate становиться rank-1 по sort-only path
+
+ещё 5–7 P2 / hardening
+Это уже не блокеры, а доводка:
+14. унифицировать naming drift в StepResult (test_start_idx для train, oos_trades_df для train)
+15. убрать хрупкий sys.path.insert(...) в xlsx writer
+16. защита от неуникального grid_point_id при более мелком multiplier_step
+17. donor parity test
+18. end-to-end test с реальным CSV как обязательный
+19. xlsx read-back test
+20. memory/streaming strategy для больших grid runs

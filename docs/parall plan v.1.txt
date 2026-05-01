@@ -1,0 +1,354 @@
+PLAN: PARALLELIZATION FOR C:\3.1_wf_grid
+Version: v.1
+
+Context
+-------
+The audited implementation in C:\3.0 - FAST uses ProcessPoolExecutor and
+parallelizes by grid_point. That direction is correct, but this plan adjusts it
+for the current C:\3.1_wf_grid codebase and fixes the main weaknesses found in
+FAST:
+
+- no controllable max_workers / sequential switch;
+- two separate process pools for OOS and Train;
+- ordered executor.map collection;
+- implicit multiprocessing context;
+- fallback behavior that can hide real multiprocessing failures;
+- no direct tests for parallel equivalence.
+
+
+Goal
+----
+Speed up the most expensive stage of the pipeline: WF execution across grid
+points.
+
+Current state in C:\3.1_wf_grid:
+
+- wf_grid/pipeline/orchestrator.py runs OOS sequentially over grid_points.
+- Then it runs Train sequentially over the same grid_points.
+- ZigZag global stats are computed once before WF execution.
+- run_wf_for_grid_point and run_wf_train_for_grid_point already isolate work by
+  grid point and are good boundaries for process-level parallelism.
+
+For the current config.yaml, the rough scale is:
+
+- about 273 grid points;
+- about 7 WF steps;
+- OOS + Train;
+- about 3822 backtest calls in one process.
+
+
+Core Design
+-----------
+Parallelize by grid_point, but unlike FAST, each worker task should compute both
+OOS and Train for the same grid point.
+
+One task:
+
+    grid_point -> (grid_point_id, oos_step_results, train_step_results)
+
+Worker initializer receives shared immutable context once per process:
+
+- full OHLC data packed as numpy arrays + index;
+- wf_slices;
+- resolved GridConfig;
+- prepend_bars;
+- zigzag_global_stats;
+- project_root and donor_path for Windows spawn imports.
+
+Use ProcessPoolExecutor because the backtest/SuperTrend/ZigZag execution is
+CPU-bound and contains Python loops.
+
+
+Phase 1. Execution Config
+-------------------------
+Add an execution config section to wf_grid/config/schema.py:
+
+    @dataclass
+    class ExecutionConfig:
+        parallel_enabled: bool = True
+        max_workers: Optional[int] = None
+        chunksize: Optional[int] = None
+        fallback_to_sequential: bool = False
+
+Add to GridConfig:
+
+    execution: ExecutionConfig = field(default_factory=ExecutionConfig)
+
+Update wf_grid/config/loader.py strict schema:
+
+- add "execution" to top-level allowed keys;
+- add "execution": {"parallel_enabled", "max_workers", "chunksize",
+  "fallback_to_sequential"}.
+
+Add to config.yaml:
+
+    execution:
+      parallel_enabled: true
+      max_workers: null
+      chunksize: null
+      fallback_to_sequential: false
+
+Validation rules:
+
+- max_workers: None or int >= 1;
+- chunksize: None or int >= 1;
+- parallel_enabled: bool;
+- fallback_to_sequential: bool.
+
+
+Phase 2. Worker Layer
+---------------------
+Create:
+
+    wf_grid/wf/_mp_helpers.py
+
+Functions:
+
+    pack_data(full_data: pd.DataFrame) -> dict
+    unpack_data(data_dict: dict) -> pd.DataFrame
+    _init_worker(project_root, donor_path, data_dict, wf_slices, config,
+                 prepend_bars, zigzag_global_stats) -> None
+    _run_grid_point_both(grid_point) -> tuple[str, list[StepResult], list[StepResult]]
+
+Implementation notes:
+
+- All worker-callable functions must be top-level for Windows spawn pickling.
+- Heavy imports should be lazy inside initializer or worker function.
+- Global worker state is acceptable here because it is per-process immutable
+  runtime context.
+- Do not recompute zigzag_global_stats in workers. The orchestrator already
+  computes it once before WF execution.
+- logging.disable(logging.WARNING) can be used inside workers to avoid noisy
+  duplicate worker logs.
+
+
+Phase 3. Orchestrator Integration
+---------------------------------
+In wf_grid/pipeline/orchestrator.py, replace the two sequential loops:
+
+- OOS loop around run_wf_for_grid_point;
+- Train loop around run_wf_train_for_grid_point;
+
+with a single helper:
+
+    all_oos_results, all_train_results = _execute_wf_grid(
+        grid_points=grid_points,
+        wf_slices=wf_slices,
+        data=data,
+        config=config,
+        prepend_bars=prepend_bars,
+        zigzag_global_stats=zigzag_global_stats,
+    )
+
+Sequential path:
+
+- used when config.execution.parallel_enabled is false;
+- used when resolved max_workers == 1;
+- calls existing run_wf_for_grid_point and run_wf_train_for_grid_point;
+- preserves old behavior exactly.
+
+Parallel path:
+
+- import multiprocessing and ProcessPoolExecutor;
+- use mp_context=multiprocessing.get_context("spawn");
+- compute max_workers as:
+
+      min(config.execution.max_workers or os.cpu_count() or 1, len(grid_points))
+
+- compute chunksize as:
+
+      config.execution.chunksize or max(1, len(grid_points) // (max_workers * 8))
+
+- submit futures manually;
+- collect with concurrent.futures.as_completed;
+- fill two dictionaries:
+
+      all_oos_results[gp_id] = oos_results
+      all_train_results[gp_id] = train_results
+
+- assert both dictionaries cover every grid_point_id before collection.
+
+Why not executor.map:
+
+- map returns in input order;
+- a slow early grid point can stall progress reporting even if later tasks are
+  done;
+- as_completed gives better progress and cleaner failure visibility.
+
+
+Phase 4. Error Policy
+---------------------
+Do not copy FAST's silent fallback behavior as the default.
+
+Current per-step behavior stays unchanged:
+
+- run_wf_for_grid_point catches per-step exceptions and returns runtime_error
+  StepResult;
+- run_wf_train_for_grid_point does the same for Train.
+
+Parallel infrastructure failures should be visible:
+
+- BrokenProcessPool;
+- pickle/import failures;
+- initializer failure;
+- worker crash.
+
+Default:
+
+- fallback_to_sequential=false;
+- pipeline fails fast and result.error is set.
+
+Optional:
+
+- if fallback_to_sequential=true, log the parallel failure and rerun the full
+  execution stage sequentially.
+
+Do not fallback only for "remaining" grid points. If the pool crashes, rerun the
+whole execution stage sequentially to avoid partial mixed-mode results and make
+diagnostics simpler.
+
+
+Phase 5. CLI Controls
+---------------------
+Update run.py with:
+
+    --sequential
+    --max-workers N
+
+Preferred run_grid_pipeline signature:
+
+    def run_grid_pipeline(
+        config_path: str,
+        data_path: Optional[str] = None,
+        output_path: Optional[str] = None,
+        parallel_enabled: Optional[bool] = None,
+        max_workers: Optional[int] = None,
+    ) -> PipelineResult:
+
+Override rules:
+
+- None means use config.yaml;
+- --sequential sets parallel_enabled=False;
+- --max-workers N sets max_workers=N for this run only;
+- do not mutate the original loaded config object.
+
+
+Phase 6. Tests
+--------------
+Add:
+
+    wf_grid/tests/test_parallel_execution.py
+
+Test set:
+
+1. Pickle roundtrip:
+   - GridPoint;
+   - WFWindowSlice;
+   - GridConfig;
+   - StepResult;
+   - zigzag_global_stats object when filter is enabled.
+
+2. Sequential vs parallel equivalence with trade_filter disabled:
+   - tiny synthetic CSV;
+   - small grid;
+   - compare step_oos_long;
+   - compare step_train_long;
+   - compare ranked grid_point_id/grid_rank/tier;
+   - compare tester_seed_score with tight tolerance.
+
+3. Sequential vs parallel equivalence with trade_filter enabled:
+   - same core assertions;
+   - this is critical because C:\3.1_wf_grid added ZigZag/ST filter state.
+
+4. max_workers=1 equals sequential:
+   - ensures the switch path is deterministic.
+
+5. Worker crash without fallback:
+   - monkeypatch worker to raise;
+   - expect result.error or explicit raised failure depending on existing
+     pipeline error convention.
+
+6. Worker crash with fallback:
+   - fallback_to_sequential=true;
+   - pipeline completes;
+   - diagnostics/log shows fallback occurred.
+
+7. Existing regression suite:
+   - run the current non-slow wf_grid tests;
+   - run key WP ZigZag tests.
+
+
+Phase 7. Benchmark
+------------------
+Run benchmarks on the current config.yaml:
+
+1. sequential;
+2. parallel max_workers=2;
+3. parallel max_workers=4;
+4. parallel max_workers=8.
+
+Record:
+
+- total wall time;
+- wf_execution timing;
+- train_execution timing if still separate;
+- or new combined wf_grid_execution timing;
+- collection/export timings to confirm they did not become the bottleneck.
+
+Expected:
+
+- strong speedup for WF execution;
+- less overhead than FAST because OOS and Train are computed in one process pool;
+- diminishing returns near CPU core count.
+
+
+Files To Change
+---------------
+Core:
+
+- wf_grid/config/schema.py
+- wf_grid/config/loader.py
+- wf_grid/pipeline/orchestrator.py
+- wf_grid/wf/_mp_helpers.py
+- run.py
+- config.yaml
+
+Tests:
+
+- wf_grid/tests/test_parallel_execution.py
+- possibly extend wf_grid/tests/test_config_schema.py for execution config
+  validation.
+
+Do not change:
+
+- wf_grid/wf/step_executor.py
+- donor backtest logic;
+- collection/gates/aggregation/scoring/export logic, unless a test exposes a
+  deterministic ordering assumption.
+
+
+Acceptance Criteria
+-------------------
+Implementation is accepted only when:
+
+- sequential mode produces the same outputs as before;
+- parallel mode produces equivalent step_oos_long, step_train_long, ranked, and
+  score outputs;
+- trade_filter enabled mode is covered;
+- Windows spawn works from run.py;
+- max_workers can be controlled from config and CLI;
+- worker crash behavior is explicit and tested;
+- no silent mixed partial parallel/sequential result is produced by default.
+
+
+Priority
+--------
+1. Add _mp_helpers.py and combined OOS+Train worker.
+2. Add orchestrator execution helper with sequential and parallel paths.
+3. Add execution config and CLI overrides.
+4. Add equivalence tests.
+5. Benchmark and tune chunksize.
+
+This should be faster and cleaner than the C:\3.0 - FAST implementation because
+it uses one process pool for both OOS and Train, uses as_completed for result
+collection, makes worker count configurable, and makes failure behavior explicit.

@@ -1,0 +1,266 @@
+# 1. Executive Mini-Plan
+
+1. **Закрыть metric contracts fail-closed.**
+   Broken ok-step metrics не должны доходить до gates, aggregation, scoring как `ok`.
+   Hard-required metrics: `sum_pnl_pct`, `max_drawdown`, `num_trades`.
+
+2. **Исправить OOS boundary / carry-in mismatch через force-flat.**
+   OOS начинается без carry-in позиции. Bar-level и trade-level OOS metrics должны описывать одну и ту же экономику.
+
+3. **Сделать YAML strict.**
+   Unknown top-level/nested keys должны падать с понятным путём к ключу. Добавляется `schema_version: 1`.
+
+4. **Сделать ok-only семантику явной.**
+   Агрегация остаётся только по `step_status == ok`. В summary/XLSX добавляется явный marker `aggregation_scope = "ok_steps_only"`.
+
+5. **Убрать false green flags в отчёте.**
+   Disabled gates не выглядят как passed, Tier 1 не выглядит как proven edge/trading signal, bucket matrix failure виден в artifacts.
+
+# 2. Prioritized Issues Table
+
+| ID | Priority | Problem | Minimal fix | Files/modules likely touched | Acceptance criteria | Tests | Effort | Blocks |
+|---|---:|---|---|---|---|---|---:|---|
+| M1 | P0 | `max_drawdown > 0` на ok-шаге сейчас только warning и может пройти gates | Ввести fail-closed metric contract: positive DD на ok-шаге становится `step_status="invalid"` + `error_type="metric_contract"` до gates | `wf_grid/collect/metric_contracts.py`, `wf_grid/pipeline/orchestrator.py`, `wf_grid/gates/gates.py` | Ни один ok-шаг с positive DD не доходит до step/candidate gates как ok; это `invalid`, не `gate_failed` | positive `max_drawdown` fails closed | S | research correctness |
+| M2 | P0 | `NaN / inf / INVALID_METRIC_VALUE` в ok-метриках могут остаться валидными | Hard/soft contract. Hard metrics (`sum_pnl_pct`, `max_drawdown`, `num_trades`) требуют presence + finite + not sentinel. Soft metrics допускают NaN, но sentinel invalid | `wf_grid/collect/metric_contracts.py`, `wf_grid/collect/step_collector.py`, `wf_grid/pipeline/orchestrator.py` | Hard metric missing/NaN/inf/sentinel переводит ok-шаг в `invalid`; soft NaN не инвалидирует шаг | NaN DD, inf hard metric, sentinel hard/soft metric, soft NaN allowed | S | research correctness |
+| M3 | P0 | Missing required metrics default-ятся в `0.0` / `0` | Убрать silent defaults для hard-required ok metrics; missing = contract violation | `wf_grid/collect/step_collector.py`, `wf_grid/collect/metric_contracts.py` | Missing `sum_pnl_pct`, `num_trades`, `max_drawdown` не превращаются в валидный ноль | missing required metric tests | S | research correctness |
+| OOS1 | P0 | Carry-in position: bar OOS учитывает позицию до boundary, trades отбрасывают `entry_index < boundary` | Решение: **force-flat at OOS boundary**. OOS starts flat; train metrics не пересчитываются | `wf_grid/wf/step_executor.py`, tests around OOS trim/trades | `num_trades`, `sum_pnl_pct`, `win_rate`, `profit_factor` описывают только OOS-originated exposure/trades; carry-in exposure не попадает в OOS | carry-in win/loss/flat, reversal at boundary, only carry-in exposure, bar/trade reconciliation | M | research correctness |
+| C1 | P0 | Unknown YAML keys silently ignored | Recursive strict schema validation before `_build_config`; add `schema_version: 1`; unknown key error includes path | `wf_grid/config/loader.py`, `wf_grid/config/schema.py`, existing `*.yaml`, `tests/test_config_schema.py` | Unknown top-level/nested key падает; existing repo configs load after adding `schema_version: 1`; schema mismatch fails clearly | unknown top-level, gate, scoring/ranking, typo threshold, repo configs load | M | maintainability |
+| G1 | P1 | Disabled `worst_segment` gate выглядит как passed | При `worst_segment_pnl_threshold: null`: `worst_segment_gate_enabled=False`; disabled gate исключается из composite AND; display = `disabled`/`N/A` | `wf_grid/gates/gates.py`, `export/summary_builder.py`, `export/xlsx_writer.py` | Disabled gate не `True`, не зелёный, не в fail reason; `seed_gate_passed` остаётся bool, не NA | disabled gate not passed; composite not NA; fail reason excludes disabled gate | S | report clarity |
+| A1 | P1 | Ok-only aggregation может читаться как all-segment | Оставить mask `step_status == ok`; добавить presentation marker `aggregation_scope="ok_steps_only"` в summary/XLSX | `export/summary_builder.py`, `export/xlsx_writer.py` | Пользователь по summary/XLSX однозначно видит, что агрегаты и tiers рассчитаны только по ok-шагам | ok-only remains; scope marker exists; no all/non-ok metrics | S | report clarity |
+| T1 | P1 | Tier 1 может читаться как proven/tradable | Сохранить tiering; wording: Tier 1 = strong Phase A ok-only candidate, not proof of edge and not trading signal | `ranking/tiering.py`, `export/xlsx_writer.py`, `export/summary_builder.py`, optional `export/disclaimers.py` | Нет misleading wording в user-facing report strings; Tier 1 считается после ok-only aggregation/gates | tiering works on ok-only aggregates; forbidden wording absent | S | report clarity |
+| K1 | P1 | `INVALID_METRIC_VALUE` дублируется в wf_grid и donor | Единственный источник: import/re-export from donor in `wf_grid/config/schema.py`; drift test на numeric equality | `config/schema.py`, `aggregate/aggregator.py`, tests | При drift тест падает; локальный literal `-999.0` в wf_grid не используется как источник | donor/wf_grid drift test | S | maintainability |
+| S1 | P2 | `n_segments = wf_step.max()` ломается на sparse WF steps | `n_segments = step_oos_long["wf_step"].nunique()` как глобальный unique count; не путать с per-candidate `n_total_steps`/`n_ok_steps` | `export/summary_builder.py` | Для `[1,3,4]` summary показывает `3`, не `4`; empty frame даёт `0` | sparse wf_step test; empty frame test | S | report clarity |
+| B1 | P2 | Bucket matrix failure виден только в logs | Добавить `bucket_matrix_status=ok/failed/disabled`, `bucket_matrix_error`; поля в `PipelineResult` с defaults | `pipeline/orchestrator.py`, `PipelineResult`, `summary_builder.py`, `xlsx_writer.py`, `bucket_sheet_writer.py` | Failure виден в summary/XLSX, даже если pipeline продолжил работу; конструктор `PipelineResult()` не ломается | bucket failure visible; backward compat test | S/M | report clarity |
+| X1 | P2 | XLSX выглядит сильнее, чем должен | Disclaimers: ok-only aggregates/tiers; Tier 1 not proof/signal; top-1 trades = limited debug export | `export/xlsx_writer.py`, `export/summary_builder.py`, optional `export/disclaimers.py` | Required substrings есть: `ok-only`, `not proof of edge`, `not a trading signal`, `limited debug`; disabled gates не rendered as passed | XLSX/summary text tests, disabled render test | S | report clarity |
+| TS1 | P0 | Нужна минимальная regression suite | Собрать тесты по contracts, OOS boundary, config, disabled gate, ok-only, identity/report | `wf_grid/tests/*`, возможно donor tests для boundary | Все P0/P1 acceptance criteria покрыты автотестами; golden baseline update помечен expected | полный список из раздела 5 | M | research correctness |
+
+# 3. Suggested Implementation Order
+
+1. **Strict YAML schema + compatibility sweep.**
+   Перед PR собрать все repo `*.yaml` / `*.yml` вне `donor/`, сверить со schema, добавить `schema_version: 1` в существующие configs.
+
+2. **Single source для `INVALID_METRIC_VALUE`.**
+   Сделать donor import/re-export до metric contracts, чтобы validator не закрепил локальный literal.
+
+3. **Metric contracts + missing required metrics.**
+   Добавить `wf_grid/collect/metric_contracts.py` и вызвать validator в `orchestrator.py` между collection и step gates.
+
+4. **OOS boundary force-flat.**
+   Реализовать OOS starting state flat. Обновить tests/goldens как expected consequence.
+
+5. **Disabled worst-segment gate semantics.**
+   Исключить disabled gate из composite AND; добавить `worst_segment_gate_enabled`.
+
+6. **Ok-only scope marker + Tier 1 wording.**
+   Добавить `aggregation_scope="ok_steps_only"` в summary/XLSX. Убрать misleading wording.
+
+7. **Summary/XLSX clarity.**
+   Disclaimers, top-1 limited debug label, disabled gates not passed.
+
+8. **`n_segments` sparse fix.**
+
+9. **Bucket matrix status visibility.**
+
+10. **Golden/differential tests.**
+    Зафиксировать, что aggregation остаётся ok-only и что all-segment/non-ok aggregate columns не появились.
+
+# 4. Frozen Design Decisions
+
+1. **Positive `max_drawdown` policy.**
+   `max_drawdown > 0` на ok-шаге = metric contract violation.
+   Result: `step_status="invalid"`, `error_type="metric_contract"`.
+   Это не `gate_failed`. Hard pipeline error не используется в main flow.
+
+2. **Metric validation location.**
+   Validator = отдельная функция:
+   `validate_metric_contracts(step_oos_long: pd.DataFrame) -> pd.DataFrame`
+   в `wf_grid/collect/metric_contracts.py`.
+   Вызов: после `collect_oos_steps(...)`, до `apply_step_gates(...)`.
+   Collector остаётся thin. Gates работают только с `step_status == ok`. `status_model.py` не раздувается.
+
+3. **Hard vs soft metric contract.**
+   Hard-required metrics for ok steps:
+   - `sum_pnl_pct`
+   - `max_drawdown`
+   - `num_trades`
+
+   For hard metrics: missing / `NaN` / `inf` / `INVALID_METRIC_VALUE` = `invalid`.
+
+   Soft metrics:
+   - `win_rate`
+   - `profit_factor`
+   - `avg_trade`
+   - `sharpe`
+   - `sortino`
+   - `cagr`
+
+   For soft metrics: `INVALID_METRIC_VALUE` = `invalid`; legitimate `NaN` is allowed and aggregator drops it via existing `dropna()` semantics.
+
+4. **Carry-in policy.**
+   Chosen policy: **force-flat at OOS boundary**.
+   OOS starts flat. Carry-in exposure is not counted in OOS trades/PnL.
+   Train metrics are not recalculated.
+   Force-flat применяется на bar-level (OOS starting state flat); trade-level filter `entry_index < boundary` остаётся в силе и согласован с bar-level. Double-filter и полное удаление filter одновременно запрещены.
+   Expected effect: golden values and Tier 1 candidate set may change. This is an expected baseline update, not a regression.
+
+5. **Disabled worst-segment gate representation.**
+   `worst_segment_pnl_threshold: null` means:
+   - `worst_segment_gate_enabled = False`
+   - storage: `gate_ok_worst_segment = pd.NA` internally in the DataFrame
+   - display: `"disabled"` / `"N/A"` in XLSX cells (rendered from the NA storage value; это И, не ИЛИ)
+   - disabled gate is excluded from composite AND
+   - disabled gate is excluded from `seed_gate_fail_reason`
+   - `seed_gate_passed` остаётся `bool` dtype, не `object`/NA
+
+6. **Strict YAML future fields.**
+   Add allowed top-level `schema_version: 1`.
+   Unknown keys fail.
+   Future fields require schema update or explicit schema version bump.
+   Existing repo configs must be updated in the same PR.
+
+7. **Tier 1 meaning.**
+   Tier 1 = strong candidate inside current Phase A ok-only logic.
+   Tier 1 does not mean proven edge, paper-ready, real-money-ready, tradable, or trading signal.
+
+8. **`INVALID_METRIC_VALUE` source.**
+   `wf_grid/config/schema.py` imports/re-exports `INVALID_METRIC_VALUE` from `supertrend_optimizer.utils.constants`.
+   Add drift test to fail if values diverge.
+
+9. **`n_segments` definition.**
+   `n_segments = step_oos_long["wf_step"].nunique()` as global unique WF step count.
+   It is not `n_ok_steps` and not per-candidate `n_total_steps`.
+
+# 5. Testing Strategy
+
+**Unit Tests**
+
+- Metric contracts:
+  - positive `max_drawdown` on ok step fails closed;
+  - `NaN max_drawdown` fails;
+  - `inf` hard metric fails;
+  - `INVALID_METRIC_VALUE` in hard metric fails;
+  - `INVALID_METRIC_VALUE` in soft metric fails;
+  - legitimate `NaN profit_factor` does not invalidate ok-step;
+  - legitimate `NaN sortino` does not invalidate ok-step;
+  - missing `sum_pnl_pct`, `num_trades`, `max_drawdown` fails instead of defaulting.
+- Config:
+  - unknown top-level YAML key fails;
+  - unknown `gates.*` key fails;
+  - unknown `scoring/ranking` key fails;
+  - typo `worst_segment_pnl_treshold` fails;
+  - `schema_version` mismatch fails clearly;
+  - all repo configs outside `donor/` load after schema update.
+- Disabled gate:
+  - `worst_segment_pnl_threshold: null` gives disabled/N/A, not `True`;
+  - `worst_segment_gate_enabled is False`;
+  - `seed_gate_passed` remains bool, not NA;
+  - `seed_gate_fail_reason` excludes disabled gate.
+
+**Integration Tests**
+
+- OOS boundary force-flat:
+  - carry-in win;
+  - carry-in loss;
+  - carry-in flat;
+  - reversal exactly at boundary;
+  - only carry-in exposure in OOS;
+  - train metrics are not recalculated by force-flat;
+  - OOS bar/trade economics are reconciled under the chosen force-flat policy.
+- Pipeline path:
+  - invalid metric step excluded from ok aggregation;
+  - tiering still runs on ok-only aggregates;
+  - metric-contract invalid is not converted to `gate_failed`.
+
+**Golden/Differential Tests**
+
+- Aggregation remains `step_status == ok` only.
+- `aggregation_scope == "ok_steps_only"` present in summary/XLSX.
+- No all-segment/non-ok aggregate metrics introduced.
+- No columns with `_all`, `_failed`, `_nonok` aggregate semantics appear.
+- `INVALID_METRIC_VALUE` donor/wf_grid drift test.
+- `test_golden_values.py` and `test_e2e_real_data.py` baselines may be updated in the same PR as M1/M2/M3/OOS1; document this as expected effect.
+
+**XLSX/Summary Tests**
+
+- Disclaimer substrings present:
+  - `ok-only`
+  - `not proof of edge`
+  - `not a trading signal`
+  - `limited debug`
+- Forbidden wording absent (negative test `test_forbidden_wording_absent`):
+  - forbidden substrings (case-insensitive): `proven`, `production-ready`, `production grade`, `tradable`, `paper-ready`, `trading signal`, `edge confirmed`
+  - scope: user-facing strings in `ranking/tiering.py`, `export/xlsx_writer.py`, `export/summary_builder.py`, optional `export/disclaimers.py`
+  - исключения: `not a trading signal` (разрешённый disclaimer) не учитывается как forbidden match
+- Disabled worst-segment gate is rendered as `disabled`/`N/A`, not passed.
+- Top-1 trades sheet is labelled limited export/debug, not full-grid audit.
+- Bucket matrix failure visible via `bucket_matrix_status` and `bucket_matrix_error`.
+
+**Regression Tests**
+
+- Sparse `wf_step=[1,3,4]` gives `n_segments=3`.
+- Empty `step_oos_long` gives `n_segments=0`.
+- Existing ok-only ranking/tiering behavior remains stable except intended contract/boundary changes.
+- Positive DD can no longer silently pass drawdown gates.
+- `PipelineResult()` remains backward-compatible with new bucket matrix fields using defaults.
+
+# 6. Definition of Done
+
+DoD for current goal: **Research-safe ok-only Phase A artifact**.
+
+Done when:
+
+- broken ok-step hard metrics fail closed before gates/aggregation;
+- required ok metrics cannot silently default to zero;
+- soft metric NaN can remain legitimate missing data, while sentinel still fails;
+- OOS boundary uses force-flat policy consistently;
+- bar-level and trade-level OOS metrics no longer describe conflicting exposure;
+- YAML typos fail loudly with exact key path;
+- existing repo configs are updated to `schema_version: 1`;
+- aggregation remains ok-only and is explicitly marked as `ok_steps_only`;
+- Tier 1 remains, but means only Phase A ok-only tier;
+- disabled gates are visibly disabled, not passed;
+- bucket matrix failure is visible in summary/XLSX, not only logs;
+- summary/XLSX cannot reasonably be read as production/trading report;
+- golden baseline changes from metric contracts / force-flat are documented as expected;
+- listed regression tests pass.
+
+# 7. First PR Requirements
+
+Обязательные условия для первого PR, без которых merge запрещён:
+
+1. **Порядок реализации — из §3.**
+   Первым шагом идёт YAML compat sweep + strict validator (§3 п.1). Реализация вне этого порядка сломает реальные configs при merge.
+
+2. **Goldens обновляются одним commit'ом, отдельным от логики.**
+   Все изменения `test_golden_values.py` и `test_e2e_real_data.py`, вызванные M1/M2/M3/OOS1, собираются в один отдельный commit в том же PR с сообщением вида:
+   `"chore(goldens): baseline bump — expected effect of metric contracts + force-flat per plan §4.1/§4.3/§4.4"`.
+   Смешивать обновление baseline с кодовыми изменениями в одном commit'е запрещено.
+
+3. **`test_all_repo_configs_load` подключён в CI до merge strict validator.**
+   Тест, проверяющий, что все `*.yaml` / `*.yml` вне `donor/` загружаются новым strict validator'ом без ошибок, должен попасть в CI раньше, чем в main окажется strict-YAML код. Порядок коммитов внутри PR:
+   - commit A: добавить `schema_version: 1` в существующие configs + добавить `test_all_repo_configs_load` (пока зелёный на старом лояльном loader);
+   - commit B: включить recursive strict validation в `loader.py`;
+   - commit C: остальные фиксы по §3.
+   Так падение теста в CI однозначно указывает на проблему именно в strict validator, а не в configs.
+
+4. **PR-description явно перечисляет ожидаемые baseline-изменения.**
+   В описании PR указывается: (a) какие goldens бампнуты и почему, (b) какие новые колонки появляются (`aggregation_scope`, `worst_segment_gate_enabled`, `bucket_matrix_status`, `bucket_matrix_error`), (c) что Tier 1 candidate set может измениться как expected consequence contracts + force-flat.
+
+# 8. Explicitly Out Of Scope Now
+
+Сейчас не делаем:
+
+- all-segment metrics;
+- метрики по не-ok шагам;
+- severity failed segments;
+- candidate gates по failed-step severity;
+- `portfolio_decision_status`;
+- full ranking/tiering redesign;
+- full-grid trades export;
+- Phase B / holdout / FDR / SPA;
+- benchmark/random baseline;
+- confidence intervals;
+- train→OOS degradation;
+- cost model / slippage / spread;
+- paper-trading readiness;
+- real-money readiness.

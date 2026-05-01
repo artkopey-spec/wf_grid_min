@@ -1,0 +1,91 @@
+Сознательно отложено на Phase B / отдельные волны = это не блокеры для текущего Phase A research release, но это открытые риски / улучшения, которые нельзя забывать и которые нужны до более серьёзного использования.
+
+По пунктам:
+
+CF-2 (bar-level vs trade-level metric mismatch)
+Отложено, потому что это уже не “локальный фикс”, а решение по контракту метрик:
+
+что считать источником истины на OOS boundary,
+как именно должны работать gates,
+считать ли inherited positions частью OOS риска,
+и как это объяснять в output.
+То есть нужен отдельный design pass, а не быстрый патч.
+
+CF-4 (score instability при малом n_passed)
+Сейчас это частично смягчено warning/annotation, но не устранено концептуально.
+Полное решение — например:
+
+вообще не считать score при n_passed < 5,
+или показывать INSUFFICIENT_DATA_FOR_SCORING,
+или менять формулу score.
+Это уже product/UX decision, потому что меняет поведение ranking output.
+
+Monte Carlo / bootstrap CI
+Это уже статистический слой доверия, а не core bugfix.
+Нужно, чтобы отвечать на вопрос:
+
+насколько устойчивы Sharpe / PnL / DD,
+не является ли top candidate случайностью,
+каков диапазон неопределённости.
+Важно, но это enhancement Phase B.
+
+Benchmark comparison
+Это добавляет контекст интерпретации:
+
+стратегия хороша не сама по себе,
+а относительно baseline, например buy-and-hold.
+Без этого rank 1 может выглядеть “сильным”, хотя он хуже простого бенчмарка.
+
+Regime analysis
+Это следующий уровень robustness:
+
+как стратегия ведёт себя в trend / chop / crash / low-volatility режимах,
+нет ли переобучения под один режим.
+Для research полезно, но это уже расширение аналитики, не минимальный фикс.
+
+Differential test vs donor
+Это сильный regression/integrity test, но не обязательный для выпуска минимального исправления CF-1.
+Он нужен, чтобы доказать:
+
+ваша реализация не уехала от donor,
+расчёты совпадают на одинаковом входе,
+любые расхождения — осознанные, а не случайные.
+
+Real CSV golden snapshot
+Это end-to-end эталонный снимок результата на реальном датасете.
+Смысл:
+
+берётся конкретный CSV,
+прогоняется pipeline,
+фиксируются точные ожидаемые outputs,
+дальше любой регресс сразу виден.
+Почему это важно:
+нынешние тесты хорошо проверяют форму и инварианты,
+но не очень хорошо ловят “численно всё чуть уехало”.
+Почему можно отложить:
+это тяжелее в сопровождении,
+требует стабильного fixture dataset,
+часто добавляется после стабилизации форматов output.
+
+
+
+Отсутствующие guardrails
+Нет Monte Carlo / bootstrap confidence intervals на метрики
+Нет walk-forward efficiency metric (WFE)
+Нет comparison с buy-and-hold benchmark
+Нет transaction cost sensitivity analysis
+Нет regime detection (metrics during trending vs mean-reverting markets)
+Нет out-of-distribution warning (if OOS data is different from train distribution)
+
+
+Before Real Money
+Всё из (A) + (B), плюс:
+
+MUST IMPLEMENT Monte Carlo permutation test для top-N candidates
+MUST IMPLEMENT Walk-Forward Efficiency metric
+MUST ADD regime analysis (performance breakdown by market regime)
+MUST ADD transaction cost sensitivity sweep
+MUST RUN paper trading for minimum 3 months on live data
+MUST VERIFY results match paper trading actuals within tolerance
+MUST ADD position sizing / Kelly criterion layer
+MUST ADD automated live monitoring + drawdown circuit breaker

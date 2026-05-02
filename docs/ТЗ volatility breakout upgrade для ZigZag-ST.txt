@@ -1,0 +1,568 @@
+ТЗ: Volatility Breakout Upgrade для ZigZag-ST Filter
+====================================================
+
+Цель
+----
+Добавить в ZigZag-ST фильтр опциональный режим volatility breakout:
+
+1. Candidate-нога должна достигнуть candidate_trigger_threshold
+   (auto-quantile или численный threshold из config).
+2. Candidate-нога должна сделать это достаточно быстро: ее возраст на баре
+   trigger не должен превышать медианную длину confirmed legs выше этого же
+   materialized threshold.
+3. При включенном immediate entry первая сделка открывается сразу по
+   направлению candidate-ноги, без ожидания первого ST flip.
+4. После входа дальнейшая FSM-логика остается прежней:
+   ST_ACTIVE_FREEZE -> ST_ACTIVE_MONITORING -> ST_STOPPING -> OFF.
+
+Бизнес-смысл
+------------
+Это режим присоединения к резкому расширению волатильности:
+
+   большая амплитуда + короткое время = импульс / volatility breakout
+
+Текущий режим wait_st_flip остается консервативным: ZigZag дает сигнал, но
+направление подтверждается SuperTrend flip.
+
+Новый режим immediate_leg_direction агрессивнее: если ZigZag candidate-нога
+быстро достигла высокого threshold, стратегия входит по направлению этой ноги.
+
+Версионирование
+---------------
+trade_filter.type остается прежним:
+
+   type: zigzag_st_mode
+
+Новые блоки являются backward-compatible расширением существующего режима.
+Отдельный zigzag_st_mode_v2 не вводится.
+
+Config
+------
+Добавить два независимых, но совместимых блока:
+
+trade_filter:
+  zigzag:
+    candidate_duration_gate:
+      enabled: true
+      max_bars_source: median_above_ctt  # median_above_ctt | fixed
+      max_bars: null                     # required when max_bars_source: fixed
+      inclusive_bars: true
+      min_population_size: 10
+
+    candidate_entry:
+      mode: wait_st_flip  # wait_st_flip | immediate_leg_direction
+
+Дефолты при отсутствии блоков:
+
+   candidate_duration_gate.enabled = false
+   candidate_duration_gate.max_bars_source = median_above_ctt
+   candidate_duration_gate.max_bars = null
+   candidate_duration_gate.inclusive_bars = true
+   candidate_duration_gate.min_population_size = 10
+   candidate_entry.mode = wait_st_flip
+
+Правила:
+
+- отсутствие candidate_duration_gate или enabled: false сохраняет текущее
+  поведение duration-gate bit-identical;
+- absence candidate_entry означает mode: wait_st_flip;
+- wait_st_flip полностью сохраняет текущую FSM-логику:
+  OFF -> WAIT_FIRST_ST_FLIP -> ST_ACTIVE_FREEZE;
+- immediate_leg_direction включает вход по направлению candidate-ноги:
+  OFF -> ST_ACTIVE_FREEZE;
+- оба блока применяются только к trigger-A = candidate_threshold;
+- trigger-B = confirmed_median остается на текущей логике ожидания ST flip,
+  кроме случая same-bar A+B, описанного ниже в "Приоритеты trigger".
+
+Config Validation
+-----------------
+candidate_entry.mode принимает только:
+
+   wait_st_flip
+   immediate_leg_direction
+
+candidate_duration_gate.max_bars_source принимает только:
+
+   median_above_ctt
+   fixed
+
+candidate_duration_gate.inclusive_bars должен быть bool.
+Обе ветки true/false поддерживаются и покрываются тестами:
+
+   true  -> length = end_bar - start_bar + 1
+   false -> length = end_bar - start_bar
+
+candidate_duration_gate.min_population_size должен быть int >= 1.
+
+candidate_duration_gate.max_bars:
+
+- должен быть null при max_bars_source: median_above_ctt;
+- должен быть int >= 1 при max_bars_source: fixed;
+- материализуется напрямую в candidate_duration_max_bars.
+
+Duration Gate: Global Stats
+---------------------------
+candidate_duration_max_bars материализуется один раз на полном валидированном
+датасете до WF execution, так же как candidate_trigger_threshold и
+global_median в текущем full_dataset paradigm. Это осознанный global-stat
+параметр, а не per-train/per-OOS расчет.
+
+Есть два режима source.
+
+Режим 1: max_bars_source == fixed
+
+1. Взять candidate_duration_gate.max_bars из config.
+2. Проверить int >= 1.
+3. Материализовать:
+
+   candidate_duration_max_bars = max_bars
+   candidate_duration_source = "fixed"
+   candidate_duration_population_count = None
+
+В этом режиме population above threshold не нужна для duration cap, но
+candidate_trigger_threshold все равно материализуется по текущим правилам.
+
+Режим 2: max_bars_source == median_above_ctt
+
+В build_zigzag_global_stats после расчета candidate_trigger_threshold:
+
+1. Отфильтровать confirmed legs:
+
+   legs_above_ctt = [
+       leg for leg in confirmed_legs
+       if leg.height_pct > candidate_trigger_threshold
+   ]
+
+2. Проверить population size:
+
+   if len(legs_above_ctt) < min_population_size:
+       raise ConfigError(
+           "candidate_duration_gate requires at least "
+           f"{min_population_size} confirmed legs above "
+           "candidate_trigger_threshold"
+       )
+
+3. Посчитать длины:
+
+   if inclusive_bars:
+       length = leg.end_bar - leg.start_bar + 1
+   else:
+       length = leg.end_bar - leg.start_bar
+
+4. Материализовать:
+
+   candidate_duration_max_bars = int(np.median(lengths))
+
+5. Если median не finite или candidate_duration_max_bars < 1:
+   ConfigError fail-closed.
+
+6. Добавить в ZigZagGlobalStats и metadata:
+
+   candidate_duration_gate_enabled: bool
+   candidate_duration_max_bars: Optional[int]
+   candidate_duration_source: Optional[str]
+   candidate_duration_fixed_max_bars: Optional[int]
+   candidate_duration_population_count: Optional[int]
+   candidate_duration_min_population_size: Optional[int]
+   candidate_duration_inclusive_bars: bool
+
+Для reference fixture, закрепленной отдельным тестом, ожидаемое значение при
+inclusive_bars: true должно быть 24. Не привязывать production-тест к
+плавающему пользовательскому data.csv.
+
+Per-Bar ZigZag
+--------------
+Добавить в ZigZagPerBar и filter_diagnostics:
+
+   candidate_age_bars[t]
+   candidate_leg_direction[t]
+
+Массивы выровнены с close:
+
+   candidate_age_bars: int64
+   candidate_leg_direction: int8
+
+Контракт candidate_age_bars:
+
+   candidate_age_bars = t - last_pivot_bar + 1
+
+Только когда direction текущей candidate-ноги известен.
+
+UNKNOWN value:
+
+   candidate_age_bars[t] = -1
+
+Использовать -1 для pre-bootstrap, unknown direction, pathological bars и
+reset-bar после daily_reset. 0 не использовать как unknown, чтобы не путать с
+"нулевым возрастом".
+
+Важная деталь close-only pass:
+
+- на confirm-bar t last_pivot_bar уже становится end_bar подтвержденной ноги
+  в прошлом, а новая candidate-нога начинается от этого pivot;
+- поэтому candidate_age_bars[t] на confirm-bar может быть >= 2;
+- это поведение должно быть закреплено unit-тестом.
+
+Контракт candidate_leg_direction:
+
+   +1 = текущая ZigZag candidate-нога вверх
+   -1 = текущая ZigZag candidate-нога вниз
+    0 = направление неизвестно
+
+candidate_leg_direction всегда отражает close-only ZigZag direction и не
+зависит от FSM. В активных состояниях это НЕ направление сделки; направление
+сделки остается held_pos / filtered_positions.
+
+Daily Reset
+-----------
+При daily_reset_event[t] == true:
+
+- close-only candidate state сбрасывается в UNKNOWN;
+- candidate_height_pct[t] остается NaN;
+- candidate_leg_direction[t] = 0;
+- candidate_age_bars[t] = -1;
+- a_trig = false;
+- immediate entry невозможен;
+- block_reason для diagnostics на этом баре должен быть daily_reset, если
+  diagnostics строит reason для потенциального immediate candidate entry.
+
+После reset bootstrap начинается заново, confirmed-leg history остается по
+текущему контракту.
+
+Duration Gate: Runtime Logic
+----------------------------
+Trigger-A должен проходить duration gate только если gate включен:
+
+   duration_ok = (
+       not candidate_duration_gate_enabled
+       or (
+           candidate_age_bars[t] > 0
+           and candidate_age_bars[t] <= candidate_duration_max_bars
+       )
+   )
+
+Базовый trigger-A:
+
+   height_ok = (
+       math.isfinite(candidate_height_pct[t])
+       and candidate_height_pct[t] >= candidate_trigger_threshold
+   )
+
+   a_trig = (
+       a_enabled
+       and height_ok
+       and duration_ok
+   )
+
+Важно:
+
+- duration gate применяется к candidate-ноге на текущем decision bar;
+- confirmed leg ждать нельзя, чтобы не вносить lookahead;
+- если candidate-нога достигла threshold только после допустимой длительности,
+  она не переводит FSM из OFF;
+- repeated triggers в WAIT/FREEZE/MONITORING/STOPPING остаются подавленными.
+
+Candidate Entry Modes
+---------------------
+Текущий режим:
+
+   mode: wait_st_flip
+
+Поведение:
+
+   candidate threshold trigger
+   OFF -> WAIT_FIRST_ST_FLIP
+   wait allowed ST flip
+   WAIT_FIRST_ST_FLIP -> ST_ACTIVE_FREEZE
+
+Новый режим:
+
+   mode: immediate_leg_direction
+
+Поведение:
+
+   candidate threshold trigger
+   OFF -> ST_ACTIVE_FREEZE
+   held_pos = candidate_leg_direction
+   confirmed_legs_since_start = 0
+
+Проверка immediate entry:
+
+   candidate_dir = candidate_leg_direction[t]
+
+   immediate_allowed = (
+       candidate_entry_mode == "immediate_leg_direction"
+       and candidate_dir in (-1, +1)
+       and trade_mode_allows(candidate_dir)
+   )
+
+Если state == OFF, a_trig == true и immediate_allowed == true:
+
+   state = ST_ACTIVE_FREEZE
+   held_pos = candidate_dir
+   confirmed_legs_since_start = 0
+   immediate_candidate_entry_used[t] = 1
+
+Если mode == immediate_leg_direction, но направление неизвестно или запрещено
+trade_mode, trigger-A не должен запускать lifecycle.
+
+Trade Mode Rules
+----------------
+Для candidate_dir:
+
+- trade_mode: long разрешает только +1;
+- trade_mode: short разрешает только -1;
+- trade_mode: revers / both разрешает оба направления.
+
+Приоритеты Trigger
+------------------
+Если на одном баре в OFF одновременно true:
+
+   a_trig == true
+   b_trig == true
+   candidate_entry.mode == immediate_leg_direction
+   immediate_allowed == true
+
+то A-immediate-entry имеет приоритет:
+
+   OFF -> ST_ACTIVE_FREEZE
+   held_pos = candidate_leg_direction
+   trigger_source = "both"
+   immediate_candidate_entry_used = 1
+
+То есть trigger-B не должен отправлять FSM в WAIT_FIRST_ST_FLIP на этом баре.
+
+Если immediate_allowed == false, но b_trig == true, trigger-B сохраняет
+старую семантику:
+
+   OFF -> WAIT_FIRST_ST_FLIP
+
+Execution Timing
+----------------
+"Сразу" означает без ожидания ST flip, но без нарушения open-to-open
+контракта:
+
+   decision на close бара t
+   позиция применяется с open бара t+1
+
+Lookahead не появляется.
+
+FSM Semantics
+-------------
+При immediate entry:
+
+   OFF -> ST_ACTIVE_FREEZE
+
+на том же decision bar, где произошел candidate trigger.
+
+Дальше логика не меняется:
+
+   ST_ACTIVE_FREEZE
+   -> ST_ACTIVE_MONITORING после freeze_confirmed_legs
+   -> ST_STOPPING при stop condition
+   -> OFF
+
+Same-bar confirmed leg, совпавшая с immediate lifecycle start, не должна
+засчитываться в confirmed_legs_since_start, если текущий контракт исключает
+same-bar start confirm для обычного WAIT -> FREEZE. Поведение должно быть
+единообразным и gated по state_at_bar_start.
+
+Same-Bar ST Flip
+----------------
+На баре immediate entry state_at_bar_start == OFF. Если на этом же баре есть
+ST flip, он не должен переписывать held_pos, выставленный по candidate_dir.
+
+Правило:
+
+- на immediate-entry bar подавить active-state update held_pos по same-bar
+  flip_dir;
+- последующие бары FREEZE/MONITORING продолжают обрабатывать ST flip по
+  текущей логике.
+
+Freeze Confirmed Legs == 0
+--------------------------
+Если freeze_confirmed_legs == 0 и immediate entry произошел на t, разрешено
+за один decision step перейти:
+
+   OFF -> ST_ACTIVE_FREEZE -> ST_ACTIVE_MONITORING
+
+Это поведение должно быть явно протестировано.
+
+Diagnostics
+-----------
+Добавить в filter_diagnostics:
+
+   candidate_age_bars                       int64
+   candidate_leg_direction                  int8
+   candidate_duration_max_bars              int64, -1 when disabled/unavailable
+   candidate_duration_gate_passed           bool/int8
+   candidate_entry_mode                     object/string
+   immediate_candidate_entry_used           int8
+   immediate_candidate_entry_block_reason   object/string
+
+Рекомендуемые значения immediate_candidate_entry_block_reason:
+
+   none
+   filter_disabled
+   daily_reset
+   state_not_off
+   height_gate_failed
+   duration_gate_failed
+   mode_not_immediate
+   unknown_candidate_direction
+   trade_mode_disallows_direction
+
+Priority для reason:
+
+1. filter_disabled
+2. daily_reset
+3. state_not_off
+4. height_gate_failed
+5. duration_gate_failed
+6. mode_not_immediate
+7. unknown_candidate_direction
+8. trade_mode_disallows_direction
+9. none
+
+Инвариант:
+
+   immediate_candidate_entry_used == 1
+   iff immediate_candidate_entry_block_reason == "none"
+
+Если mode == wait_st_flip, reason mode_not_immediate не означает ошибку; это
+явное объяснение, почему immediate entry не использовался.
+
+ZigZag_Trigger_Events Semantics
+-------------------------------
+Существующий лист ZigZag_Trigger_Events остается листом реальных trigger
+events, которые перевели FSM из OFF или запустили immediate lifecycle.
+
+Он не обязан включать все blocked-by-duration bars.
+
+Blocked bars должны быть доступны через FilterDiagnostics_100 / diagnostics
+arrays:
+
+   height_ok == true
+   duration_gate_passed == false
+   immediate_candidate_entry_block_reason == "duration_gate_failed"
+
+Если позже понадобится отдельный audit-лист для всех candidate threshold
+crossings, это отдельный feature request, а не часть текущего ТЗ.
+
+XLSX
+----
+В FilterDiagnostics_100 добавить колонки после Candidate Height % /
+candidate_height_pct-блока:
+
+   Candidate Age Bars
+   Candidate Leg Direction
+   Candidate Duration Max Bars
+   Candidate Duration Gate Passed
+   Candidate Entry Mode
+   Immediate Candidate Entry Used
+   Immediate Candidate Entry Block Reason
+
+В ZigZag_Trigger_Events добавить колонки после Candidate Height %:
+
+   Candidate Age Bars
+   Candidate Direction
+   Duration Max Bars
+   Duration Gate Passed
+   Entry Mode
+   Immediate Entry Used
+
+В filters_summary добавить параметры в thresholds/params section:
+
+   Candidate Duration Gate Enabled
+   Candidate Duration Max Bars
+   Candidate Duration Source
+   Candidate Duration Fixed Max Bars
+   Candidate Duration Population Count
+   Candidate Duration Min Population Size
+   Candidate Duration Inclusive Bars
+   Candidate Entry Mode
+   Immediate Candidate Entries Count
+   Immediate Candidate Entries Blocked Count
+
+filters_summary агрегирует count-поля per-period, как текущие trigger counts.
+Threshold/config-поля выводятся как параметры active run.
+
+Backward Compatibility
+----------------------
+1. Если новых блоков нет, поведение должно быть идентично текущему.
+2. При candidate_duration_gate.enabled: false duration gate не влияет на
+   trigger-A.
+3. При candidate_entry.mode: wait_st_flip FSM идет старым путем
+   OFF -> WAIT_FIRST_ST_FLIP -> ST_ACTIVE_FREEZE.
+4. Новый режим не должен менять trigger-B, кроме явно описанного same-bar A+B
+   priority when A immediate is allowed.
+5. XLSX baseline для disabled / legacy-compatible path не должен получать новые
+   sheets или колонки вне уже существующих diagnostic gates.
+
+Acceptance Criteria
+-------------------
+1. Config validation принимает candidate_entry.mode только:
+   - wait_st_flip
+   - immediate_leg_direction
+2. Config validation принимает candidate_duration_gate.max_bars_source только:
+   - median_above_ctt
+   - fixed
+3. Config validation: max_bars == null при median_above_ctt; max_bars int >= 1
+   при fixed.
+4. Config validation принимает inclusive_bars true и false; обе формулы
+   покрыты тестами.
+5. При выключенном candidate_duration_gate результаты совпадают с текущим
+   поведением.
+6. При max_bars_source: fixed duration cap берется из config без расчета
+   median population.
+7. Пустая или маленькая population above candidate_trigger_threshold вызывает
+   ConfigError с понятным сообщением.
+8. Для reference fixture candidate_duration_max_bars материализуется как 24
+   при inclusive_bars: true.
+9. candidate_age_bars unknown value == -1 для pre-bootstrap и reset-bar.
+10. candidate_leg_direction всегда отражает ZigZag candidate direction, не
+   held_pos.
+11. При включенном duration gate trigger-A с candidate_age_bars >
+   candidate_duration_max_bars не переводит FSM из OFF.
+12. При wait_st_flip FSM идет старым путем OFF -> WAIT -> FREEZE.
+13. При immediate_leg_direction и candidate_dir +1 открывается long lifecycle,
+    если trade_mode разрешает long.
+14. При immediate_leg_direction и candidate_dir -1 открывается short lifecycle,
+    если trade_mode разрешает short.
+15. При запрещенном trade_mode направлении trigger-A не запускает lifecycle.
+16. Duration gate, если включен, применяется до immediate entry.
+17. Open-to-open timing сохраняется: decision на close t, позиция с open t+1.
+18. Same-bar A+B в OFF при immediate_allowed == true дает immediate entry,
+    trigger_source == "both", FSM не уходит в WAIT.
+19. Same-bar opposite ST flip на immediate-entry bar не переписывает held_pos.
+20. freeze_confirmed_legs == 0 + immediate entry допускает OFF -> MONITORING
+    за один decision step.
+21. daily_reset interaction: на reset-баре immediate entry невозможен, после
+    reset bootstrap отрабатывает корректно.
+22. Повторный trigger-A в WAIT/FREEZE/MONITORING/STOPPING не стартует новый
+    lifecycle; diagnostics reason == state_not_off или эквивалент.
+23. Bit-identity: при отсутствии новых config-блоков filtered_positions и
+    существующие diagnostics-колонки совпадают с baseline.
+24. ZigZag_Trigger_Events содержит реальные trigger events; blocked-by-duration
+    bars видны через FilterDiagnostics_100.
+25. Diagnostics позволяют увидеть отфильтрованные бары: height уже выше
+    threshold, но duration gate failed.
+26. Unit tests покрывают:
+    - config validation;
+    - global stats materialization;
+    - empty/small population ConfigError;
+    - fixed max_bars source;
+    - inclusive_bars true/false;
+    - per-bar candidate_age_bars;
+    - per-bar candidate_leg_direction;
+    - daily_reset;
+    - FSM duration suppression;
+    - immediate long entry;
+    - immediate short entry;
+    - trade_mode blocking;
+    - same-bar A+B priority;
+    - same-bar ST flip suppression;
+    - freeze_confirmed_legs == 0;
+    - repeated trigger state_not_off;
+    - interaction duration gate + immediate entry;
+    - diagnostics/export columns.

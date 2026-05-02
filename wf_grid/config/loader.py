@@ -174,6 +174,16 @@ _ALLOWED_KEYS: dict[str, set[str]] = {
         "global_median",
         "local_window",
         "daily_reset",
+        # v3 fields (WP-V3-1)
+        "mode",
+        "candidate_duration_gate",
+        # candidate_entry is whitelisted only to allow the validator to emit
+        # a specific deprecated error (ТЗ v3 §4.5 candidate_entry_deprecated)
+        "candidate_entry",
+    },
+    "trade_filter.zigzag.candidate_duration_gate": {
+        "enabled",
+        "max_bars",
     },
     "trade_filter.triggers": {
         "candidate_threshold",
@@ -276,6 +286,10 @@ def load_grid_config(path: str, ohlc_data: Optional[pd.DataFrame] = None) -> Gri
     raw_user_keys = _collect_raw_keys(raw)
     cfg = _build_config(raw)
     _validate_config(cfg, raw_user_keys=raw_user_keys)
+
+    # v3 WP-V3-2: resolve effective zigzag mode in-place after validation so
+    # build_zigzag_global_stats can read zigzag.mode directly (always non-None).
+    _resolve_trade_filter_mode_in_place(cfg, raw_user_keys)
 
     if ohlc_data is not None:
         cfg = _resolve_periods_per_year(cfg, ohlc_data)
@@ -548,6 +562,38 @@ def _validate_trade_filter_legacy_inline(  # pragma: no cover  (kept for diff re
         "_validate_trade_filter_legacy_inline is not callable; use the shim "
         "_validate_trade_filter instead."
     )
+
+
+from supertrend_optimizer.core.trade_filter_config import resolve_zigzag_mode as _resolve_zigzag_mode  # noqa: E402
+
+
+def _resolve_trade_filter_mode_in_place(
+    cfg: GridConfig,
+    raw_user_keys: frozenset[tuple[str, ...]],
+) -> None:
+    """Resolve effective zigzag mode after validation and set it on the config.
+
+    After this call ``cfg.trade_filter.zigzag.mode`` is always a valid mode
+    literal (never None) for enabled filters.  This ensures that downstream
+    consumers (``build_zigzag_global_stats``) can read mode directly without
+    re-implementing the legacy migration logic.
+
+    For disabled or absent trade_filter, this function is a no-op.
+
+    WP-V3-2 (ТЗ v3 §3.1, §5)
+    """
+    if cfg.trade_filter is None or not cfg.trade_filter.enabled:
+        return
+
+    zz = cfg.trade_filter.zigzag
+    if zz.mode is not None:
+        return  # already explicit — nothing to do
+
+    # Determine whether the triggers block was explicitly present in YAML.
+    triggers_present = ("trade_filter", "triggers") in raw_user_keys
+    triggers_cfg = cfg.trade_filter.triggers if triggers_present else None
+    resolved = _resolve_zigzag_mode(None, triggers_cfg)
+    zz.mode = resolved
 
 
 def _validate_config(

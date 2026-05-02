@@ -14,6 +14,7 @@ Rationale (plan §5.1, owner decision v0.5.1 §15 #1, variant (a)):
 
 Spec reference: Appendix A v1.1 §11, §11.1–§11.3, §15.6, §17.2
 Plan reference: Phase 2 implementation plan §5.1, §14 WP-T2 step 0a
+v3 spec reference: ТЗ v3 §3, §4, WP-V3-1
 """
 
 from __future__ import annotations
@@ -30,6 +31,9 @@ from typing import Optional, Union
 _LIFECYCLE_STOP_CHECK_VALUES = {"confirm_bar_only"}
 _LIFECYCLE_STOPPING_EXIT_VALUES = {"opposite_st_flip"}
 _SUPPORTED_TRADE_FILTER_TYPES = {"zigzag_st_mode"}
+
+# v3: valid mode literals (ТЗ v3 §4.1, WP-V3-1 A1/A2)
+_VALID_ZIGZAG_MODES = {"A", "B", "C", "A+B", "C+B"}
 
 # WP-T3 step 6 — caller_pipeline whitelist for type=zigzag_st_mode.
 # Plan §5.5 (mode-rejection gate, owner-approved per audit-fix v0.5).
@@ -52,6 +56,20 @@ class TradeFilterTriggerToggleConfig:
 
 
 @dataclass
+class TradeFilterCandidateDurationGateConfig:
+    """Optional candidate-leg duration gate (ТЗ v3 §3, §4.2, WP-V3-1).
+
+    When enabled, entry via candidate-component (modes A, C, A+B, C+B) is only
+    allowed if candidate_age_bars <= max_bars. Mode B ignores this gate at runtime.
+
+    enabled: expected bool; validation enforces type.
+    max_bars: expected int >= 1 when enabled=True; must be absent when enabled=False.
+    """
+    enabled: object = False   # expected bool; validation enforces type
+    max_bars: object = None   # expected int >= 1 when enabled; must be absent when disabled
+
+
+@dataclass
 class TradeFilterZigZagConfig:
     """ZigZag parameters for the trade filter.
 
@@ -61,6 +79,10 @@ class TradeFilterZigZagConfig:
     would be unable to distinguish "user supplied the key" from "dataclass default"
     and the numeric-threshold + explicit-quantile reject rule (§11.3) would
     malfunction.
+
+    v3 fields (WP-V3-1):
+    - mode: canonical mode literal; None = absent (use legacy triggers or default A).
+    - candidate_duration_gate: optional duration gate for candidate-component modes.
     """
     global_stats_source: str = "full_dataset"
     leg_height_mode: str = "pct"
@@ -70,6 +92,11 @@ class TradeFilterZigZagConfig:
     global_median: str = "auto"
     local_window: int = 5                               # integer >= 1
     daily_reset: bool = False                           # calendar-day reset of ZigZag+FSM (plan v3 §2.1)
+    # v3 fields
+    mode: Optional[str] = None                          # A | B | C | A+B | C+B; None = absent
+    candidate_duration_gate: TradeFilterCandidateDurationGateConfig = field(
+        default_factory=TradeFilterCandidateDurationGateConfig
+    )
 
 
 @dataclass
@@ -138,6 +165,15 @@ TRADE_FILTER_ALLOWED_KEYS: dict[str, frozenset[str]] = {
         "global_stats_source", "leg_height_mode", "reversal_threshold",
         "candidate_trigger_threshold", "candidate_trigger_quantile",
         "global_median", "local_window", "daily_reset",
+        # v3 fields (WP-V3-1)
+        "mode", "candidate_duration_gate",
+        # candidate_entry is in the whitelist solely to allow the validator
+        # to emit a specific deprecated error instead of a generic unknown-key
+        # message (ТЗ v3 §3.1, §4.5 candidate_entry_deprecated, WP-V3-1)
+        "candidate_entry",
+    }),
+    "trade_filter.zigzag.candidate_duration_gate": frozenset({
+        "enabled", "max_bars",
     }),
     "trade_filter.triggers": frozenset({"candidate_threshold", "confirmed_median"}),
     "trade_filter.triggers.candidate_threshold": frozenset({"enabled"}),
@@ -224,6 +260,12 @@ def build_trade_filter_config_from_raw(tf_raw: dict) -> TradeFilterConfig:
     tf_type = tf_raw.get("type")         # None for absent
 
     zigzag_raw: dict = tf_raw.get("zigzag") or {}
+    cdg_raw = zigzag_raw.get("candidate_duration_gate")
+    cdg_raw = cdg_raw if isinstance(cdg_raw, dict) else {}
+    candidate_duration_gate = TradeFilterCandidateDurationGateConfig(
+        enabled=cdg_raw.get("enabled", False),
+        max_bars=cdg_raw.get("max_bars", None),
+    )
     zigzag = TradeFilterZigZagConfig(
         global_stats_source=zigzag_raw.get("global_stats_source", "full_dataset"),
         leg_height_mode=zigzag_raw.get("leg_height_mode", "pct"),
@@ -233,6 +275,8 @@ def build_trade_filter_config_from_raw(tf_raw: dict) -> TradeFilterConfig:
         global_median=zigzag_raw.get("global_median", "auto"),
         local_window=zigzag_raw.get("local_window", 5),
         daily_reset=zigzag_raw.get("daily_reset", False),
+        mode=zigzag_raw.get("mode", None),
+        candidate_duration_gate=candidate_duration_gate,
     )
 
     triggers_raw: dict = tf_raw.get("triggers") or {}
@@ -385,41 +429,69 @@ def validate_trade_filter(
         errors.append(
             "trade_filter.zigzag block is required when trade_filter.enabled is true"
         )
-    if not triggers_present:
-        errors.append(
-            "trade_filter.triggers block is required when trade_filter.enabled is true"
-        )
+    # v3: triggers block is NOT required; only legacy path uses it (WP-V3-1)
     if not lifecycle_present:
         errors.append(
             "trade_filter.lifecycle block is required when trade_filter.enabled is true"
         )
 
     # Avoid cascade errors if critical blocks are missing
-    if not zigzag_present or not triggers_present or not lifecycle_present:
+    if not zigzag_present or not lifecycle_present:
         return
 
     # ------------------------------------------------------------------
-    # Triggers
+    # v3: Mode validation (WP-V3-1 §4.1, A1/A2/A7/A8)
     # ------------------------------------------------------------------
-    ct_enabled = tf.triggers.candidate_threshold.enabled
-    cm_enabled = tf.triggers.confirmed_median.enabled
+    mode_present = ("trade_filter", "zigzag", "mode") in raw_user_keys
+    mode_value = tf.zigzag.mode
 
-    if not isinstance(ct_enabled, bool):
+    # A8: candidate_entry deprecated (ТЗ v3 §3.1, §4.5 candidate_entry_deprecated)
+    # candidate_entry is allowed through strict schema so this specific message
+    # can be emitted here instead of a generic "unknown config key".
+    if ("trade_filter", "zigzag", "candidate_entry") in raw_user_keys:
         errors.append(
-            f"trade_filter.triggers.candidate_threshold.enabled must be bool, "
-            f"got {type(ct_enabled).__name__!r}"
+            "trade_filter.zigzag.candidate_entry is deprecated in v3 and not "
+            "supported; use trade_filter.zigzag.mode instead"
         )
-    if not isinstance(cm_enabled, bool):
+
+    # A7: explicit mode + legacy triggers -> ConfigError (mixed schema)
+    if mode_present and triggers_present:
         errors.append(
-            f"trade_filter.triggers.confirmed_median.enabled must be bool, "
-            f"got {type(cm_enabled).__name__!r}"
+            "trade_filter.zigzag.mode and trade_filter.triggers cannot be used together; "
+            "use canonical mode (zigzag.mode) or legacy triggers, not both"
         )
-    if isinstance(ct_enabled, bool) and isinstance(cm_enabled, bool):
-        if not ct_enabled and not cm_enabled:
+
+    # A1/A2: validate mode literal when explicitly set
+    if mode_present:
+        if mode_value not in _VALID_ZIGZAG_MODES:
             errors.append(
-                "at least one trigger must be enabled "
-                "(trade_filter.triggers.candidate_threshold or confirmed_median)"
+                f"trade_filter.zigzag.mode must be one of "
+                f"{{'A', 'B', 'C', 'A+B', 'C+B'}}; got {mode_value!r}"
             )
+
+    # ------------------------------------------------------------------
+    # Triggers (legacy path: only when mode is absent)
+    # ------------------------------------------------------------------
+    if not mode_present and triggers_present:
+        ct_enabled = tf.triggers.candidate_threshold.enabled
+        cm_enabled = tf.triggers.confirmed_median.enabled
+
+        if not isinstance(ct_enabled, bool):
+            errors.append(
+                f"trade_filter.triggers.candidate_threshold.enabled must be bool, "
+                f"got {type(ct_enabled).__name__!r}"
+            )
+        if not isinstance(cm_enabled, bool):
+            errors.append(
+                f"trade_filter.triggers.confirmed_median.enabled must be bool, "
+                f"got {type(cm_enabled).__name__!r}"
+            )
+        if isinstance(ct_enabled, bool) and isinstance(cm_enabled, bool):
+            if not ct_enabled and not cm_enabled:
+                errors.append(
+                    "at least one trigger must be enabled "
+                    "(trade_filter.triggers.candidate_threshold or confirmed_median)"
+                )
 
     # ------------------------------------------------------------------
     # ZigZag block
@@ -604,10 +676,114 @@ def validate_trade_filter(
     # NOTE: freeze_confirmed_legs < local_window is VALID — not a warning, not a
     # reject (Appendix A v1.1 §3.2, §17.20; plan §6.5 Note 1).  No check here.
 
+    # ------------------------------------------------------------------
+    # v3: candidate_duration_gate validation (WP-V3-1 §4.2, A9-A14)
+    # ------------------------------------------------------------------
+    gate = tf.zigzag.candidate_duration_gate
+    gate_block_present = (
+        ("trade_filter", "zigzag", "candidate_duration_gate") in raw_user_keys
+    )
+    gate_max_bars_present = (
+        ("trade_filter", "zigzag", "candidate_duration_gate", "max_bars") in raw_user_keys
+    )
+
+    if gate_block_present:
+        gate_enabled = gate.enabled
+        # A9: enabled must be bool
+        if not isinstance(gate_enabled, bool):
+            errors.append(
+                "candidate_duration_gate.enabled must be bool (true/false), "
+                f"got {type(gate_enabled).__name__!r}"
+            )
+        elif gate_enabled:
+            # A10: max_bars required when enabled=true
+            if not gate_max_bars_present:
+                errors.append(
+                    "candidate_duration_gate.max_bars is required when enabled is true"
+                )
+            else:
+                # A11: max_bars must be int >= 1; bool/float/string/null rejected
+                mb = gate.max_bars
+                if isinstance(mb, bool) or not isinstance(mb, int) or mb < 1:
+                    errors.append(
+                        f"candidate_duration_gate.max_bars must be int >= 1; got {mb!r}"
+                    )
+        else:
+            # enabled=false: A12: max_bars must be absent
+            if gate_max_bars_present:
+                errors.append(
+                    "candidate_duration_gate.max_bars must be absent when enabled is false; "
+                    "remove the key"
+                )
+    # A13: absent gate block -> disabled gate (handled by default values; no action needed)
+
+
+# ---------------------------------------------------------------------------
+# Mode resolution helper (WP-V3-2, ТЗ v3 §3.1, §5)
+#
+# Kept in the config layer (not in zigzag_st_filter.py) so that the config
+# loader and build_zigzag_global_stats both import from the same config-layer
+# module without the loader depending on the runtime filter module.
+# ---------------------------------------------------------------------------
+
+def resolve_zigzag_mode(
+    mode_raw: Optional[str],
+    triggers_cfg: object,
+) -> str:
+    """Resolve the effective ZigZag mode string from config values.
+
+    Priority:
+    1. Explicit ``mode`` (canonical v3 config) → use as-is.
+    2. No explicit mode + *triggers_cfg is not None* → legacy mapping:
+       - ct=True,  cm=False → "A"
+       - ct=False, cm=True  → "B"
+       - ct=True,  cm=True  → "A+B"
+       - ct=False, cm=False → "A" (defensive; validator rejects this)
+    3. No explicit mode + *triggers_cfg is None* → default "A".
+
+    **Important:** This function treats any non-None ``triggers_cfg`` as
+    "triggers block was explicitly present".  In the production path the
+    caller (``_resolve_trade_filter_mode_in_place`` in the loader) is
+    responsible for passing ``None`` when the triggers block was absent from
+    the YAML, using ``raw_user_keys`` presence information.
+
+    Direct / duck-typed callers (e.g. test fixtures) that do not go through
+    the loader must either:
+    - set ``mode`` explicitly on the ZigZag config, **or**
+    - pass ``triggers_cfg=None`` to get the "no triggers → A" default.
+
+    Parameters
+    ----------
+    mode_raw:
+        Value of ``zigzag.mode`` from the config.  ``None`` means absent.
+    triggers_cfg:
+        The triggers sub-config object (duck-typed), or ``None`` when absent.
+        Uses ``getattr`` for duck-type safety.
+    """
+    if mode_raw is not None:
+        return str(mode_raw)
+
+    if triggers_cfg is None:
+        return "A"
+
+    ct_obj = getattr(triggers_cfg, "candidate_threshold", None)
+    cm_obj = getattr(triggers_cfg, "confirmed_median", None)
+    ct_enabled = bool(getattr(ct_obj, "enabled", True))
+    cm_enabled = bool(getattr(cm_obj, "enabled", True))
+
+    if ct_enabled and not cm_enabled:
+        return "A"
+    if not ct_enabled and cm_enabled:
+        return "B"
+    if ct_enabled and cm_enabled:
+        return "A+B"
+    return "A"  # both disabled — validator should have rejected; defensive
+
 
 __all__ = [
     "TradeFilterConfig",
     "TradeFilterZigZagConfig",
+    "TradeFilterCandidateDurationGateConfig",
     "TradeFilterTriggersConfig",
     "TradeFilterTriggerToggleConfig",
     "TradeFilterLifecycleConfig",
@@ -617,10 +793,12 @@ __all__ = [
     "collect_trade_filter_unknown_keys",
     "build_trade_filter_config_from_raw",
     "TRADE_FILTER_ALLOWED_KEYS",
+    "resolve_zigzag_mode",
     # Constant whitelists exported for tests / CLI gate logic
     "_LIFECYCLE_STOP_CHECK_VALUES",
     "_LIFECYCLE_STOPPING_EXIT_VALUES",
     "_SUPPORTED_TRADE_FILTER_TYPES",
     "_CALLER_PIPELINE_DOMAIN",
     "_ZIGZAG_ST_MODE_ALLOWED_CALLERS",
+    "_VALID_ZIGZAG_MODES",
 ]

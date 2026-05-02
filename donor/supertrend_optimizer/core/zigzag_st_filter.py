@@ -44,6 +44,7 @@ Spec reference:  Appendix A v1.1 §3.1..§3.4, §3.3, §4..§9, §10, §12,
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field
 from enum import IntEnum
@@ -53,6 +54,9 @@ import numpy as np
 import pandas as pd
 
 from supertrend_optimizer.utils.exceptions import ConfigError
+
+# Module-level logger (ТЗ v3 §11: INFO once per run for Mode B + enabled gate).
+_logger = logging.getLogger(__name__)
 
 
 __all__ = [
@@ -119,6 +123,13 @@ class ZigZagGlobalStats:
     insufficient_data: bool
     fail_closed_reason: Optional[str]
     metadata: dict = field(default_factory=dict)
+    # v3 fields — WP-V3-2 (ТЗ v3 §5)
+    # Defaults preserve backward compat for all existing callers that do not
+    # pass these fields.  Production path (build_zigzag_global_stats) always
+    # populates them explicitly.
+    zigzag_mode: str = "A"
+    candidate_duration_gate_enabled: bool = False
+    candidate_duration_max_bars: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -153,6 +164,14 @@ class ZigZagPerBar:
         start.
     local_median_available : np.ndarray (bool)
         ``True`` iff ``local_median_N[t]`` is a finite, well-defined value.
+    candidate_age_bars : np.ndarray (int64)  [v3 WP-V3-3]
+        Age of the current candidate leg: ``t - last_pivot_bar + 1``.
+        ``-1`` (UNKNOWN) on pre-bootstrap, reset, pathological and UNKNOWN
+        direction bars (ТЗ v3 §6.1, §2).
+    candidate_leg_direction : np.ndarray (int8)  [v3 WP-V3-3]
+        Direction of the current candidate leg: ``+1`` UP, ``-1`` DOWN,
+        ``0`` UNKNOWN.  ``0`` on the same UNKNOWN cases as
+        ``candidate_age_bars`` (ТЗ v3 §6.1, §6.2).
     """
     candidate_height_pct: np.ndarray
     confirm_event: np.ndarray
@@ -160,6 +179,9 @@ class ZigZagPerBar:
     last_confirmed_leg_height_pct: np.ndarray
     local_median_N: np.ndarray
     local_median_available: np.ndarray
+    # v3 WP-V3-3 fields (ТЗ v3 §6)
+    candidate_age_bars: np.ndarray
+    candidate_leg_direction: np.ndarray
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +207,9 @@ class _CloseOnlyPassResult(NamedTuple):
     confirm_event: np.ndarray
     confirmed_leg_idx_at_t: np.ndarray
     last_confirmed_leg_height_pct: np.ndarray
+    # v3 WP-V3-3 fields
+    candidate_age_bars: np.ndarray    # int64; -1 = UNKNOWN
+    candidate_leg_direction: np.ndarray  # int8; 0 = UNKNOWN, +1 = UP, -1 = DOWN
 
 
 def _validate_close_and_threshold(
@@ -304,6 +329,9 @@ def _run_close_only_zigzag_pass(
     confirm_event = np.zeros(n, dtype=np.int8)
     confirmed_leg_idx_at_t = np.full(n, -1, dtype=np.int64)
     last_confirmed_leg_height_pct = np.full(n, np.nan, dtype=np.float64)
+    # v3 WP-V3-3: candidate age and direction arrays
+    candidate_age_bars = np.full(n, -1, dtype=np.int64)
+    candidate_leg_direction = np.zeros(n, dtype=np.int8)
 
     legs: List[ConfirmedLeg] = []
 
@@ -317,6 +345,8 @@ def _run_close_only_zigzag_pass(
             confirm_event=confirm_event,
             confirmed_leg_idx_at_t=confirmed_leg_idx_at_t,
             last_confirmed_leg_height_pct=last_confirmed_leg_height_pct,
+            candidate_age_bars=candidate_age_bars,
+            candidate_leg_direction=candidate_leg_direction,
         )
 
     # Bootstrap state — running min/max of close while the leg direction is
@@ -523,6 +553,9 @@ def _run_close_only_zigzag_pass(
             candidate_height_pct[t] = (
                 abs(run_ext_price - last_pivot_price) / last_pivot_price
             )
+            # v3 WP-V3-3: candidate age and direction (ТЗ v3 §6)
+            candidate_age_bars[t] = t - last_pivot_bar + 1
+            candidate_leg_direction[t] = np.int8(direction)
 
     return _CloseOnlyPassResult(
         legs=legs,
@@ -530,6 +563,8 @@ def _run_close_only_zigzag_pass(
         confirm_event=confirm_event,
         confirmed_leg_idx_at_t=confirmed_leg_idx_at_t,
         last_confirmed_leg_height_pct=last_confirmed_leg_height_pct,
+        candidate_age_bars=candidate_age_bars,
+        candidate_leg_direction=candidate_leg_direction,
     )
 
 
@@ -663,6 +698,8 @@ def compute_zigzag_per_bar(
             last_confirmed_leg_height_pct=empty_f.copy(),
             local_median_N=empty_f.copy(),
             local_median_available=empty_b,
+            candidate_age_bars=empty_i.copy(),
+            candidate_leg_direction=empty_e.copy(),
         )
 
     pass_result = _run_close_only_zigzag_pass(
@@ -700,6 +737,8 @@ def compute_zigzag_per_bar(
         last_confirmed_leg_height_pct=pass_result.last_confirmed_leg_height_pct,
         local_median_N=local_median_N,
         local_median_available=local_median_available,
+        candidate_age_bars=pass_result.candidate_age_bars,
+        candidate_leg_direction=pass_result.candidate_leg_direction,
     )
 
 
@@ -714,6 +753,14 @@ def _extract_zigzag_field(zigzag_cfg: Any, name: str, default: Any = None) -> An
     config dataclass type — only the duck-typed shape is required.
     """
     return getattr(zigzag_cfg, name, default)
+
+
+# Mode resolution is defined in the config layer (trade_filter_config.py) so
+# that the config loader and the runtime filter share the same implementation
+# without the loader depending on this runtime module.
+from supertrend_optimizer.core.trade_filter_config import (  # noqa: E402
+    resolve_zigzag_mode as _resolve_zigzag_mode,
+)
 
 
 def build_zigzag_global_stats(
@@ -813,6 +860,19 @@ def build_zigzag_global_stats(
         zigzag_cfg, "global_stats_source", "full_dataset"
     )
     leg_height_mode = _extract_zigzag_field(zigzag_cfg, "leg_height_mode", "pct")
+
+    # v3: resolve mode and gate (WP-V3-2, ТЗ v3 §5)
+    mode_raw = _extract_zigzag_field(zigzag_cfg, "mode")
+    triggers_cfg = getattr(trade_filter_config, "triggers", None)
+    resolved_mode: str = _resolve_zigzag_mode(mode_raw, triggers_cfg)
+
+    gate_cfg = _extract_zigzag_field(zigzag_cfg, "candidate_duration_gate")
+    gate_enabled: bool = bool(getattr(gate_cfg, "enabled", False)) if gate_cfg is not None else False
+    if gate_enabled:
+        _mb = getattr(gate_cfg, "max_bars", None)
+        gate_max_bars: Optional[int] = int(_mb) if _mb is not None else None
+    else:
+        gate_max_bars = None
 
     confirmed_legs = detect_confirmed_legs_close_only(close, reversal_threshold_f)
     n_legs_total = len(confirmed_legs)
@@ -934,6 +994,12 @@ def build_zigzag_global_stats(
             "leg_height_mode": leg_height_mode,
             "candidate_trigger_threshold": ctt_raw,
             "candidate_trigger_quantile": ctq_raw,
+            # v3 fields (WP-V3-2, ТЗ v3 §5)
+            "zigzag_mode": resolved_mode,
+            "candidate_duration_gate": {
+                "enabled": gate_enabled,
+                "max_bars": gate_max_bars,
+            },
         },
     }
 
@@ -951,6 +1017,9 @@ def build_zigzag_global_stats(
         insufficient_data=False,
         fail_closed_reason=None,
         metadata=metadata,
+        zigzag_mode=resolved_mode,
+        candidate_duration_gate_enabled=gate_enabled,
+        candidate_duration_max_bars=gate_max_bars,
     )
 
 
@@ -1072,6 +1141,24 @@ def _is_first_flip_allowed(flip_dir: int, trade_mode: str) -> bool:
         f"Unsupported trade_mode for ZigZag ST filter: {trade_mode!r}; "
         f"expected one of {_VALID_TRADE_MODES}"
     )
+
+
+def _trade_mode_allows_direction(direction: int, trade_mode: str) -> bool:
+    """ТЗ v3 §7.6 ``trade_mode_allows`` — direction-aware allowance for the
+    Mode C immediate-entry primitive ``immediate_allowed``.
+
+    ::
+
+        dir +1 allowed by long, both, revers
+        dir -1 allowed by short, both, revers
+
+    Any other direction (including ``0``/UNKNOWN) is disallowed.
+    """
+    if direction == +1:
+        return trade_mode in ("long", "both", "revers")
+    if direction == -1:
+        return trade_mode in ("short", "both", "revers")
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -1438,6 +1525,52 @@ def apply(
     filter_allowed_entry_arr = np.zeros(n, dtype=np.int8)
     filter_block_reason_arr = np.full(n, "none", dtype=object)
 
+    # ------------------------------------------------------------------
+    # WP-V3-4: Runtime primitives & snapshots (ТЗ v3 §7, §10.2, §10.3).
+    # Resolve effective ZigZag mode and duration gate from materialised
+    # ``zigzag_global_stats`` (set by WP-V3-2 loader / build_global_stats).
+    # ``apply()`` itself does NOT re-resolve mode — it consumes the value.
+    # ------------------------------------------------------------------
+    resolved_mode = str(getattr(zigzag_global_stats, "zigzag_mode", "A") or "A")
+    gate_enabled = bool(
+        getattr(zigzag_global_stats, "candidate_duration_gate_enabled", False)
+    )
+    _gate_max_bars = getattr(zigzag_global_stats, "candidate_duration_max_bars", None)
+    gate_max_bars = int(_gate_max_bars) if (gate_enabled and _gate_max_bars is not None) else -1
+    pure_mode_b = (resolved_mode == "B")
+
+    # ТЗ v3 §11 / WP-V3-4 P6: Mode B + enabled gate must emit exactly one
+    # INFO log per ``apply()`` invocation (gate is materialised but does
+    # not influence Mode B runtime decisions).
+    if pure_mode_b and gate_enabled:
+        _logger.info(
+            "ZigZag-ST: trade_filter.zigzag.mode=B is active with an "
+            "enabled candidate_duration_gate (max_bars=%d); the gate is "
+            "kept in metadata for diagnostics only and does NOT affect "
+            "Mode B runtime decisions (ТЗ v3 §8.2).",
+            gate_max_bars,
+        )
+
+    # Per-bar v3 primitive arrays (§10.2 + §10.3).  All length n, int8.
+    candidate_threshold_ok_arr = np.zeros(n, dtype=np.int8)
+    candidate_component_ok_arr = np.zeros(n, dtype=np.int8)
+    confirmed_median_ok_arr = np.zeros(n, dtype=np.int8)
+    b_component_ok_arr = np.zeros(n, dtype=np.int8)
+    immediate_allowed_arr = np.zeros(n, dtype=np.int8)
+    candidate_duration_gate_passed_arr = np.zeros(n, dtype=np.int8)
+
+    # WP-V3-4 P7: snapshot arrays (immutable values captured at the
+    # START of every bar step, before any FSM transition can mutate them).
+    snapshot_state_at_bar_start_arr = np.full(
+        n, int(ZigZagFSMState.OFF), dtype=np.int64,
+    )
+    snapshot_held_pos_at_bar_start_arr = np.zeros(n, dtype=np.int8)
+    snapshot_confirmed_legs_at_bar_start_arr = np.full(n, -1, dtype=np.int64)
+
+    # Per-bar v3 candidate arrays (sourced from WP-V3-3 ``ZigZagPerBar``).
+    cand_age_bars = per_bar.candidate_age_bars
+    cand_leg_dir = per_bar.candidate_leg_direction
+
     state = ZigZagFSMState.OFF
     confirmed_legs_since_start = -1   # -1 = lifecycle never started
     held_pos: int = 0                 # FSM-owned position (§2.2 / §5.4)
@@ -1454,7 +1587,16 @@ def apply(
             _stopping_start = -1
 
         # ----- Snapshot state at the START of this bar's events ---------
+        # WP-V3-4 P7: immutable bar-start snapshots — captured BEFORE any
+        # transition logic runs, so subsequent same-bar mutations of
+        # ``state``/``held_pos``/``confirmed_legs_since_start`` cannot
+        # leak back into the snapshot views (ТЗ v3 §7).
         state_at_bar_start = state
+        held_pos_at_bar_start = held_pos
+        confirmed_legs_at_bar_start = confirmed_legs_since_start
+        snapshot_state_at_bar_start_arr[t] = int(state_at_bar_start)
+        snapshot_held_pos_at_bar_start_arr[t] = np.int8(held_pos_at_bar_start)
+        snapshot_confirmed_legs_at_bar_start_arr[t] = confirmed_legs_at_bar_start
 
         # ----- Detect events at close(t) --------------------------------
         prev_trend = int(trend_arr[t - 1]) if t > 0 else 0
@@ -1478,6 +1620,76 @@ def apply(
             and confirmed
             and median_valid
             and float(local_median_N[t]) >= global_median
+        )
+
+        # ------------------------------------------------------------------
+        # WP-V3-4: Compute mode-agnostic primitives §7.  These describe the
+        # *eligibility* of each component independently of the legacy
+        # ``a_enabled``/``b_enabled`` toggles (which still drive the
+        # existing FSM until Mode dispatcher lands in WP-V3-5).  Reset bar
+        # forces every primitive false (§7.7).
+        # ------------------------------------------------------------------
+        is_reset = bool(daily_reset_event[t])
+
+        # §7.1 candidate_threshold_ok
+        candidate_threshold_ok = (
+            (not is_reset)
+            and math.isfinite(c_h)
+            and c_h >= candidate_trigger_threshold
+        )
+
+        # §7.2 duration_ok
+        if not gate_enabled:
+            duration_ok = True
+        else:
+            age = int(cand_age_bars[t])
+            duration_ok = (
+                (not is_reset)
+                and age > 0
+                and age <= gate_max_bars
+            )
+
+        # §7.3 candidate_component_ok
+        candidate_component_ok = candidate_threshold_ok and duration_ok
+
+        # §7.4 confirmed_median_ok — mode-agnostic B condition.  Note: this
+        # primitive does NOT consume the legacy ``b_enabled`` toggle; the
+        # Mode dispatcher in WP-V3-5 will gate it via ``resolved_mode``.
+        confirmed_median_condition = (
+            confirmed
+            and median_valid
+            and float(local_median_N[t]) >= global_median
+        )
+        confirmed_median_ok = (not is_reset) and confirmed_median_condition
+
+        # §7.5 b_component_ok
+        b_component_ok = confirmed_median_ok
+
+        # §7.6 immediate_allowed (reset bar forces false per §7.7)
+        cand_dir_t = int(cand_leg_dir[t])
+        immediate_allowed = (
+            (not is_reset)
+            and cand_dir_t in (-1, +1)
+            and _trade_mode_allows_direction(cand_dir_t, trade_mode)
+        )
+
+        # §10.3 candidate_duration_gate_passed
+        # - Gate disabled → always 1.
+        # - Pure Mode B → always 1, even when gate enabled (gate has no
+        #   runtime effect in Mode B; ТЗ v3 §8.2 / §10.3 special case).
+        # - Otherwise mirrors duration_ok.
+        if not gate_enabled or pure_mode_b:
+            cand_duration_gate_passed = True
+        else:
+            cand_duration_gate_passed = duration_ok
+
+        candidate_threshold_ok_arr[t] = np.int8(1 if candidate_threshold_ok else 0)
+        candidate_component_ok_arr[t] = np.int8(1 if candidate_component_ok else 0)
+        confirmed_median_ok_arr[t] = np.int8(1 if confirmed_median_ok else 0)
+        b_component_ok_arr[t] = np.int8(1 if b_component_ok else 0)
+        immediate_allowed_arr[t] = np.int8(1 if immediate_allowed else 0)
+        candidate_duration_gate_passed_arr[t] = np.int8(
+            1 if cand_duration_gate_passed else 0
         )
 
         # Trigger source diagnostic (meaningful in OFF only; repeated
@@ -1688,6 +1900,22 @@ def apply(
         "filter_block_reason": filter_block_reason_arr,
         "daily_reset_enabled": np.full(n, int(daily_reset_enabled), dtype=np.int8),
         "daily_reset_event": np.asarray(daily_reset_event, dtype=np.int8),
+        # --- v3 WP-V3-4: runtime primitives + bar-start snapshots ---
+        # ТЗ v3 §10.2 / §10.3.  Existing key ``candidate_height_pct`` is
+        # already exported above (WP9); the threshold-derived primitive is
+        # added here.
+        "candidate_threshold_ok": candidate_threshold_ok_arr,
+        "candidate_component_ok": candidate_component_ok_arr,
+        "confirmed_median_ok": confirmed_median_ok_arr,
+        "b_component_ok": b_component_ok_arr,
+        "immediate_allowed": immediate_allowed_arr,
+        "candidate_duration_gate_passed": candidate_duration_gate_passed_arr,
+        # WP-V3-4 P7: per-bar immutable snapshots captured at bar start
+        # (used by tests; consumed by WP-V3-5 mode dispatcher and WP-V3-6
+        # FSM ordering hardening).
+        "snapshot_state_at_bar_start": snapshot_state_at_bar_start_arr,
+        "snapshot_held_pos_at_bar_start": snapshot_held_pos_at_bar_start_arr,
+        "snapshot_confirmed_legs_at_bar_start": snapshot_confirmed_legs_at_bar_start_arr,
     }
 
     return ZigZagSTFilterResult(

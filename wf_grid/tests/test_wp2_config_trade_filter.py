@@ -228,13 +228,15 @@ class TestRequiredSubBlocksWhenEnabled:
         )
         _assert_error(tmp_path, base, "zigzag block is required")
 
-    def test_missing_triggers_reject(self, tmp_path):
+    def test_missing_triggers_now_valid_no_mode_defaults_to_a(self, tmp_path):
+        # v3: triggers is no longer required (WP-V3-1). No triggers + no mode = mode A.
+        # Config still fails because candidate_trigger_threshold is required.
         base = self._base_enabled_no_blocks() + (
             "  zigzag:\n    reversal_threshold: 0.005\n    local_window: 5\n"
             "  lifecycle:\n    freeze_confirmed_legs: 3\n"
             "    stop_check: confirm_bar_only\n    stopping_exit: opposite_st_flip\n"
         )
-        _assert_error(tmp_path, base, "triggers block is required")
+        _assert_error(tmp_path, base, "candidate_trigger_threshold")
 
     def test_missing_lifecycle_reject(self, tmp_path):
         base = self._base_enabled_no_blocks() + (
@@ -740,3 +742,189 @@ class TestDisabledBaselineCompatibility:
             assert getattr(cfg_no_tf, f.name) == getattr(cfg_disabled, f.name), (
                 f"Field {f.name!r} differs between no-trade_filter and disabled-trade_filter configs"
             )
+
+
+# ---------------------------------------------------------------------------
+# 17. v3 Schema and migration (WP-V3-1) — A1-A14
+# ---------------------------------------------------------------------------
+
+# Canonical v3 zigzag block with mode (no triggers), lifecycle included.
+_V3_ZIGZAG_WITH_MODE = """\
+  zigzag:
+    reversal_threshold: 0.005
+    candidate_trigger_threshold: auto
+    candidate_trigger_quantile: 0.80
+    local_window: 5
+  lifecycle:
+    freeze_confirmed_legs: 3
+    stop_check: confirm_bar_only
+    stopping_exit: opposite_st_flip
+"""
+
+_V3_BASE = _MINIMAL_BASE + "trade_filter:\n  enabled: true\n  type: zigzag_st_mode\n"
+
+
+def _v3_yaml(mode: str, extra_zigzag: str = "") -> str:
+    return (
+        _V3_BASE
+        + _V3_ZIGZAG_WITH_MODE.replace(
+            "  zigzag:\n", f"  zigzag:\n    mode: {mode}\n{extra_zigzag}"
+        )
+    )
+
+
+class TestV3ModeValidation:
+    """A1/A2: mode literal validation."""
+
+    @pytest.mark.parametrize("mode", ["A", "B", "C", "A+B", "C+B"])
+    def test_a1_valid_modes_accepted(self, tmp_path, mode):
+        """A1: all five valid mode literals load without error."""
+        cfg = _assert_ok(tmp_path, _v3_yaml(mode))
+        assert cfg.trade_filter.zigzag.mode == mode
+
+    @pytest.mark.parametrize("bad_mode", ["a", "b", "c", "a+b", "c+b", "AB", "D", "", "auto"])
+    def test_a2_invalid_mode_rejected(self, tmp_path, bad_mode):
+        """A2: lowercase or unknown mode -> ConfigError."""
+        _assert_error(tmp_path, _v3_yaml(bad_mode), "must be one of")
+
+    def test_mode_field_default_is_none(self):
+        """mode defaults to None when not set."""
+        from wf_grid.config.schema import TradeFilterZigZagConfig
+        assert TradeFilterZigZagConfig().mode is None
+
+
+class TestV3LegacyMigration:
+    """A3-A6: legacy triggers -> mode resolution (validation passes)."""
+
+    def test_a3_no_mode_no_triggers_valid(self, tmp_path):
+        """A3: no mode, no triggers -> loads without error; mode resolved to 'A' by loader."""
+        yaml = (
+            _V3_BASE
+            + _V3_ZIGZAG_WITH_MODE
+        )
+        cfg = _assert_ok(tmp_path, yaml)
+        # After loading, loader resolves mode=None + no triggers -> "A" (WP-V3-2)
+        assert cfg.trade_filter.zigzag.mode == "A"
+
+    def test_a4_legacy_candidate_only_valid(self, tmp_path):
+        """A4: legacy candidate-only (ct=true, cm=false) -> mode resolved to 'A'."""
+        yaml = (
+            _V3_BASE
+            + _V3_ZIGZAG_WITH_MODE
+            + "  triggers:\n    candidate_threshold:\n      enabled: true\n"
+            "    confirmed_median:\n      enabled: false\n"
+        )
+        cfg = _assert_ok(tmp_path, yaml)
+        assert cfg.trade_filter.zigzag.mode == "A"
+
+    def test_a5_legacy_confirmed_only_valid(self, tmp_path):
+        """A5: legacy confirmed-only (ct=false, cm=true) -> mode resolved to 'B'."""
+        yaml = (
+            _V3_BASE
+            + _V3_ZIGZAG_WITH_MODE
+            + "  triggers:\n    candidate_threshold:\n      enabled: false\n"
+            "    confirmed_median:\n      enabled: true\n"
+        )
+        cfg = _assert_ok(tmp_path, yaml)
+        assert cfg.trade_filter.zigzag.mode == "B"
+
+    def test_a6_legacy_both_valid(self, tmp_path):
+        """A6: legacy both (ct=true, cm=true) -> mode resolved to 'A+B'."""
+        yaml = (
+            _V3_BASE
+            + _V3_ZIGZAG_WITH_MODE
+            + "  triggers:\n    candidate_threshold:\n      enabled: true\n"
+            "    confirmed_median:\n      enabled: true\n"
+        )
+        cfg = _assert_ok(tmp_path, yaml)
+        assert cfg.trade_filter.zigzag.mode == "A+B"
+
+
+class TestV3MixedSchemaRejection:
+    """A7/A8: explicit mode + triggers conflict; candidate_entry deprecation."""
+
+    def test_a7_mode_plus_triggers_rejected(self, tmp_path):
+        """A7: explicit mode + any triggers block -> ConfigError."""
+        yaml = (
+            _V3_BASE
+            + _V3_ZIGZAG_WITH_MODE.replace(
+                "  zigzag:\n", "  zigzag:\n    mode: A\n"
+            )
+            + "  triggers:\n    candidate_threshold:\n      enabled: true\n"
+            "    confirmed_median:\n      enabled: true\n"
+        )
+        _assert_error(tmp_path, yaml, "cannot be used together")
+
+    def test_a8_candidate_entry_deprecated(self, tmp_path):
+        """A8: candidate_entry under trade_filter.zigzag -> ConfigError with deprecated message.
+
+        candidate_entry is explicitly whitelisted in the strict schema so the validator
+        can emit a specific deprecation message (ТЗ v3 §3.1, §4.5 candidate_entry_deprecated)
+        rather than a generic unknown-key rejection.
+        """
+        yaml = (
+            _V3_BASE
+            + "  zigzag:\n    mode: A\n    candidate_entry: true\n"
+            "    reversal_threshold: 0.005\n    candidate_trigger_threshold: auto\n"
+            "    candidate_trigger_quantile: 0.80\n    local_window: 5\n"
+            + "  lifecycle:\n    freeze_confirmed_legs: 3\n"
+            "    stop_check: confirm_bar_only\n    stopping_exit: opposite_st_flip\n"
+        )
+        _assert_error(tmp_path, yaml, "deprecated in v3")
+
+
+class TestV3CandidateDurationGate:
+    """A9-A14: candidate_duration_gate validation."""
+
+    def _base_with_mode(self, mode: str = "A") -> str:
+        return _v3_yaml(mode)
+
+    def test_a9_gate_enabled_non_bool_rejected(self, tmp_path):
+        """A9: candidate_duration_gate.enabled non-bool -> ConfigError (int value)."""
+        yaml = _v3_yaml("A", "    candidate_duration_gate:\n      enabled: 1\n      max_bars: 10\n")
+        _assert_error(tmp_path, yaml, "candidate_duration_gate.enabled must be bool")
+
+    def test_a9_gate_enabled_string_rejected(self, tmp_path):
+        """A9: enabled as string rejected."""
+        yaml = _v3_yaml("A", "    candidate_duration_gate:\n      enabled: 'true'\n      max_bars: 10\n")
+        _assert_error(tmp_path, yaml, "candidate_duration_gate.enabled must be bool")
+
+    def test_a10_gate_enabled_no_max_bars_rejected(self, tmp_path):
+        """A10: enabled=true without max_bars -> ConfigError."""
+        yaml = _v3_yaml("A", "    candidate_duration_gate:\n      enabled: true\n")
+        _assert_error(tmp_path, yaml, "max_bars is required when enabled is true")
+
+    @pytest.mark.parametrize("bad_val", ["null", "0", "-1", "1.5", "'10'", "true"])
+    def test_a11_gate_max_bars_invalid_types(self, tmp_path, bad_val):
+        """A11: max_bars bool/float/string/null/<1 -> ConfigError."""
+        yaml = _v3_yaml(
+            "A",
+            f"    candidate_duration_gate:\n      enabled: true\n      max_bars: {bad_val}\n",
+        )
+        _assert_error(tmp_path, yaml, "max_bars must be int >= 1")
+
+    def test_a12_gate_disabled_with_max_bars_rejected(self, tmp_path):
+        """A12: enabled=false + explicit max_bars -> ConfigError."""
+        yaml = _v3_yaml("A", "    candidate_duration_gate:\n      enabled: false\n      max_bars: 5\n")
+        _assert_error(tmp_path, yaml, "max_bars must be absent when enabled is false")
+
+    def test_a13_absent_gate_disabled_by_default(self, tmp_path):
+        """A13: absent gate block -> disabled gate (default)."""
+        cfg = _assert_ok(tmp_path, _v3_yaml("A"))
+        gate = cfg.trade_filter.zigzag.candidate_duration_gate
+        assert gate.enabled is False
+        assert gate.max_bars is None
+
+    def test_a14_mode_b_enabled_gate_valid(self, tmp_path):
+        """A14: mode B + enabled gate + valid max_bars -> valid."""
+        yaml = _v3_yaml("B", "    candidate_duration_gate:\n      enabled: true\n      max_bars: 10\n")
+        cfg = _assert_ok(tmp_path, yaml)
+        gate = cfg.trade_filter.zigzag.candidate_duration_gate
+        assert gate.enabled is True
+        assert gate.max_bars == 10
+
+    def test_gate_enabled_valid_max_bars_loads(self, tmp_path):
+        """Gate enabled with valid max_bars=1 (boundary) -> valid."""
+        yaml = _v3_yaml("C", "    candidate_duration_gate:\n      enabled: true\n      max_bars: 1\n")
+        cfg = _assert_ok(tmp_path, yaml)
+        assert cfg.trade_filter.zigzag.candidate_duration_gate.max_bars == 1

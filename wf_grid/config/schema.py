@@ -187,10 +187,12 @@ class ExecutionConfig:
 from supertrend_optimizer.core.trade_filter_config import (  # noqa: E402,F401
     TradeFilterConfig,
     TradeFilterZigZagConfig,
+    TradeFilterCandidateDurationGateConfig,
     TradeFilterTriggersConfig,
     TradeFilterTriggerToggleConfig,
     TradeFilterLifecycleConfig,
     TradeFilterDiagnosticsConfig,
+    resolve_zigzag_mode,
 )
 
 

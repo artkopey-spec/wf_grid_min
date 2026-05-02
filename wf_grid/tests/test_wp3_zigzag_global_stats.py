@@ -25,7 +25,7 @@ from __future__ import annotations
 import inspect
 import math
 from dataclasses import replace
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 import pytest
@@ -38,6 +38,7 @@ from supertrend_optimizer.core.zigzag_st_filter import (
 )
 from supertrend_optimizer.utils.exceptions import ConfigError
 from wf_grid.config.schema import (
+    TradeFilterCandidateDurationGateConfig,
     TradeFilterConfig,
     TradeFilterDiagnosticsConfig,
     TradeFilterLifecycleConfig,
@@ -68,13 +69,34 @@ def _make_filter_config(
     candidate_trigger_threshold=0.05,
     candidate_trigger_quantile=None,
     local_window: int = 5,
+    mode: Optional[str] = None,
+    gate_enabled: bool = False,
+    gate_max_bars: Optional[int] = None,
+    triggers_ct: bool = True,
+    triggers_cm: bool = True,
+    include_triggers: bool = True,
 ) -> TradeFilterConfig:
     """Build a minimal enabled TradeFilterConfig for build_zigzag_global_stats.
 
     The build function is duck-typed; this helper just keeps the tests close
     to the real WP2 dataclasses to catch any drift between WP2 schema and
     WP3 consumption.
+
+    Parameters
+    ----------
+    mode:
+        Explicit mode literal (v3 canonical path).  None = use legacy triggers.
+    gate_enabled / gate_max_bars:
+        candidate_duration_gate settings.
+    triggers_ct / triggers_cm:
+        Legacy trigger flags (only used when include_triggers=True and mode=None).
+    include_triggers:
+        Set False to omit triggers entirely (simulates no-triggers legacy config).
     """
+    gate = TradeFilterCandidateDurationGateConfig(
+        enabled=gate_enabled,
+        max_bars=gate_max_bars if gate_enabled else None,
+    )
     return TradeFilterConfig(
         enabled=True,
         type="zigzag_st_mode",
@@ -83,11 +105,13 @@ def _make_filter_config(
             candidate_trigger_threshold=candidate_trigger_threshold,
             candidate_trigger_quantile=candidate_trigger_quantile,
             local_window=local_window,
+            mode=mode,
+            candidate_duration_gate=gate,
         ),
         triggers=TradeFilterTriggersConfig(
-            candidate_threshold=TradeFilterTriggerToggleConfig(enabled=True),
-            confirmed_median=TradeFilterTriggerToggleConfig(enabled=True),
-        ),
+            candidate_threshold=TradeFilterTriggerToggleConfig(enabled=triggers_ct),
+            confirmed_median=TradeFilterTriggerToggleConfig(enabled=triggers_cm),
+        ) if include_triggers else None,
         lifecycle=TradeFilterLifecycleConfig(),
         diagnostics=TradeFilterDiagnosticsConfig(),
     )
@@ -549,3 +573,151 @@ class TestAntiDrift:
                 f"close-only contract violated: token {forbidden!r} found in "
                 "executable code of zigzag_st_filter.py"
             )
+
+
+# ---------------------------------------------------------------------------
+# WP-V3-2: Global stats / metadata (A3-A6, M1-M5)
+# ---------------------------------------------------------------------------
+
+class TestV3ModeMateriailzation:
+    """A3-A6: legacy triggers -> resolved mode in ZigZagGlobalStats.zigzag_mode."""
+
+    def test_a3_no_mode_no_triggers_materializes_a(self):
+        """A3: no mode, no triggers → materialized mode A (M1)."""
+        cfg = _make_filter_config(mode=None, include_triggers=False)
+        stats = build_zigzag_global_stats(MANY_LEG_SAWTOOTH.close, cfg)
+        assert stats.zigzag_mode == "A"
+
+    def test_a4_legacy_candidate_only_materializes_a(self):
+        """A4: legacy ct=true, cm=false → materialized mode A."""
+        cfg = _make_filter_config(mode=None, triggers_ct=True, triggers_cm=False)
+        stats = build_zigzag_global_stats(MANY_LEG_SAWTOOTH.close, cfg)
+        assert stats.zigzag_mode == "A"
+
+    def test_a5_legacy_confirmed_only_materializes_b(self):
+        """A5: legacy ct=false, cm=true → materialized mode B."""
+        cfg = _make_filter_config(mode=None, triggers_ct=False, triggers_cm=True)
+        stats = build_zigzag_global_stats(MANY_LEG_SAWTOOTH.close, cfg)
+        assert stats.zigzag_mode == "B"
+
+    def test_a6_legacy_both_materializes_ab(self):
+        """A6: legacy ct=true, cm=true → materialized mode A+B."""
+        cfg = _make_filter_config(mode=None, triggers_ct=True, triggers_cm=True)
+        stats = build_zigzag_global_stats(MANY_LEG_SAWTOOTH.close, cfg)
+        assert stats.zigzag_mode == "A+B"
+
+    @pytest.mark.parametrize("mode", ["A", "B", "C", "A+B", "C+B"])
+    def test_explicit_mode_passed_through(self, mode):
+        """M1: explicit mode literal is stored as-is in ZigZagGlobalStats."""
+        cfg = _make_filter_config(mode=mode, include_triggers=False)
+        stats = build_zigzag_global_stats(MANY_LEG_SAWTOOTH.close, cfg)
+        assert stats.zigzag_mode == mode
+
+
+class TestV3GateMateriailzation:
+    """M2/M3: candidate_duration_gate materialized in ZigZagGlobalStats."""
+
+    def test_m3_disabled_gate_materializes_false_none(self):
+        """M3: absent/disabled gate → enabled=False, max_bars=None in dataclass."""
+        cfg = _make_filter_config(mode="A", gate_enabled=False)
+        stats = build_zigzag_global_stats(MANY_LEG_SAWTOOTH.close, cfg)
+        assert stats.candidate_duration_gate_enabled is False
+        assert stats.candidate_duration_max_bars is None
+
+    def test_m2_enabled_gate_materializes_true_int(self):
+        """M2: enabled gate → enabled=True, max_bars=int in dataclass."""
+        cfg = _make_filter_config(mode="A", gate_enabled=True, gate_max_bars=10)
+        stats = build_zigzag_global_stats(MANY_LEG_SAWTOOTH.close, cfg)
+        assert stats.candidate_duration_gate_enabled is True
+        assert stats.candidate_duration_max_bars == 10
+        assert isinstance(stats.candidate_duration_max_bars, int)
+
+    def test_m2_gate_max_bars_stored_as_int(self):
+        """M2: max_bars value is stored as native int (not float/str)."""
+        cfg = _make_filter_config(mode="C", gate_enabled=True, gate_max_bars=5)
+        stats = build_zigzag_global_stats(MANY_LEG_SAWTOOTH.close, cfg)
+        assert type(stats.candidate_duration_max_bars) is int
+        assert stats.candidate_duration_max_bars == 5
+
+
+class TestV3ConfigSnapshot:
+    """M4/M5: config_snapshot contains zigzag_mode and candidate_duration_gate."""
+
+    def test_m5_config_snapshot_contains_zigzag_mode(self):
+        """M5: metadata.config_snapshot has zigzag_mode key."""
+        cfg = _make_filter_config(mode="C+B", include_triggers=False)
+        stats = build_zigzag_global_stats(MANY_LEG_SAWTOOTH.close, cfg)
+        snap = stats.metadata["config_snapshot"]
+        assert "zigzag_mode" in snap
+        assert snap["zigzag_mode"] == "C+B"
+
+    def test_m5_config_snapshot_contains_gate_object(self):
+        """M5: metadata.config_snapshot has candidate_duration_gate dict."""
+        cfg = _make_filter_config(mode="A", gate_enabled=True, gate_max_bars=7)
+        stats = build_zigzag_global_stats(MANY_LEG_SAWTOOTH.close, cfg)
+        snap = stats.metadata["config_snapshot"]
+        assert "candidate_duration_gate" in snap
+        gate_snap = snap["candidate_duration_gate"]
+        assert gate_snap["enabled"] is True
+        assert gate_snap["max_bars"] == 7
+
+    def test_m3_snapshot_disabled_gate_uses_none(self):
+        """M3: disabled gate → None in metadata.config_snapshot (not -1)."""
+        cfg = _make_filter_config(mode="B", gate_enabled=False)
+        stats = build_zigzag_global_stats(MANY_LEG_SAWTOOTH.close, cfg)
+        snap = stats.metadata["config_snapshot"]
+        gate_snap = snap["candidate_duration_gate"]
+        assert gate_snap["enabled"] is False
+        assert gate_snap["max_bars"] is None
+
+    def test_m5_config_snapshot_has_all_required_keys(self):
+        """M5: config_snapshot contains all required v3 keys per ТЗ §5."""
+        cfg = _make_filter_config(mode="A", gate_enabled=False)
+        stats = build_zigzag_global_stats(MANY_LEG_SAWTOOTH.close, cfg)
+        snap = stats.metadata["config_snapshot"]
+        required_keys = {
+            "reversal_threshold", "local_window", "global_stats_source",
+            "leg_height_mode", "candidate_trigger_threshold",
+            "candidate_trigger_quantile",
+            # v3 additions
+            "zigzag_mode", "candidate_duration_gate",
+        }
+        missing = required_keys - snap.keys()
+        assert not missing, f"config_snapshot missing keys: {missing}"
+
+
+class TestV3DisabledFilterPath:
+    """Backward compat: ZigZagGlobalStats v3 fields have safe defaults.
+
+    When code constructs ZigZagGlobalStats without the v3 fields (old code,
+    or test fixtures that only set legacy fields), the defaults apply:
+    - zigzag_mode = "A"
+    - candidate_duration_gate_enabled = False
+    - candidate_duration_max_bars = None
+
+    The "disabled filter has no diagnostics / baseline unchanged" invariant
+    is tested by test_wp9_diagnostics_export.py (filter_disabled path) and
+    test_wp1_baseline_capture.py (regression / bit-identity).
+    """
+
+    def test_stats_without_v3_fields_uses_defaults(self):
+        """Constructing ZigZagGlobalStats without v3 keyword args yields safe defaults."""
+        import numpy as np
+
+        stats = ZigZagGlobalStats(
+            reversal_threshold=0.005,
+            global_stats_source="full_dataset",
+            leg_height_mode="pct",
+            confirmed_legs=[],
+            confirmed_heights_pct=np.array([], dtype=np.float64),
+            global_median=0.01,
+            candidate_trigger_threshold=0.01,
+            candidate_trigger_source="explicit",
+            candidate_trigger_quantile=None,
+            n_legs_total=0,
+            insufficient_data=False,
+            fail_closed_reason=None,
+        )
+        assert stats.zigzag_mode == "A"
+        assert stats.candidate_duration_gate_enabled is False
+        assert stats.candidate_duration_max_bars is None

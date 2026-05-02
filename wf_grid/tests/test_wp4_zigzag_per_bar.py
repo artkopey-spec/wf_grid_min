@@ -122,6 +122,8 @@ class TestZigZagPerBarDataclass:
             "last_confirmed_leg_height_pct",
             "local_median_N",
             "local_median_available",
+            "candidate_age_bars",
+            "candidate_leg_direction",
         ]
 
     def test_zigzag_per_bar_is_frozen(self):
@@ -559,6 +561,195 @@ class TestOutputContract:
         assert per_bar.local_median_N.dtype == np.float64
         assert per_bar.local_median_available.shape == (n,)
         assert per_bar.local_median_available.dtype == bool
+        # v3 WP-V3-3
+        assert per_bar.candidate_age_bars.shape == (n,)
+        assert per_bar.candidate_age_bars.dtype == np.int64
+        assert per_bar.candidate_leg_direction.shape == (n,)
+        assert per_bar.candidate_leg_direction.dtype == np.int8
+
+
+# ---------------------------------------------------------------------------
+# WP-V3-3: Per-bar candidate state — C1-C5 (ТЗ v3 §6).
+# ---------------------------------------------------------------------------
+
+def _expected_candidate_age_bars_simple_zigzag() -> np.ndarray:
+    """Manually-traced candidate_age_bars for SIMPLE_ZIGZAG (r=0.02).
+
+    SIMPLE_ZIGZAG close: [100, 101, 102, 99, 99, 105, 102, 108, 103]
+    Walk-through (end-of-bar snapshot, post-confirm):
+        t=0     bootstrap, direction=UNKNOWN          -> -1
+        t=1     still UNKNOWN                         -> -1
+        t=2     bootstrap: UP, last_pivot=(0,100)     age=2-0+1=3
+        t=3     confirm UP; new pivot=(2,102)         age=3-2+1=2
+        t=4     DOWN in-progress                      age=4-2+1=3
+        t=5     confirm DOWN; new pivot=(3,99)        age=5-3+1=3
+        t=6     confirm UP;  new pivot=(5,105)        age=6-5+1=2
+        t=7     confirm DOWN; new pivot=(6,102)       age=7-6+1=2
+        t=8     confirm UP;  new pivot=(7,108)        age=8-7+1=2
+    """
+    return np.array([- 1, -1, 3, 2, 3, 3, 2, 2, 2], dtype=np.int64)
+
+
+def _expected_candidate_leg_direction_simple_zigzag() -> np.ndarray:
+    """Manually-traced candidate_leg_direction for SIMPLE_ZIGZAG (r=0.02).
+
+    Walk-through (end-of-bar snapshot, post-confirm):
+        t=0,1   UNKNOWN                  -> 0
+        t=2     bootstrap: UP            -> +1
+        t=3     confirm UP -> DOWN       -> -1  (C4: opposite of UP)
+        t=4     DOWN in-progress         -> -1
+        t=5     confirm DOWN -> UP       -> +1  (C4: opposite of DOWN)
+        t=6     confirm UP -> DOWN       -> -1
+        t=7     confirm DOWN -> UP       -> +1
+        t=8     confirm UP -> DOWN       -> -1
+    """
+    return np.array([0, 0, 1, -1, -1, 1, -1, 1, -1], dtype=np.int8)
+
+
+class TestV3CandidatePerBarState:
+    """WP-V3-3 acceptance criteria C1-C5 (ТЗ v3 §6)."""
+
+    # ------------------------------------------------------------------ C1-C3
+    def test_c1_c2_c3_unknown_on_pre_bootstrap(self):
+        """C1/C2/C3: pre-bootstrap bars have age=-1, dir=0, height=NaN."""
+        per_bar = _per_bar_for_fixture(SIMPLE_ZIGZAG, local_window=3)
+        # t=0 and t=1 are pre-bootstrap / UNKNOWN
+        for t in (0, 1):
+            assert per_bar.candidate_age_bars[t] == -1
+            assert per_bar.candidate_leg_direction[t] == 0
+            assert np.isnan(per_bar.candidate_height_pct[t])
+
+    def test_c1_c2_c3_unknown_on_pathological_close(self):
+        """C1/C2/C3: pathological close (NaN/inf/negative) yields UNKNOWN."""
+        close = np.array([100.0, 110.0, np.nan, 108.0, 90.0], dtype=np.float64)
+        per_bar = compute_zigzag_per_bar(close, reversal_threshold=0.05, local_window=3)
+        # t=2 is pathological — arrays must show UNKNOWN
+        assert per_bar.candidate_age_bars[2] == -1
+        assert per_bar.candidate_leg_direction[2] == 0
+        assert np.isnan(per_bar.candidate_height_pct[2])
+
+    def test_c1_c2_c3_unknown_on_reset_bar(self):
+        """C1/C2/C3: daily-reset bar clears in-progress state to UNKNOWN."""
+        # Build a short series where direction is established before reset.
+        # r=0.10; [100,111,122,...] establishes UP at t=1.
+        close = np.array([100.0, 111.0, 122.0, 108.0], dtype=np.float64)
+        # reset at t=3 wipes the candidate state
+        reset = np.array([0, 0, 0, 1], dtype=np.int8)
+        per_bar = compute_zigzag_per_bar(
+            close, reversal_threshold=0.10, local_window=3,
+            daily_reset_event=reset,
+        )
+        # t=3 is a reset bar → candidate must be UNKNOWN
+        assert per_bar.candidate_age_bars[3] == -1
+        assert per_bar.candidate_leg_direction[3] == 0
+        assert np.isnan(per_bar.candidate_height_pct[3])
+
+    # ------------------------------------------------------------------ C1-C3 dtype/length
+    def test_c1_dtype_and_length(self):
+        """C1: candidate_age_bars is int64 and length equals len(close)."""
+        n = len(SIMPLE_ZIGZAG.close)
+        per_bar = _per_bar_for_fixture(SIMPLE_ZIGZAG, local_window=3)
+        assert per_bar.candidate_age_bars.dtype == np.int64
+        assert len(per_bar.candidate_age_bars) == n
+
+    def test_c2_dtype_and_length(self):
+        """C2: candidate_leg_direction is int8 and length equals len(close)."""
+        n = len(SIMPLE_ZIGZAG.close)
+        per_bar = _per_bar_for_fixture(SIMPLE_ZIGZAG, local_window=3)
+        assert per_bar.candidate_leg_direction.dtype == np.int8
+        assert len(per_bar.candidate_leg_direction) == n
+
+    # ------------------------------------------------------------------ age formula
+    def test_c3_candidate_age_bars_formula(self):
+        """C3: candidate_age_bars[t] == t - last_pivot_bar + 1 for all known bars."""
+        per_bar = _per_bar_for_fixture(SIMPLE_ZIGZAG, local_window=3)
+        expected = _expected_candidate_age_bars_simple_zigzag()
+        np.testing.assert_array_equal(per_bar.candidate_age_bars, expected)
+
+    def test_c3_candidate_leg_direction_values(self):
+        """C3 (direction variant): direction matches expected UP/DOWN sequence."""
+        per_bar = _per_bar_for_fixture(SIMPLE_ZIGZAG, local_window=3)
+        expected = _expected_candidate_leg_direction_simple_zigzag()
+        np.testing.assert_array_equal(per_bar.candidate_leg_direction, expected)
+
+    # ------------------------------------------------------------------ C4
+    def test_c4_confirm_bar_direction_is_opposite_of_confirmed_leg(self):
+        """C4: on each confirm bar, candidate_leg_direction == -confirmed_leg.direction."""
+        per_bar = _per_bar_for_fixture(SIMPLE_ZIGZAG, local_window=3)
+        legs = detect_confirmed_legs_close_only(
+            SIMPLE_ZIGZAG.close, SIMPLE_ZIGZAG.reversal_threshold
+        )
+        for leg in legs:
+            t = leg.confirm_bar
+            # New candidate has direction opposite to the just-confirmed leg
+            assert int(per_bar.candidate_leg_direction[t]) == -leg.direction, (
+                f"confirm_bar={t}: expected dir={-leg.direction}, "
+                f"got {per_bar.candidate_leg_direction[t]}"
+            )
+
+    # ------------------------------------------------------------------ C5
+    def test_c5_confirm_bar_age_at_least_2(self):
+        """C5: on each confirm bar, candidate_age_bars >= 2."""
+        per_bar = _per_bar_for_fixture(SIMPLE_ZIGZAG, local_window=3)
+        confirm_bars = np.flatnonzero(per_bar.confirm_event == 1).tolist()
+        assert confirm_bars, "SIMPLE_ZIGZAG should have multiple confirm bars"
+        for t in confirm_bars:
+            assert per_bar.candidate_age_bars[t] >= 2, (
+                f"confirm_bar={t}: expected age>=2, got {per_bar.candidate_age_bars[t]}"
+            )
+
+    # ------------------------------------------------------------------ reset semantics
+    def test_reset_bar_erases_candidate_before_primitives(self):
+        """Reset-bar semantics: candidate state is UNKNOWN at reset even when
+        direction was established just before.
+
+        Series (r=0.10):
+          t=0: 100 → bootstrap seed
+          t=1: 111 → up_hit (111 >= 100*1.1), direction=UP established
+          t=2: 122 → UP extension, age=3
+          t=3: RESET → direction cleared → age=-1, dir=0, height=NaN
+        """
+        close = np.array([100.0, 111.0, 122.0, 108.0], dtype=np.float64)
+        reset = np.array([0, 0, 0, 1], dtype=np.int8)
+        per_bar = compute_zigzag_per_bar(
+            close, reversal_threshold=0.10, local_window=3,
+            daily_reset_event=reset,
+        )
+        # Before reset: t=2 has a valid candidate
+        assert per_bar.candidate_age_bars[2] >= 1
+        assert per_bar.candidate_leg_direction[2] != 0
+        assert not np.isnan(per_bar.candidate_height_pct[2])
+        # On reset bar t=3: UNKNOWN
+        assert per_bar.candidate_age_bars[3] == -1
+        assert per_bar.candidate_leg_direction[3] == 0
+        assert np.isnan(per_bar.candidate_height_pct[3])
+
+    # ------------------------------------------------------------------ empty input
+    def test_empty_close_new_arrays_are_length_zero(self):
+        """New arrays respect the zero-length invariant for empty input."""
+        per_bar = compute_zigzag_per_bar(
+            np.array([], dtype=np.float64), reversal_threshold=0.02, local_window=3,
+        )
+        assert per_bar.candidate_age_bars.shape == (0,)
+        assert per_bar.candidate_age_bars.dtype == np.int64
+        assert per_bar.candidate_leg_direction.shape == (0,)
+        assert per_bar.candidate_leg_direction.dtype == np.int8
+
+    # ------------------------------------------------------------------ sawtooth
+    def test_many_leg_sawtooth_confirm_bars_satisfy_c4_and_c5(self):
+        """C4+C5 hold on MANY_LEG_SAWTOOTH (all confirm bars across a long series)."""
+        per_bar = _per_bar_for_fixture(MANY_LEG_SAWTOOTH, local_window=5)
+        legs = detect_confirmed_legs_close_only(
+            MANY_LEG_SAWTOOTH.close, MANY_LEG_SAWTOOTH.reversal_threshold
+        )
+        for leg in legs:
+            t = leg.confirm_bar
+            assert int(per_bar.candidate_leg_direction[t]) == -leg.direction, (
+                f"MANY_LEG_SAWTOOTH confirm_bar={t}"
+            )
+            assert per_bar.candidate_age_bars[t] >= 2, (
+                f"MANY_LEG_SAWTOOTH confirm_bar={t}: age={per_bar.candidate_age_bars[t]}"
+            )
 
 
 # ---------------------------------------------------------------------------

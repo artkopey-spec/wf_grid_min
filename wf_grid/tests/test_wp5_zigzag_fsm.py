@@ -94,6 +94,9 @@ def _make_global_stats(
     global_median: float = 0.05,
     candidate_trigger_threshold: float = 0.05,
     reversal_threshold: float = 0.01,
+    zigzag_mode: str = "A",
+    candidate_duration_gate_enabled: bool = False,
+    candidate_duration_max_bars: Optional[int] = None,
 ) -> ZigZagGlobalStats:
     """Minimal, hand-crafted ZigZagGlobalStats for FSM tests."""
     return ZigZagGlobalStats(
@@ -110,6 +113,9 @@ def _make_global_stats(
         insufficient_data=False,
         fail_closed_reason=None,
         metadata={},
+        zigzag_mode=zigzag_mode,
+        candidate_duration_gate_enabled=candidate_duration_gate_enabled,
+        candidate_duration_max_bars=candidate_duration_max_bars,
     )
 
 
@@ -122,6 +128,8 @@ def _make_per_bar(
     last_confirmed_leg_height_pct: Optional[np.ndarray] = None,
     local_median_N: Optional[np.ndarray] = None,
     local_median_available: Optional[np.ndarray] = None,
+    candidate_age_bars: Optional[np.ndarray] = None,
+    candidate_leg_direction: Optional[np.ndarray] = None,
 ) -> ZigZagPerBar:
     """Hand-crafted ZigZagPerBar with NaN/zero defaults; per-array overrides."""
     if candidate_height_pct is None:
@@ -136,6 +144,10 @@ def _make_per_bar(
         local_median_N = np.full(n, np.nan, dtype=np.float64)
     if local_median_available is None:
         local_median_available = np.zeros(n, dtype=bool)
+    if candidate_age_bars is None:
+        candidate_age_bars = np.full(n, -1, dtype=np.int64)
+    if candidate_leg_direction is None:
+        candidate_leg_direction = np.zeros(n, dtype=np.int8)
     return ZigZagPerBar(
         candidate_height_pct=candidate_height_pct,
         confirm_event=confirm_event,
@@ -143,6 +155,8 @@ def _make_per_bar(
         last_confirmed_leg_height_pct=last_confirmed_leg_height_pct,
         local_median_N=local_median_N,
         local_median_available=local_median_available,
+        candidate_age_bars=candidate_age_bars,
+        candidate_leg_direction=candidate_leg_direction,
     )
 
 
@@ -1429,6 +1443,433 @@ class TestSharedFixtureConsistency:
 # ===========================================================================
 # 14.  Anti-drift gates.
 # ===========================================================================
+
+# ===========================================================================
+# WP-V3-4 — Runtime primitives & immutable bar snapshots (ТЗ v3 §7, P1-P7).
+# ===========================================================================
+
+def _apply_v3(
+    *,
+    n: int = 6,
+    trend: Optional[np.ndarray] = None,
+    trade_mode: str = "both",
+    cfg: Optional[_FilterCfgDouble] = None,
+    cand_height: Optional[np.ndarray] = None,
+    cand_age: Optional[np.ndarray] = None,
+    cand_dir: Optional[np.ndarray] = None,
+    confirm_event: Optional[np.ndarray] = None,
+    local_median_N: Optional[np.ndarray] = None,
+    local_median_available: Optional[np.ndarray] = None,
+    daily_reset_event: Optional[np.ndarray] = None,
+    zigzag_mode: str = "A",
+    gate_enabled: bool = False,
+    gate_max_bars: Optional[int] = None,
+    candidate_trigger_threshold: float = 0.05,
+    global_median: float = 0.05,
+) -> Dict[str, np.ndarray]:
+    """Run ``apply()`` with v3 overrides; return ``filter_diagnostics``."""
+    if trend is None:
+        trend = np.zeros(n, dtype=np.int64)
+    per_bar = _make_per_bar(
+        n=n,
+        candidate_height_pct=cand_height,
+        candidate_age_bars=cand_age,
+        candidate_leg_direction=cand_dir,
+        confirm_event=confirm_event,
+        local_median_N=local_median_N,
+        local_median_available=local_median_available,
+    )
+    if cfg is None:
+        cfg = _make_filter_cfg(a_enabled=True, b_enabled=True, freeze_confirmed_legs=0)
+    stats = _make_global_stats(
+        global_median=global_median,
+        candidate_trigger_threshold=candidate_trigger_threshold,
+        zigzag_mode=zigzag_mode,
+        candidate_duration_gate_enabled=gate_enabled,
+        candidate_duration_max_bars=gate_max_bars,
+    )
+    result = apply(
+        trend=trend,
+        trade_mode=trade_mode,
+        trade_filter_config=cfg,
+        zigzag_global_stats=stats,
+        per_bar=per_bar,
+        daily_reset_event=daily_reset_event,
+    )
+    return result.filter_diagnostics
+
+
+class TestV3PrimitivesP1ResetGuard:
+    """P1: Reset bar forces candidate/B/immediate primitives false (ТЗ v3 §7.7)."""
+
+    def test_p1_reset_bar_forces_all_primitives_false(self):
+        # Arrange a bar where every primitive WOULD be true if not for reset.
+        n = 3
+        cand_h = np.array([0.10, 0.10, 0.10], dtype=np.float64)   # >= 0.05 thr
+        cand_age = np.array([2, 2, 2], dtype=np.int64)
+        cand_dir = np.array([1, 1, 1], dtype=np.int8)
+        confirm = np.array([1, 1, 1], dtype=np.int8)
+        lm = np.array([0.10, 0.10, 0.10], dtype=np.float64)
+        lm_av = np.array([True, True, True], dtype=bool)
+        # Reset only at t=1.
+        reset = np.array([0, 1, 0], dtype=np.int8)
+        diag = _apply_v3(
+            n=n,
+            cand_height=cand_h, cand_age=cand_age, cand_dir=cand_dir,
+            confirm_event=confirm, local_median_N=lm, local_median_available=lm_av,
+            daily_reset_event=reset, gate_enabled=True, gate_max_bars=10,
+        )
+        # Reset bar (t=1): everything must be 0.
+        for key in (
+            "candidate_threshold_ok", "candidate_component_ok",
+            "confirmed_median_ok", "b_component_ok", "immediate_allowed",
+        ):
+            assert diag[key][1] == 0, f"reset bar must zero {key}, got {diag[key][1]}"
+        # candidate_duration_gate_passed on reset under enabled gate: duration_ok
+        # is false, so passed is 0.
+        assert diag["candidate_duration_gate_passed"][1] == 0
+        # Non-reset bars (t=0, t=2) keep their truthy values.
+        for t in (0, 2):
+            assert diag["candidate_threshold_ok"][t] == 1
+            assert diag["confirmed_median_ok"][t] == 1
+            assert diag["immediate_allowed"][t] == 1
+
+
+class TestV3PrimitivesP2DurationGateDisabled:
+    """P2: Gate disabled -> duration_ok == true; component_ok mirrors threshold."""
+
+    def test_p2_gate_disabled_passes_unconditionally(self):
+        n = 4
+        cand_h = np.array([0.10, 0.10, 0.10, 0.10], dtype=np.float64)
+        # Even with age=-1 / 0 / huge, duration_ok must pass when disabled.
+        cand_age = np.array([-1, 0, 1, 999], dtype=np.int64)
+        cand_dir = np.array([0, 0, 1, 1], dtype=np.int8)
+        diag = _apply_v3(
+            n=n,
+            cand_height=cand_h, cand_age=cand_age, cand_dir=cand_dir,
+            gate_enabled=False,  # gate disabled
+        )
+        # candidate_threshold_ok is true everywhere (0.10 >= 0.05).
+        assert diag["candidate_threshold_ok"].tolist() == [1, 1, 1, 1]
+        # component_ok = threshold AND duration_ok; with gate disabled
+        # duration_ok = true on every bar => component_ok mirrors threshold.
+        assert diag["candidate_component_ok"].tolist() == [1, 1, 1, 1]
+        # gate_passed always 1 when gate disabled.
+        assert diag["candidate_duration_gate_passed"].tolist() == [1, 1, 1, 1]
+
+
+class TestV3PrimitivesP3P4DurationGateBoundary:
+    """P3: age == max_bars passes.  P4: age == max_bars+1, 0, -1 fail."""
+
+    def test_p3_age_equals_max_bars_passes(self):
+        # max_bars=5; bars with age in [1..5] must pass.
+        n = 5
+        cand_h = np.full(n, 0.10, dtype=np.float64)
+        cand_age = np.array([1, 2, 3, 4, 5], dtype=np.int64)
+        cand_dir = np.full(n, 1, dtype=np.int8)
+        diag = _apply_v3(
+            n=n,
+            cand_height=cand_h, cand_age=cand_age, cand_dir=cand_dir,
+            gate_enabled=True, gate_max_bars=5,
+        )
+        # All bars: candidate_threshold_ok == 1 AND duration_ok == 1.
+        assert diag["candidate_component_ok"].tolist() == [1, 1, 1, 1, 1]
+        assert diag["candidate_duration_gate_passed"].tolist() == [1, 1, 1, 1, 1]
+
+    def test_p4_age_max_bars_plus_one_fails(self):
+        n = 1
+        diag = _apply_v3(
+            n=n,
+            cand_height=np.array([0.10], dtype=np.float64),
+            cand_age=np.array([6], dtype=np.int64),  # > max_bars=5
+            cand_dir=np.array([1], dtype=np.int8),
+            gate_enabled=True, gate_max_bars=5,
+        )
+        assert diag["candidate_threshold_ok"][0] == 1   # threshold still ok
+        assert diag["candidate_component_ok"][0] == 0   # gate kills it
+        assert diag["candidate_duration_gate_passed"][0] == 0
+
+    def test_p4_age_zero_fails(self):
+        diag = _apply_v3(
+            n=1,
+            cand_height=np.array([0.10], dtype=np.float64),
+            cand_age=np.array([0], dtype=np.int64),
+            cand_dir=np.array([1], dtype=np.int8),
+            gate_enabled=True, gate_max_bars=5,
+        )
+        assert diag["candidate_component_ok"][0] == 0
+        assert diag["candidate_duration_gate_passed"][0] == 0
+
+    def test_p4_age_negative_one_fails(self):
+        diag = _apply_v3(
+            n=1,
+            cand_height=np.array([0.10], dtype=np.float64),
+            cand_age=np.array([-1], dtype=np.int64),
+            cand_dir=np.array([0], dtype=np.int8),  # UNKNOWN dir consistent w/ age
+            gate_enabled=True, gate_max_bars=5,
+        )
+        assert diag["candidate_component_ok"][0] == 0
+        assert diag["candidate_duration_gate_passed"][0] == 0
+
+
+class TestV3PrimitivesP5ModeBIgnoresGate:
+    """P5: pure Mode B ignores duration gate in runtime decisions."""
+
+    def test_p5_pure_mode_b_with_enabled_gate_passes_gate_diag_anyway(self):
+        # In pure Mode B, ``candidate_duration_gate_passed`` MUST be 1
+        # regardless of gate state — gate has no runtime effect for B
+        # (ТЗ v3 §8.2 / §10.3).
+        n = 1
+        diag = _apply_v3(
+            n=n,
+            cand_height=np.array([0.10], dtype=np.float64),
+            cand_age=np.array([999], dtype=np.int64),  # would fail gate
+            cand_dir=np.array([1], dtype=np.int8),
+            zigzag_mode="B",
+            gate_enabled=True, gate_max_bars=5,
+        )
+        assert diag["candidate_duration_gate_passed"][0] == 1, (
+            "Mode B must always report gate_passed=1 (gate has no runtime "
+            "effect in Mode B)"
+        )
+
+    def test_p5_mode_b_runtime_decisions_do_not_depend_on_gate(self):
+        """Regression / P5: filtered_positions, state_arr, trigger_source_arr,
+        filter_block_reason are bit-identical for Mode B with and without
+        an enabled duration gate.  Only INFO/diagnostic echo differ.
+        """
+        # Build a non-trivial scenario using SIMPLE_ZIGZAG ST flips.
+        n = 8
+        trend = np.array([0, +1, +1, -1, -1, +1, +1, -1], dtype=np.int64)
+        # B-trigger fires on confirm bars with high enough median.
+        confirm = np.array([0, 0, 1, 0, 1, 0, 0, 1], dtype=np.int8)
+        lm = np.array([np.nan, np.nan, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10],
+                      dtype=np.float64)
+        lm_av = np.array([0, 0, 1, 1, 1, 1, 1, 1], dtype=bool)
+        cand_age = np.array([-1, -1, 999, 999, 999, 999, 999, 999], dtype=np.int64)
+        cand_dir = np.array([0, 0, 1, -1, 1, -1, 1, -1], dtype=np.int8)
+
+        common = dict(
+            n=n, trend=trend, trade_mode="both",
+            cand_height=np.full(n, 0.0, dtype=np.float64),  # disable A
+            cand_age=cand_age, cand_dir=cand_dir,
+            confirm_event=confirm, local_median_N=lm,
+            local_median_available=lm_av,
+            zigzag_mode="B",
+        )
+        diag_no_gate = _apply_v3(**common, gate_enabled=False)
+        diag_with_gate = _apply_v3(**common, gate_enabled=True, gate_max_bars=3)
+
+        for key in (
+            "trade_filter_state_code",
+            "trade_filter_trigger_source",
+            "filter_block_reason",
+            "confirmed_legs_since_start",
+            "median_stop_triggered",
+            "stopping_started_at_index",
+            "filter_allowed_entry",
+        ):
+            np.testing.assert_array_equal(
+                diag_no_gate[key], diag_with_gate[key],
+                err_msg=f"Mode B + gate must not change {key}",
+            )
+
+
+class TestV3PrimitivesP6ModeBInfoLogOnce:
+    """P6: Mode B + enabled gate emits exactly one INFO line per ``apply()``."""
+
+    def test_p6_mode_b_with_enabled_gate_logs_info_exactly_once(self, caplog):
+        caplog.set_level(
+            "INFO", logger="supertrend_optimizer.core.zigzag_st_filter",
+        )
+        diag = _apply_v3(
+            n=2,
+            cand_height=np.zeros(2, dtype=np.float64),
+            cand_age=np.array([-1, -1], dtype=np.int64),
+            cand_dir=np.zeros(2, dtype=np.int8),
+            zigzag_mode="B", gate_enabled=True, gate_max_bars=5,
+        )
+        info_records = [
+            r for r in caplog.records
+            if r.levelname == "INFO"
+            and r.name == "supertrend_optimizer.core.zigzag_st_filter"
+            and "Mode B" in r.getMessage() or "mode=B" in r.getMessage()
+        ]
+        # Filter messages that mention the gate to be precise.
+        gate_msgs = [
+            r for r in info_records
+            if "candidate_duration_gate" in r.getMessage()
+        ]
+        assert len(gate_msgs) == 1, (
+            f"Expected exactly one Mode-B-gate INFO line, got {len(gate_msgs)}: "
+            f"{[r.getMessage() for r in gate_msgs]}"
+        )
+
+    def test_p6_no_info_log_when_mode_b_without_gate(self, caplog):
+        caplog.set_level(
+            "INFO", logger="supertrend_optimizer.core.zigzag_st_filter",
+        )
+        _apply_v3(
+            n=2,
+            cand_height=np.zeros(2, dtype=np.float64),
+            cand_age=np.array([-1, -1], dtype=np.int64),
+            cand_dir=np.zeros(2, dtype=np.int8),
+            zigzag_mode="B", gate_enabled=False,
+        )
+        gate_msgs = [
+            r for r in caplog.records
+            if "candidate_duration_gate" in r.getMessage()
+        ]
+        assert gate_msgs == []
+
+    def test_p6_no_info_log_when_mode_a_with_gate(self, caplog):
+        caplog.set_level(
+            "INFO", logger="supertrend_optimizer.core.zigzag_st_filter",
+        )
+        _apply_v3(
+            n=2,
+            cand_height=np.zeros(2, dtype=np.float64),
+            cand_age=np.array([-1, -1], dtype=np.int64),
+            cand_dir=np.zeros(2, dtype=np.int8),
+            zigzag_mode="A", gate_enabled=True, gate_max_bars=5,
+        )
+        gate_msgs = [
+            r for r in caplog.records
+            if "candidate_duration_gate" in r.getMessage()
+        ]
+        assert gate_msgs == []
+
+
+class TestV3SnapshotsImmutableP7:
+    """P7: Snapshots are immutable during one FSM step.
+
+    The snapshot arrays exposed in ``filter_diagnostics`` reflect the
+    state/held_pos/confirmed_legs values captured at bar START — i.e.
+    BEFORE any same-bar transition (OFF→WAIT→FREEZE etc.) mutates them.
+    """
+
+    def test_p7_snapshot_state_is_off_on_first_lifecycle_start_bar(self):
+        """OFF → WAIT → FREEZE on the same bar: snapshot must be OFF, end
+        state_code may be FREEZE.  This proves snapshot was captured BEFORE
+        the OFF→WAIT/WAIT→FREEZE transitions on the lifecycle-start bar.
+        """
+        # t=0: bootstrap, no flip, no trigger.
+        # t=1: A trigger fires AND ST flip arrives → OFF→WAIT→FREEZE same bar.
+        n = 2
+        trend = np.array([+1, -1], dtype=np.int64)  # flip at t=1
+        cand_h = np.array([0.0, 0.10], dtype=np.float64)  # A trigger at t=1
+        cand_age = np.array([-1, 2], dtype=np.int64)
+        cand_dir = np.array([0, -1], dtype=np.int8)
+        diag = _apply_v3(
+            n=n, trend=trend, cand_height=cand_h,
+            cand_age=cand_age, cand_dir=cand_dir,
+            cfg=_make_filter_cfg(a_enabled=True, b_enabled=False,
+                                 freeze_confirmed_legs=0),
+        )
+        # Snapshot at t=1 must be OFF, end state_code at t=1 is FREEZE
+        # (or further if freeze_confirmed_legs == 0 → MONITORING).
+        assert diag["snapshot_state_at_bar_start"][1] == int(ZigZagFSMState.OFF)
+        assert diag["trade_filter_state_code"][1] != int(ZigZagFSMState.OFF)
+
+    def test_p7_snapshot_held_pos_is_zero_on_lifecycle_start(self):
+        """Snapshot of held_pos at bar start is 0 even though FSM sets
+        held_pos = flip_dir later in the same bar (lifecycle entry).
+        """
+        n = 2
+        trend = np.array([+1, -1], dtype=np.int64)
+        cand_h = np.array([0.0, 0.10], dtype=np.float64)
+        cand_age = np.array([-1, 2], dtype=np.int64)
+        cand_dir = np.array([0, -1], dtype=np.int8)
+        diag = _apply_v3(
+            n=n, trend=trend, cand_height=cand_h,
+            cand_age=cand_age, cand_dir=cand_dir,
+            cfg=_make_filter_cfg(a_enabled=True, b_enabled=False,
+                                 freeze_confirmed_legs=0),
+        )
+        assert diag["snapshot_held_pos_at_bar_start"][1] == 0
+
+    def test_p7_snapshot_confirmed_legs_is_minus_one_before_lifecycle(self):
+        """Before any lifecycle starts, confirmed_legs_since_start == -1
+        and that's what the bar-start snapshot reflects on the same bar.
+        """
+        n = 2
+        trend = np.array([+1, -1], dtype=np.int64)
+        cand_h = np.array([0.0, 0.10], dtype=np.float64)
+        cand_age = np.array([-1, 2], dtype=np.int64)
+        cand_dir = np.array([0, -1], dtype=np.int8)
+        diag = _apply_v3(
+            n=n, trend=trend, cand_height=cand_h,
+            cand_age=cand_age, cand_dir=cand_dir,
+            cfg=_make_filter_cfg(a_enabled=True, b_enabled=False,
+                                 freeze_confirmed_legs=0),
+        )
+        # Snapshot at lifecycle-start bar still shows pre-lifecycle value.
+        assert diag["snapshot_confirmed_legs_at_bar_start"][1] == -1
+
+    def test_p7_snapshot_arrays_have_correct_shapes_and_dtypes(self):
+        n = 5
+        diag = _apply_v3(
+            n=n,
+            cand_height=np.zeros(n, dtype=np.float64),
+            cand_age=np.full(n, -1, dtype=np.int64),
+            cand_dir=np.zeros(n, dtype=np.int8),
+        )
+        assert diag["snapshot_state_at_bar_start"].shape == (n,)
+        assert diag["snapshot_state_at_bar_start"].dtype == np.int64
+        assert diag["snapshot_held_pos_at_bar_start"].shape == (n,)
+        assert diag["snapshot_held_pos_at_bar_start"].dtype == np.int8
+        assert diag["snapshot_confirmed_legs_at_bar_start"].shape == (n,)
+        assert diag["snapshot_confirmed_legs_at_bar_start"].dtype == np.int64
+
+
+class TestV3PrimitivesArrayContract:
+    """All v3 primitive arrays have shape (n,) and int8 dtype."""
+
+    def test_all_primitive_arrays_are_int8_length_n(self):
+        n = 7
+        diag = _apply_v3(
+            n=n,
+            cand_height=np.zeros(n, dtype=np.float64),
+            cand_age=np.full(n, -1, dtype=np.int64),
+            cand_dir=np.zeros(n, dtype=np.int8),
+        )
+        for key in (
+            "candidate_threshold_ok", "candidate_component_ok",
+            "confirmed_median_ok", "b_component_ok", "immediate_allowed",
+            "candidate_duration_gate_passed",
+        ):
+            arr = diag[key]
+            assert arr.shape == (n,), f"{key} shape {arr.shape} != ({n},)"
+            assert arr.dtype == np.int8, f"{key} dtype {arr.dtype} != int8"
+
+
+class TestV3ImmediateAllowedTradeMode:
+    """§7.6: ``immediate_allowed`` honours direction × trade_mode."""
+
+    @pytest.mark.parametrize("trade_mode,direction,expected", [
+        ("long", +1, 1), ("long", -1, 0),
+        ("short", +1, 0), ("short", -1, 1),
+        ("both", +1, 1), ("both", -1, 1),
+        ("revers", +1, 1), ("revers", -1, 1),
+    ])
+    def test_trade_mode_allows_direction(self, trade_mode, direction, expected):
+        diag = _apply_v3(
+            n=1, trade_mode=trade_mode,
+            cand_height=np.array([0.0], dtype=np.float64),
+            cand_age=np.array([2], dtype=np.int64),
+            cand_dir=np.array([direction], dtype=np.int8),
+        )
+        assert diag["immediate_allowed"][0] == expected
+
+    def test_unknown_direction_blocks_immediate(self):
+        diag = _apply_v3(
+            n=1, trade_mode="both",
+            cand_height=np.array([0.0], dtype=np.float64),
+            cand_age=np.array([-1], dtype=np.int64),
+            cand_dir=np.array([0], dtype=np.int8),
+        )
+        assert diag["immediate_allowed"][0] == 0
+
 
 class TestAntiDriftWp5:
 

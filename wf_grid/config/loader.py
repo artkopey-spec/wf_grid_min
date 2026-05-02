@@ -1,4 +1,4 @@
-"""
+﻿"""
 Config loader for WF Grid Search.
 
 Loads YAML -> GridConfig dataclass, validates all fields,
@@ -23,7 +23,7 @@ import pandas as pd
 import yaml
 
 # ---------------------------------------------------------------------------
-# Donor imports — annualization
+# Donor imports вЂ” annualization
 # ---------------------------------------------------------------------------
 # The donor package (supertrend_optimizer) must be on sys.path.
 # In development/test the project root and donor/ are added via pytest.ini
@@ -81,7 +81,7 @@ _SUPPORTED_SCHEMA_VERSIONS = {1}
 # Strict schema: allowed keys per YAML path
 # Paths use dot-notation; "__top__" means the root mapping.
 # A sub-dict is recursively checked only when its path appears here.
-# Free-form dicts (e.g. scoring.score_weights) are intentionally absent —
+# Free-form dicts (e.g. scoring.score_weights) are intentionally absent вЂ”
 # their keys are user-defined and not checked.
 # ---------------------------------------------------------------------------
 _ALLOWED_KEYS: dict[str, set[str]] = {
@@ -96,9 +96,9 @@ _ALLOWED_KEYS: dict[str, set[str]] = {
         "scoring",
         "status",
         "bucket",
-        # WP2: trade_filter block (plan §6.4; Appendix A v1.1 §11)
+        # WP2: trade_filter block (plan В§6.4; Appendix A v1.1 В§11)
         "trade_filter",
-        # WP-PAR: parallelization controls (plan §1.3)
+        # WP-PAR: parallelization controls (plan В§1.3)
         "execution",
     },
     "data": {"file_path", "periods_per_year", "annualization_basis"},
@@ -149,14 +149,14 @@ _ALLOWED_KEYS: dict[str, set[str]] = {
     },
     "status": {"min_meaningful_bars"},
     "bucket": {"atr_bucket_step", "mult_bucket_step", "min_buckets_for_median"},
-    # WP-PAR: execution subtree (plan §1.3)
+    # WP-PAR: execution subtree (plan В§1.3)
     "execution": {
         "parallel_enabled",
         "max_workers",
         "chunksize",
         "fallback_to_sequential",
     },
-    # --- trade_filter subtree (plan §6.4; Appendix A v1.1 §11) ---
+    # --- trade_filter subtree (plan В§6.4; Appendix A v1.1 В§11) ---
     "trade_filter": {
         "enabled",
         "type",
@@ -178,7 +178,7 @@ _ALLOWED_KEYS: dict[str, set[str]] = {
         "mode",
         "candidate_duration_gate",
         # candidate_entry is whitelisted only to allow the validator to emit
-        # a specific deprecated error (ТЗ v3 §4.5 candidate_entry_deprecated)
+        # a specific deprecated error (РўР— v3 В§4.5 candidate_entry_deprecated)
         "candidate_entry",
     },
     "trade_filter.zigzag.candidate_duration_gate": {
@@ -247,7 +247,7 @@ class ConfigError(ValueError):
 
 
 # _collect_raw_keys is a thin shim around the shared helper.
-# Phase 1 plan §6.4.1 / Phase 2 plan §5.1 §14 WP-T2 step 0b.
+# Phase 1 plan В§6.4.1 / Phase 2 plan В§5.1 В§14 WP-T2 step 0b.
 from supertrend_optimizer.core.trade_filter_config import (  # noqa: E402
     collect_raw_user_keys as _collect_raw_keys,
 )
@@ -282,7 +282,7 @@ def load_grid_config(path: str, ohlc_data: Optional[pd.DataFrame] = None) -> Gri
     _validate_strict_schema(raw)
     # Collect raw key-paths BEFORE _build_config fills in dataclass defaults; this
     # preserves the distinction between "user supplied the key" and "absent / default".
-    # Required by plan §6.4.1 for the numeric-threshold + explicit-quantile rule.
+    # Required by plan В§6.4.1 for the numeric-threshold + explicit-quantile rule.
     raw_user_keys = _collect_raw_keys(raw)
     cfg = _build_config(raw)
     _validate_config(cfg, raw_user_keys=raw_user_keys)
@@ -329,7 +329,7 @@ def _get(raw: dict, *keys, default=None):
 
 
 # _build_trade_filter_config is a thin shim around the shared helper.
-# Phase 1 plan §6.4 / Phase 2 plan §5.1 §14 WP-T2 step 0b.
+# Phase 1 plan В§6.4 / Phase 2 plan В§5.1 В§14 WP-T2 step 0b.
 from supertrend_optimizer.core.trade_filter_config import (  # noqa: E402
     build_trade_filter_config_from_raw as _build_trade_filter_config,
 )
@@ -417,11 +417,11 @@ def _build_config(raw: dict[str, Any]) -> GridConfig:
     bk_mult_step = bucket_raw.get("mult_bucket_step", 0.2)
     bk_min_buckets = bucket_raw.get("min_buckets_for_median", 5)
 
-    # trade_filter (WP2; plan §6.4; Appendix A v1.1 §11)
+    # trade_filter (WP2; plan В§6.4; Appendix A v1.1 В§11)
     tf_raw = raw.get("trade_filter")
     trade_filter = _build_trade_filter_config(tf_raw) if tf_raw is not None else None
 
-    # execution (WP-PAR; plan §1.4) — no type coercion; _validate_config rejects bad types
+    # execution (WP-PAR; plan В§1.4) вЂ” no type coercion; _validate_config rejects bad types
     ex_raw = raw.get("execution", {})
     if ex_raw is None:
         ex_raw = {}
@@ -508,15 +508,15 @@ def _build_config(raw: dict[str, Any]) -> GridConfig:
 
 
 # ---------------------------------------------------------------------------
-# Trade-filter validation — re-exported from active donor shared module.
+# Trade-filter validation вЂ” re-exported from active donor shared module.
 #
-# OWNER DECISION v0.5.1 §15 #1 (Phase 2 plan): the trade_filter validator and
+# OWNER DECISION v0.5.1 В§15 #1 (Phase 2 plan): the trade_filter validator and
 # its lifecycle/type whitelists live in
 # `donor/supertrend_optimizer/core/trade_filter_config.py`. This file keeps
 # `_validate_trade_filter` as a thin shim with the historical (positional-only)
 # signature used by `_validate_config`, so Phase 1 behaviour is unchanged.
 #
-# Plan reference: Phase 2 plan §5.1, §14 WP-T2 step 0b
+# Plan reference: Phase 2 plan В§5.1, В§14 WP-T2 step 0b
 # ---------------------------------------------------------------------------
 
 from supertrend_optimizer.core.trade_filter_config import (
@@ -532,12 +532,12 @@ def _validate_trade_filter(
     errors: list[str],
     raw_user_keys: frozenset[tuple[str, ...]],
 ) -> None:
-    """Phase 1 shim around the shared validate_trade_filter (Phase 2 plan §5.1).
+    """Phase 1 shim around the shared validate_trade_filter (Phase 2 plan В§5.1).
 
     Delegates to the active-donor module with caller_pipeline="wf_grid". This
     preserves the legacy positional signature used elsewhere in this loader.
 
-    Spec reference: Appendix A v1.1 §11, §11.1, §11.2, §11.3, §15.6, §17.2
+    Spec reference: Appendix A v1.1 В§11, В§11.1, В§11.2, В§11.3, В§15.6, В§17.2
     """
     _shared_validate_trade_filter(
         tf, errors, raw_user_keys, caller_pipeline="wf_grid"
@@ -553,10 +553,10 @@ def _validate_trade_filter_legacy_inline(  # pragma: no cover  (kept for diff re
     """Pre-shim local validator. Retained ONLY as a documentation marker so
     reviewers can locate the migration point. NEVER called at runtime.
 
-    All §6.5 rules are implemented in
+    All В§6.5 rules are implemented in
     ``supertrend_optimizer.core.trade_filter_config.validate_trade_filter``;
     the one non-rule remains: freeze_confirmed_legs < local_window is VALID
-    (§3.2, §17.20) — no reject, no warning.
+    (В§3.2, В§17.20) вЂ” no reject, no warning.
     """
     raise RuntimeError(
         "_validate_trade_filter_legacy_inline is not callable; use the shim "
@@ -564,7 +564,9 @@ def _validate_trade_filter_legacy_inline(  # pragma: no cover  (kept for diff re
     )
 
 
-from supertrend_optimizer.core.trade_filter_config import resolve_zigzag_mode as _resolve_zigzag_mode  # noqa: E402
+from supertrend_optimizer.core.trade_filter_config import (  # noqa: E402
+    resolve_trade_filter_mode_in_place as _resolve_trade_filter_mode_shared,
+)
 
 
 def _resolve_trade_filter_mode_in_place(
@@ -580,20 +582,12 @@ def _resolve_trade_filter_mode_in_place(
 
     For disabled or absent trade_filter, this function is a no-op.
 
-    WP-V3-2 (ТЗ v3 §3.1, §5)
+    WP-V3-2 (РўР— v3 В§3.1, В§5)
     """
-    if cfg.trade_filter is None or not cfg.trade_filter.enabled:
-        return
+    _resolve_trade_filter_mode_shared(cfg.trade_filter, raw_user_keys)
+    return
 
-    zz = cfg.trade_filter.zigzag
-    if zz.mode is not None:
-        return  # already explicit — nothing to do
 
-    # Determine whether the triggers block was explicitly present in YAML.
-    triggers_present = ("trade_filter", "triggers") in raw_user_keys
-    triggers_cfg = cfg.trade_filter.triggers if triggers_present else None
-    resolved = _resolve_zigzag_mode(None, triggers_cfg)
-    zz.mode = resolved
 
 
 def _validate_config(
@@ -602,7 +596,7 @@ def _validate_config(
 ) -> None:
     errors: list[str] = []
 
-    # data.file_path — required (non-empty string); actual file existence
+    # data.file_path вЂ” required (non-empty string); actual file existence
     # checked later when data is loaded (not here, to allow tests without real files)
     if not cfg.data.file_path:
         errors.append("data.file_path is required and must be non-empty")
@@ -677,7 +671,7 @@ def _validate_config(
             f"backtest.min_trades_required must be >= 0, got {cfg.backtest.min_trades_required}"
         )
 
-    # backtest.early_exit_enabled — must be False for WF OOS pipeline.
+    # backtest.early_exit_enabled вЂ” must be False for WF OOS pipeline.
     # When enabled, the donor truncates all arrays to exit_bar while
     # test_start_idx/test_end_idx still reflect the full declared OOS window.
     # This causes OOS metrics to silently cover a shorter horizon than declared
@@ -709,11 +703,11 @@ def _validate_config(
             f"validation.warmup_period must be >= 0, got {cfg.validation.warmup_period}"
         )
 
-    # validation.walk_forward.train_size — required
+    # validation.walk_forward.train_size вЂ” required
     if not cfg.validation.walk_forward.train_size:
         errors.append("validation.walk_forward.train_size is required and must be non-empty")
 
-    # validation.walk_forward.test_size — required
+    # validation.walk_forward.test_size вЂ” required
     if not cfg.validation.walk_forward.test_size:
         errors.append("validation.walk_forward.test_size is required and must be non-empty")
 
@@ -770,20 +764,20 @@ def _validate_config(
             f"got {cfg.gates.candidate.max_drawdown_threshold}"
         )
 
-    # gates.candidate.min_ok_ratio — must be in [0.0, 1.0]
+    # gates.candidate.min_ok_ratio вЂ” must be in [0.0, 1.0]
     mor = cfg.gates.candidate.min_ok_ratio
     if not (0.0 <= mor <= 1.0):
         errors.append(
             f"gates.candidate.min_ok_ratio must be in [0.0, 1.0], got {mor}"
         )
 
-    # gates.candidate.min_total_trades — must be >= 0
+    # gates.candidate.min_total_trades вЂ” must be >= 0
     if cfg.gates.candidate.min_total_trades < 0:
         errors.append(
             f"gates.candidate.min_total_trades must be >= 0, got {cfg.gates.candidate.min_total_trades}"
         )
 
-    # ranking.min_segments_for_ranking — if set, must be an integer >= 1
+    # ranking.min_segments_for_ranking вЂ” if set, must be an integer >= 1
     # FIX-2.5: 0 and negative values are semantically meaningless.
     if cfg.ranking.min_segments_for_ranking is not None:
         ms = cfg.ranking.min_segments_for_ranking
@@ -803,7 +797,7 @@ def _validate_config(
             f"ranking.mode must be one of {sorted(valid_modes)}, got {cfg.ranking.mode!r}"
         )
 
-    # scoring.score_weights — all values > 0
+    # scoring.score_weights вЂ” all values > 0
     for k, v in cfg.scoring.score_weights.items():
         if v <= 0:
             errors.append(f"scoring.score_weights[{k!r}] must be > 0, got {v}")
@@ -816,14 +810,14 @@ def _validate_config(
             f"got {cfg.scoring.normalization_mode!r}"
         )
 
-    # scoring.min_passed_for_discrimination — must be >= 1
+    # scoring.min_passed_for_discrimination вЂ” must be >= 1
     if cfg.scoring.min_passed_for_discrimination < 1:
         errors.append(
             f"scoring.min_passed_for_discrimination must be >= 1, "
             f"got {cfg.scoring.min_passed_for_discrimination}"
         )
 
-    # scoring.low_spread_threshold — must be > 0
+    # scoring.low_spread_threshold вЂ” must be > 0
     if cfg.scoring.low_spread_threshold <= 0:
         errors.append(
             f"scoring.low_spread_threshold must be > 0, "
@@ -854,7 +848,7 @@ def _validate_config(
             f"bucket.min_buckets_for_median must be >= 1, got {cfg.bucket.min_buckets_for_median}"
         )
 
-    # execution (WP-PAR; plan §1.5) — strict type validation, no coercion
+    # execution (WP-PAR; plan В§1.5) вЂ” strict type validation, no coercion
     ex = cfg.execution
     if not isinstance(ex.parallel_enabled, bool):
         errors.append(
@@ -887,7 +881,7 @@ def _validate_config(
                 f"got {ex.chunksize!r}"
             )
 
-    # trade_filter (WP2; plan §6.5; Appendix A v1.1 §11-§11.3, §15.6)
+    # trade_filter (WP2; plan В§6.5; Appendix A v1.1 В§11-В§11.3, В§15.6)
     if cfg.trade_filter is not None:
         _ruk = raw_user_keys if raw_user_keys is not None else frozenset()
         _validate_trade_filter(cfg.trade_filter, errors, _ruk)
@@ -895,7 +889,7 @@ def _validate_config(
     if errors:
         raise ConfigError("Config validation failed:\n" + "\n".join(f"  - {e}" for e in errors))
 
-    # Compatibility warnings (not errors) — issued after validation passes
+    # Compatibility warnings (not errors) вЂ” issued after validation passes
     _warn_bucket_step_compatibility(cfg)
 
 

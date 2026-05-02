@@ -104,6 +104,20 @@ FILTER_DIAGNOSTICS_100_DISPLAY_NAMES: Dict[str, str] = {
     "zigzag_reversal_threshold":    "Reversal Threshold",
     "candidate_height_pct":         "Candidate Height %",
     "candidate_trigger_threshold":  "Candidate Trigger Threshold",
+    # WP-V3-8: new v3 display columns (§11.1), ordered after Candidate Trigger Threshold
+    "zigzag_mode":                              "ZigZag Mode",
+    "candidate_age_bars":                       "Candidate Age Bars",
+    "candidate_leg_direction":                  "Candidate Leg Direction",
+    "candidate_duration_gate_enabled":          "Candidate Duration Gate Enabled",
+    "candidate_duration_max_bars":              "Candidate Duration Max Bars",
+    "candidate_duration_gate_passed":           "Candidate Duration Gate Passed",
+    "candidate_threshold_ok":                   "Candidate Threshold OK",
+    "candidate_component_ok":                   "Candidate Component OK",
+    "confirmed_median_ok":                      "Confirmed Median OK",
+    "b_component_ok":                           "B Component OK",
+    "immediate_allowed":                        "Immediate Allowed",
+    "immediate_candidate_entry_used":           "Immediate Candidate Entry Used",
+    "immediate_candidate_entry_block_reason":   "Immediate Candidate Entry Block Reason",
     "local_median_N":               "Local Median N",
     "local_median_available":       "Local Median Available",
     "local_window":                 "Local Window",
@@ -119,7 +133,7 @@ FILTER_DIAGNOSTICS_100_DISPLAY_NAMES: Dict[str, str] = {
     "st_flip_dir":                  "ST Flip Direction",
 }
 
-# ZigZag_Trigger_Events sheet column order (plan §9.2)
+# ZigZag_Trigger_Events sheet column order (plan §9.2, extended by WP-V3-8 §11.2)
 _TRIGGER_EVENTS_COLUMNS = (
     "Trigger ID",
     "Trigger Bar",
@@ -132,6 +146,13 @@ _TRIGGER_EVENTS_COLUMNS = (
     "Candidate Height %",
     "Triggered Lifecycle Start",
     "Linked Trade ID",
+    # WP-V3-8: new §11.2 columns
+    "ZigZag Mode",
+    "Immediate Candidate Entry Used",
+    "Immediate Candidate Entry Block Reason",
+    "Candidate Age Bars",
+    "Candidate Leg Direction",
+    "Candidate Duration Gate Passed",
 )
 
 # Legacy export: diagnostic sheet for very short trades (100% slice only)
@@ -515,18 +536,28 @@ def _build_filter_summary_block_df(period_results: List[PeriodResult]) -> Option
         bis = s.get("bars_in_state", {})
         rows.append({
             "Period":              pr.period_label,
-            "Mode":                s.get("mode", ""),
+            "ZigZag Mode":         s.get("zigzag_mode", s.get("mode", "")),
+            "Candidate Duration Gate Enabled": s.get("candidate_duration_gate_enabled", ""),
+            "Candidate Duration Max Bars": s.get("candidate_duration_max_bars", ""),
             "Bars OFF":            bis.get("OFF", 0),
             "Bars WAIT":           bis.get("WAIT_FIRST_ST_FLIP", 0),
             "Bars FREEZE":         bis.get("ST_ACTIVE_FREEZE", 0),
             "Bars MONITORING":     bis.get("ST_ACTIVE_MONITORING", 0),
             "Bars STOPPING":       bis.get("ST_STOPPING", 0),
-            "Lifecycle Starts":    ctr.get("lifecycle_starts", 0),
-            "Median Stop Events":  ctr.get("median_stop_triggered", 0),
+            "Lifecycle Starts":    ctr.get("lifecycle_starts", s.get("lifecycle_starts_count", 0)),
+            "Median Stop Events":  ctr.get("median_stop_triggered", s.get("median_stop_triggered_count", 0)),
             "Raw ST Flips":        ctr.get("raw_st_flips", 0),
             "Entries Allowed":     ctr.get("passed_entry_signals", 0),
             "Entries Blocked":     ctr.get("blocked_entry_signals", 0),
             "Exits Opposite Flip": ctr.get("exits_opposite_flip", 0),
+            "Immediate Entries Count": s.get(
+                "immediate_entries_count",
+                ctr.get("immediate_entries_count", 0),
+            ),
+            "Immediate Entries Blocked Count": s.get(
+                "immediate_entries_blocked_count",
+                ctr.get("immediate_entries_blocked_count", 0),
+            ),
         })
     if not rows:
         return None
@@ -629,6 +660,12 @@ def _build_zigzag_trigger_events_df(
     Per plan §9.2.1 audit-fix v0.5: trigger_source[t] != "none" is the exact marker;
     no heuristic via confirmed_legs_since_start delta.
 
+    Triggered Lifecycle Start semantics (WP-V3-8):
+    - Mode A/B/A+B: trigger bar state = WAIT; scan forward through WAIT until FREEZE.
+    - Mode C / C+B immediate entry: trigger bar state is already FREEZE (OFF→FREEZE
+      same bar); no WAIT transition — detected by checking state at t directly.
+    - C+B B-rescue WAIT start: treated identically to A/B (state at t = WAIT, scan forward).
+
     Linked Trade ID: two-step linker per plan §9.5.1 (exact match, then backward search
     through same FSM lifecycle — no "OFF" between trigger_bar and entry_signal_bar).
     Absence of a link for an enabled-run trade row is a test failure (plan §9.5.1).
@@ -647,9 +684,17 @@ def _build_zigzag_trigger_events_df(
     global_median_arr = filter_diagnostics.get("global_median")
     local_median_n_arr = filter_diagnostics.get("local_median_N")
     candidate_height_arr = filter_diagnostics.get("candidate_height_pct")
+    # WP-V3-8: new §11.2 arrays
+    zigzag_mode_arr = filter_diagnostics.get("zigzag_mode")
+    imm_used_arr = filter_diagnostics.get("immediate_candidate_entry_used")
+    imm_reason_arr = filter_diagnostics.get("immediate_candidate_entry_block_reason")
+    cand_age_arr = filter_diagnostics.get("candidate_age_bars")
+    cand_dir_arr = filter_diagnostics.get("candidate_leg_direction")
+    gate_passed_arr = filter_diagnostics.get("candidate_duration_gate_passed")
 
     quantile_used = None
     if filter_diagnostics_summary is not None:
+        # Support both nested format (legacy donor) and flat format (step_executor)
         thr = filter_diagnostics_summary.get("thresholds", {})
         quantile_used = thr.get("candidate_trigger_quantile")
 
@@ -666,15 +711,26 @@ def _build_zigzag_trigger_events_df(
     for t in trigger_bars:
         src = str(trigger_source_arr[t])
 
-        # Triggered Lifecycle Start: scan state_arr forward until WAIT ends
+        # Triggered Lifecycle Start (WP-V3-8):
+        # Mode C immediate entry: state at trigger bar is already ST_ACTIVE_FREEZE
+        # (OFF→FREEZE same bar, no WAIT).  All other modes (A/B/A+B/C+B B-rescue)
+        # enter WAIT first — scan forward from t+1 through WAIT until FREEZE or other.
         triggered_lc_start = False
         if state_arr is not None:
-            for t2 in range(t + 1, min(t + 500, n)):
-                s2 = str(state_arr[t2])
-                if s2 == "WAIT_FIRST_ST_FLIP":
-                    continue
-                triggered_lc_start = (s2 == "ST_ACTIVE_FREEZE")
-                break
+            state_at_t = str(state_arr[t])
+            if state_at_t in ("ST_ACTIVE_FREEZE", "ST_ACTIVE_MONITORING"):
+                # Mode C same-bar immediate entry (already in lifecycle at bar t)
+                triggered_lc_start = True
+            else:
+                # A/B/A+B/C+B-rescue: scan forward through WAIT until lifecycle
+                # starts.  freeze_confirmed_legs=0 skips ST_ACTIVE_FREEZE and
+                # lands directly in ST_ACTIVE_MONITORING, so both states count.
+                for t2 in range(t + 1, min(t + 500, n)):
+                    s2 = str(state_arr[t2])
+                    if s2 == "WAIT_FIRST_ST_FLIP":
+                        continue
+                    triggered_lc_start = (s2 in ("ST_ACTIVE_FREEZE", "ST_ACTIVE_MONITORING"))
+                    break
 
         trigger_time = (
             _excel_safe_datetime_value(df_index[t])
@@ -698,6 +754,13 @@ def _build_zigzag_trigger_events_df(
             "Candidate Height %":        cand_ht,
             "Triggered Lifecycle Start": triggered_lc_start,
             "Linked Trade ID":           linked_trade_map.get(t, "N/A"),
+            # WP-V3-8: new §11.2 columns
+            "ZigZag Mode":                              str(zigzag_mode_arr[t]) if zigzag_mode_arr is not None else "",
+            "Immediate Candidate Entry Used":           int(imm_used_arr[t]) if imm_used_arr is not None else 0,
+            "Immediate Candidate Entry Block Reason":   str(imm_reason_arr[t]) if imm_reason_arr is not None else "",
+            "Candidate Age Bars":                       int(cand_age_arr[t]) if cand_age_arr is not None else -1,
+            "Candidate Leg Direction":                  int(cand_dir_arr[t]) if cand_dir_arr is not None else 0,
+            "Candidate Duration Gate Passed":           int(gate_passed_arr[t]) if gate_passed_arr is not None else 0,
         })
         trigger_id += 1
 
@@ -715,12 +778,17 @@ def _write_zigzag_trigger_events_sheet(
 
 
 def _build_filters_summary_df(period_results: List[PeriodResult]) -> Optional[pd.DataFrame]:
-    """Build the filters_summary sheet content (plan §9.2).
+    """Build the filters_summary sheet content (plan §9.2, extended WP-V3-8 §11.3).
 
     Returns (params_df, per_period_df) or None if disabled.
     Structure: two sections.
-    Section (a): one-row parameter table (mode, thresholds, candidate_trigger_source).
-    Section (b): one row per period with counters + bars_in_state.
+    Section (a): parameter table (ZigZag Mode, thresholds, gate config).
+    Section (b): one row per period with counters + bars_in_state +
+                 immediate entries counts (WP-V3-8).
+
+    Reads from the flat dict produced by _compute_filter_diagnostics_summary
+    (step_executor.py).  Legacy nested "counters"/"bars_in_state" sub-dicts
+    are supported as a fallback for backward compatibility.
     """
     # Check if any result has summary
     for pr in period_results:
@@ -734,22 +802,22 @@ def _build_filters_summary_df(period_results: List[PeriodResult]) -> Optional[pd
     if pr0 is None:
         return None
     s0 = pr0.filter_diagnostics_summary
+    # Support both nested (legacy) and flat (step_executor) formats
     thr = s0.get("thresholds", {})
 
-    params_row = {
-        "Parameter": "Mode",
-        "Value": s0.get("mode", ""),
-    }
-    # Return as a DataFrame with Parameter/Value columns
     params_rows = [
-        {"Parameter": "Mode",                        "Value": s0.get("mode", "")},
-        {"Parameter": "Reversal Threshold",          "Value": thr.get("reversal_threshold", "")},
-        {"Parameter": "Candidate Trigger Threshold", "Value": thr.get("candidate_trigger_threshold", "")},
-        {"Parameter": "Candidate Trigger Quantile",  "Value": thr.get("candidate_trigger_quantile", "")},
-        {"Parameter": "Candidate Trigger Source",    "Value": thr.get("candidate_trigger_source", "")},
-        {"Parameter": "Global Median",               "Value": thr.get("global_median", "")},
-        {"Parameter": "Local Window",                "Value": thr.get("local_window", "")},
-        {"Parameter": "Freeze Confirmed Legs",       "Value": thr.get("freeze_confirmed_legs", "")},
+        # WP-V3-8: "ZigZag Mode" replaces legacy "Mode"; fall back for older summaries
+        {"Parameter": "ZigZag Mode",                   "Value": s0.get("zigzag_mode", s0.get("mode", ""))},
+        {"Parameter": "Reversal Threshold",            "Value": thr.get("reversal_threshold", "")},
+        {"Parameter": "Candidate Trigger Threshold",   "Value": thr.get("candidate_trigger_threshold", "")},
+        {"Parameter": "Candidate Trigger Quantile",    "Value": thr.get("candidate_trigger_quantile", "")},
+        {"Parameter": "Candidate Trigger Source",      "Value": thr.get("candidate_trigger_source", "")},
+        {"Parameter": "Global Median",                 "Value": thr.get("global_median", "")},
+        {"Parameter": "Local Window",                  "Value": thr.get("local_window", "")},
+        {"Parameter": "Freeze Confirmed Legs",         "Value": thr.get("freeze_confirmed_legs", "")},
+        # WP-V3-8: gate params (§11.3)
+        {"Parameter": "Candidate Duration Gate Enabled",  "Value": s0.get("candidate_duration_gate_enabled", thr.get("candidate_duration_gate_enabled", ""))},
+        {"Parameter": "Candidate Duration Max Bars",      "Value": s0.get("candidate_duration_max_bars", thr.get("candidate_duration_max_bars", ""))},
     ]
     params_df = pd.DataFrame(params_rows)
 
@@ -760,6 +828,7 @@ def _build_filters_summary_df(period_results: List[PeriodResult]) -> Optional[pd
         if s is None:
             period_rows.append({"Period": pr.period_label})
             continue
+        # Support both nested (legacy) and flat (step_executor) formats
         ctr = s.get("counters", {})
         bis = s.get("bars_in_state", {})
         period_rows.append({
@@ -773,14 +842,17 @@ def _build_filters_summary_df(period_results: List[PeriodResult]) -> Optional[pd
             "Blocked Local Med":   ctr.get("blocked_local_median", 0),
             "Blocked Invalid Stats": ctr.get("blocked_invalid_stats", 0),
             "Blocked Stopping":    ctr.get("blocked_stopping", 0),
-            "Lifecycle Starts":    ctr.get("lifecycle_starts", 0),
-            "Median Stops":        ctr.get("median_stop_triggered", 0),
+            "Lifecycle Starts":    ctr.get("lifecycle_starts", s.get("lifecycle_starts_count", 0)),
+            "Median Stops":        ctr.get("median_stop_triggered", s.get("median_stop_triggered_count", 0)),
             "Exits Opp Flip":      ctr.get("exits_opposite_flip", 0),
-            "Bars OFF":            bis.get("OFF", 0),
-            "Bars WAIT":           bis.get("WAIT_FIRST_ST_FLIP", 0),
-            "Bars FREEZE":         bis.get("ST_ACTIVE_FREEZE", 0),
-            "Bars MONITORING":     bis.get("ST_ACTIVE_MONITORING", 0),
-            "Bars STOPPING":       bis.get("ST_STOPPING", 0),
+            "Bars OFF":            bis.get("OFF", s.get("n_bars_in_off", 0)),
+            "Bars WAIT":           bis.get("WAIT_FIRST_ST_FLIP", s.get("n_bars_in_wait_first_st_flip", 0)),
+            "Bars FREEZE":         bis.get("ST_ACTIVE_FREEZE", s.get("n_bars_in_freeze", 0)),
+            "Bars MONITORING":     bis.get("ST_ACTIVE_MONITORING", s.get("n_bars_in_monitoring", 0)),
+            "Bars STOPPING":       bis.get("ST_STOPPING", s.get("n_bars_in_stopping", 0)),
+            # WP-V3-8: immediate entries (§11.3)
+            "Immediate Entries Count":         s.get("immediate_entries_count", ctr.get("immediate_entries_count", 0)),
+            "Immediate Entries Blocked Count": s.get("immediate_entries_blocked_count", ctr.get("immediate_entries_blocked_count", 0)),
         })
     period_df = pd.DataFrame(period_rows)
     return (params_df, period_df)  # type: ignore[return-value]

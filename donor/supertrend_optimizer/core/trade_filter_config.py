@@ -35,6 +35,17 @@ _SUPPORTED_TRADE_FILTER_TYPES = {"zigzag_st_mode"}
 # v3: valid mode literals (ТЗ v3 §4.1, WP-V3-1 A1/A2)
 _VALID_ZIGZAG_MODES = {"A", "B", "C", "A+B", "C+B"}
 
+_V3_INIT_FAILURE_KEYS = frozenset({
+    "mode_invalid_literal",
+    "mode_conflicts_with_legacy_triggers",
+    "candidate_entry_deprecated",
+    "duration_gate_enabled_invalid_type",
+    "duration_gate_max_bars_missing",
+    "duration_gate_max_bars_present_when_disabled",
+    "duration_gate_max_bars_invalid_type",
+    "duration_gate_max_bars_below_one",
+})
+
 # WP-T3 step 6 — caller_pipeline whitelist for type=zigzag_st_mode.
 # Plan §5.5 (mode-rejection gate, owner-approved per audit-fix v0.5).
 # Domain = {wf_grid, tester, optimizer, single}; whitelist = {wf_grid, tester}.
@@ -149,6 +160,9 @@ class TradeFilterConfig:
     diagnostics: TradeFilterDiagnosticsConfig = field(
         default_factory=TradeFilterDiagnosticsConfig
     )
+    # Raw YAML presence marker.  ``None`` means "unknown / hand-built config",
+    # so runtime consumers fall back to the historical duck-typed behaviour.
+    _raw_triggers_present: Optional[bool] = field(default=None, repr=False)
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +325,7 @@ def build_trade_filter_config_from_raw(tf_raw: dict) -> TradeFilterConfig:
         triggers=triggers,
         lifecycle=lifecycle,
         diagnostics=diagnostics,
+        _raw_triggers_present=("triggers" in tf_raw),
     )
 
 
@@ -318,11 +333,23 @@ def build_trade_filter_config_from_raw(tf_raw: dict) -> TradeFilterConfig:
 # Validator
 # ---------------------------------------------------------------------------
 
+def _append_validation_error(
+    errors: list[str],
+    message: str,
+    error_keys: Optional[list[str]] = None,
+    key: Optional[str] = None,
+) -> None:
+    errors.append(message)
+    if error_keys is not None and key is not None:
+        error_keys.append(key)
+
+
 def validate_trade_filter(
     tf: TradeFilterConfig,
     errors: list[str],
     raw_user_keys: frozenset[tuple[str, ...]],
     caller_pipeline: str = "wf_grid",
+    error_keys: Optional[list[str]] = None,
 ) -> None:
     """Validate the trade_filter block per Appendix A v1.1 §11–§11.3.
 
@@ -336,6 +363,10 @@ def validate_trade_filter(
         wrong-type keys; see _build_trade_filter_config in loader).
     errors:
         Mutable list to append error strings to.
+    error_keys:
+        Optional mutable list for canonical v3 init-failure identifiers
+        (spec §4.5).  Existing callers can omit it and keep the historical
+        text-only contract.
     raw_user_keys:
         Set of dotted-path tuples explicitly present in the parsed YAML.
         Required by plan §6.4.1 (numeric-threshold + explicit-quantile reject).
@@ -449,24 +480,33 @@ def validate_trade_filter(
     # candidate_entry is allowed through strict schema so this specific message
     # can be emitted here instead of a generic "unknown config key".
     if ("trade_filter", "zigzag", "candidate_entry") in raw_user_keys:
-        errors.append(
+        _append_validation_error(
+            errors,
             "trade_filter.zigzag.candidate_entry is deprecated in v3 and not "
-            "supported; use trade_filter.zigzag.mode instead"
+            "supported; use trade_filter.zigzag.mode instead",
+            error_keys,
+            "candidate_entry_deprecated",
         )
 
     # A7: explicit mode + legacy triggers -> ConfigError (mixed schema)
     if mode_present and triggers_present:
-        errors.append(
+        _append_validation_error(
+            errors,
             "trade_filter.zigzag.mode and trade_filter.triggers cannot be used together; "
-            "use canonical mode (zigzag.mode) or legacy triggers, not both"
+            "use canonical mode (zigzag.mode) or legacy triggers, not both",
+            error_keys,
+            "mode_conflicts_with_legacy_triggers",
         )
 
     # A1/A2: validate mode literal when explicitly set
     if mode_present:
         if mode_value not in _VALID_ZIGZAG_MODES:
-            errors.append(
+            _append_validation_error(
+                errors,
                 f"trade_filter.zigzag.mode must be one of "
-                f"{{'A', 'B', 'C', 'A+B', 'C+B'}}; got {mode_value!r}"
+                f"{{'A', 'B', 'C', 'A+B', 'C+B'}}; got {mode_value!r}",
+                error_keys,
+                "mode_invalid_literal",
             )
 
     # ------------------------------------------------------------------
@@ -691,29 +731,48 @@ def validate_trade_filter(
         gate_enabled = gate.enabled
         # A9: enabled must be bool
         if not isinstance(gate_enabled, bool):
-            errors.append(
+            _append_validation_error(
+                errors,
                 "candidate_duration_gate.enabled must be bool (true/false), "
-                f"got {type(gate_enabled).__name__!r}"
+                f"got {type(gate_enabled).__name__!r}",
+                error_keys,
+                "duration_gate_enabled_invalid_type",
             )
         elif gate_enabled:
             # A10: max_bars required when enabled=true
             if not gate_max_bars_present:
-                errors.append(
-                    "candidate_duration_gate.max_bars is required when enabled is true"
+                _append_validation_error(
+                    errors,
+                    "candidate_duration_gate.max_bars is required when enabled is true",
+                    error_keys,
+                    "duration_gate_max_bars_missing",
                 )
             else:
                 # A11: max_bars must be int >= 1; bool/float/string/null rejected
                 mb = gate.max_bars
-                if isinstance(mb, bool) or not isinstance(mb, int) or mb < 1:
-                    errors.append(
-                        f"candidate_duration_gate.max_bars must be int >= 1; got {mb!r}"
+                if isinstance(mb, bool) or not isinstance(mb, int):
+                    _append_validation_error(
+                        errors,
+                        f"candidate_duration_gate.max_bars must be int >= 1; got {mb!r}",
+                        error_keys,
+                        "duration_gate_max_bars_invalid_type",
+                    )
+                elif mb < 1:
+                    _append_validation_error(
+                        errors,
+                        f"candidate_duration_gate.max_bars must be int >= 1; got {mb!r}",
+                        error_keys,
+                        "duration_gate_max_bars_below_one",
                     )
         else:
             # enabled=false: A12: max_bars must be absent
             if gate_max_bars_present:
-                errors.append(
+                _append_validation_error(
+                    errors,
                     "candidate_duration_gate.max_bars must be absent when enabled is false; "
-                    "remove the key"
+                    "remove the key",
+                    error_keys,
+                    "duration_gate_max_bars_present_when_disabled",
                 )
     # A13: absent gate block -> disabled gate (handled by default values; no action needed)
 
@@ -780,6 +839,28 @@ def resolve_zigzag_mode(
     return "A"  # both disabled — validator should have rejected; defensive
 
 
+def resolve_trade_filter_mode_in_place(
+    trade_filter_config: Optional[TradeFilterConfig],
+    raw_user_keys: frozenset[tuple[str, ...]],
+) -> None:
+    """Materialize the effective v3 ZigZag mode on a TradeFilterConfig.
+
+    Shared by WF Grid and Tester after validation. This preserves A3:
+    absent ``zigzag.mode`` plus absent legacy ``triggers`` resolves to Mode A,
+    even though dataclass defaults still create trigger toggle objects.
+    """
+    if trade_filter_config is None or not trade_filter_config.enabled:
+        return
+
+    zz = trade_filter_config.zigzag
+    if zz.mode is not None:
+        return
+
+    triggers_present = ("trade_filter", "triggers") in raw_user_keys
+    triggers_cfg = trade_filter_config.triggers if triggers_present else None
+    zz.mode = resolve_zigzag_mode(None, triggers_cfg)
+
+
 __all__ = [
     "TradeFilterConfig",
     "TradeFilterZigZagConfig",
@@ -794,6 +875,7 @@ __all__ = [
     "build_trade_filter_config_from_raw",
     "TRADE_FILTER_ALLOWED_KEYS",
     "resolve_zigzag_mode",
+    "resolve_trade_filter_mode_in_place",
     # Constant whitelists exported for tests / CLI gate logic
     "_LIFECYCLE_STOP_CHECK_VALUES",
     "_LIFECYCLE_STOPPING_EXIT_VALUES",
@@ -801,4 +883,5 @@ __all__ = [
     "_CALLER_PIPELINE_DOMAIN",
     "_ZIGZAG_ST_MODE_ALLOWED_CALLERS",
     "_VALID_ZIGZAG_MODES",
+    "_V3_INIT_FAILURE_KEYS",
 ]

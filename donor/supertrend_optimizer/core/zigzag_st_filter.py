@@ -179,9 +179,13 @@ class ZigZagPerBar:
     last_confirmed_leg_height_pct: np.ndarray
     local_median_N: np.ndarray
     local_median_available: np.ndarray
-    # v3 WP-V3-3 fields (ТЗ v3 §6)
-    candidate_age_bars: np.ndarray
-    candidate_leg_direction: np.ndarray
+    # v3 WP-V3-3 fields (ТЗ v3 §6).  Optional for backward-compat with legacy
+    # call sites that construct ZigZagPerBar directly (without going through
+    # ``compute_zigzag_per_bar``).  When ``None``, ``apply()`` allocates
+    # UNKNOWN-default arrays (age=-1, direction=0); production path always
+    # passes real arrays via ``compute_zigzag_per_bar``.
+    candidate_age_bars: Optional[np.ndarray] = None
+    candidate_leg_direction: Optional[np.ndarray] = None
 
 
 # ---------------------------------------------------------------------------
@@ -863,7 +867,14 @@ def build_zigzag_global_stats(
 
     # v3: resolve mode and gate (WP-V3-2, ТЗ v3 §5)
     mode_raw = _extract_zigzag_field(zigzag_cfg, "mode")
-    triggers_cfg = getattr(trade_filter_config, "triggers", None)
+    raw_triggers_present = getattr(trade_filter_config, "_raw_triggers_present", None)
+    if raw_triggers_present is None:
+        triggers_cfg = getattr(trade_filter_config, "triggers", None)
+    else:
+        triggers_cfg = (
+            getattr(trade_filter_config, "triggers", None)
+            if bool(raw_triggers_present) else None
+        )
     resolved_mode: str = _resolve_zigzag_mode(mode_raw, triggers_cfg)
 
     gate_cfg = _extract_zigzag_field(zigzag_cfg, "candidate_duration_gate")
@@ -1055,6 +1066,23 @@ _TRIGGER_SOURCE_NONE: str = "none"
 _TRIGGER_SOURCE_A: str = "candidate_threshold"
 _TRIGGER_SOURCE_B: str = "confirmed_median"
 _TRIGGER_SOURCE_BOTH: str = "both"
+
+# ТЗ v3 §10.4 — complete ``immediate_candidate_entry_block_reason`` whitelist.
+# ``_IMM_REASON_FILTER_OFF`` (priority 2 in spec) is whitelist-compatible but
+# is UNREACHABLE from the enabled ``apply()`` path: the disabled-filter path in
+# ``backtest.run_single_backtest`` never calls ``apply()`` and returns
+# ``filter_diagnostics=None``, so the immediate-diagnostics arrays are never
+# created for a disabled filter.  Therefore only priorities 1, 3–9 can appear
+# inside ``apply()``.
+_IMM_REASON_DAILY_RESET: str = "daily_reset"
+_IMM_REASON_FILTER_OFF: str = "filter_off"          # unreachable from apply()
+_IMM_REASON_STATE_NOT_OFF: str = "state_not_off"
+_IMM_REASON_MODE_NOT_C: str = "mode_not_c"
+_IMM_REASON_HEIGHT_GATE_FAILED: str = "height_gate_failed"
+_IMM_REASON_DURATION_GATE_FAILED: str = "duration_gate_failed"
+_IMM_REASON_UNKNOWN_DIR: str = "unknown_candidate_direction"
+_IMM_REASON_TRADE_MODE_DISALLOWS: str = "trade_mode_disallows_direction"
+_IMM_REASON_NONE: str = "none"
 
 
 _VALID_TRADE_MODES: tuple = ("long", "short", "both", "revers")
@@ -1559,17 +1587,44 @@ def apply(
     immediate_allowed_arr = np.zeros(n, dtype=np.int8)
     candidate_duration_gate_passed_arr = np.zeros(n, dtype=np.int8)
 
-    # WP-V3-4 P7: snapshot arrays (immutable values captured at the
-    # START of every bar step, before any FSM transition can mutate them).
-    snapshot_state_at_bar_start_arr = np.full(
+    # WP-V3-4 P7 / ТЗ v3 §7, §9: snapshot arrays (immutable values captured
+    # at the START of every bar step, before any FSM transition — including
+    # the daily-reset wipe — can mutate them).  Naming follows the canonical
+    # field names from ТЗ v3 §7: state_at_bar_start / held_pos_at_bar_start
+    # / confirmed_legs_at_bar_start.
+    state_at_bar_start_arr = np.full(
         n, int(ZigZagFSMState.OFF), dtype=np.int64,
     )
-    snapshot_held_pos_at_bar_start_arr = np.zeros(n, dtype=np.int8)
-    snapshot_confirmed_legs_at_bar_start_arr = np.full(n, -1, dtype=np.int64)
+    held_pos_at_bar_start_arr = np.zeros(n, dtype=np.int8)
+    confirmed_legs_at_bar_start_arr = np.full(n, -1, dtype=np.int64)
 
     # Per-bar v3 candidate arrays (sourced from WP-V3-3 ``ZigZagPerBar``).
+    # Backward-compat: legacy call sites may pass ``ZigZagPerBar`` without
+    # the v3 fields populated → fall back to UNKNOWN defaults (age=-1,
+    # direction=0).  Production path always supplies real arrays via
+    # ``compute_zigzag_per_bar``.
     cand_age_bars = per_bar.candidate_age_bars
+    if cand_age_bars is None:
+        cand_age_bars = np.full(n, -1, dtype=np.int64)
     cand_leg_dir = per_bar.candidate_leg_direction
+    if cand_leg_dir is None:
+        cand_leg_dir = np.zeros(n, dtype=np.int8)
+
+    # WP-V3-7: §10.2 additional diagnostic arrays (enabled filter path only).
+    # Disabled-filter path never calls apply(), so these arrays never appear
+    # in the disabled baseline — satisfying the "no new arrays for disabled
+    # path" requirement.
+    zigzag_mode_arr = np.full(n, resolved_mode, dtype=object)
+    # int8: 1 = gate enabled, 0 = gate disabled.
+    candidate_duration_gate_enabled_arr = np.full(
+        n, np.int8(1 if gate_enabled else 0), dtype=np.int8
+    )
+    # int64: -1 when gate disabled (§5 representation boundary), else max_bars.
+    # ``gate_max_bars`` is already -1 when gate is disabled (resolved above).
+    candidate_duration_max_bars_arr = np.full(n, gate_max_bars, dtype=np.int64)
+    immediate_used_arr = np.zeros(n, dtype=np.int8)
+    # Default "mode_not_c" is overwritten per-bar inside the loop.
+    immediate_block_reason_arr = np.full(n, "mode_not_c", dtype=object)
 
     state = ZigZagFSMState.OFF
     confirmed_legs_since_start = -1   # -1 = lifecycle never started
@@ -1580,23 +1635,26 @@ def apply(
     # 4) Main FSM loop.
     # ------------------------------------------------------------------
     for t in range(n):
+        # ----- §9 step 0: Capture immutable bar-start snapshots ----------
+        # WP-V3-4 P7 / ТЗ v3 §9 step 0: snapshots are captured BEFORE the
+        # daily-reset wipe (§9 step 1) so that on a reset bar the snapshot
+        # still reflects the PRE-reset state/held_pos/counter.  Subsequent
+        # same-bar mutations of ``state``/``held_pos``/``confirmed_legs_
+        # since_start`` (reset, OFF→WAIT, WAIT→FREEZE, etc.) cannot leak
+        # back into the snapshot views.
+        state_at_bar_start = state
+        held_pos_at_bar_start = held_pos
+        confirmed_legs_at_bar_start = confirmed_legs_since_start
+        state_at_bar_start_arr[t] = int(state_at_bar_start)
+        held_pos_at_bar_start_arr[t] = np.int8(held_pos_at_bar_start)
+        confirmed_legs_at_bar_start_arr[t] = confirmed_legs_at_bar_start
+
+        # ----- §9 step 1: daily-reset wipe (after snapshots) -------------
         if daily_reset_event[t]:
             state = ZigZagFSMState.OFF
             confirmed_legs_since_start = -1
             held_pos = 0
             _stopping_start = -1
-
-        # ----- Snapshot state at the START of this bar's events ---------
-        # WP-V3-4 P7: immutable bar-start snapshots — captured BEFORE any
-        # transition logic runs, so subsequent same-bar mutations of
-        # ``state``/``held_pos``/``confirmed_legs_since_start`` cannot
-        # leak back into the snapshot views (ТЗ v3 §7).
-        state_at_bar_start = state
-        held_pos_at_bar_start = held_pos
-        confirmed_legs_at_bar_start = confirmed_legs_since_start
-        snapshot_state_at_bar_start_arr[t] = int(state_at_bar_start)
-        snapshot_held_pos_at_bar_start_arr[t] = np.int8(held_pos_at_bar_start)
-        snapshot_confirmed_legs_at_bar_start_arr[t] = confirmed_legs_at_bar_start
 
         # ----- Detect events at close(t) --------------------------------
         prev_trend = int(trend_arr[t - 1]) if t > 0 else 0
@@ -1605,21 +1663,10 @@ def apply(
         st_flip_dir_arr[t] = flip_dir
 
         c_h = float(cand_height[t]) if not np.isnan(cand_height[t]) else float("nan")
-        a_trig = (
-            a_enabled
-            and math.isfinite(c_h)
-            and c_h >= candidate_trigger_threshold
-        )
 
         confirmed = bool(confirm_event[t] == 1)
         median_valid = bool(local_median_available[t]) and math.isfinite(
             float(local_median_N[t])
-        )
-        b_trig = (
-            b_enabled
-            and confirmed
-            and median_valid
-            and float(local_median_N[t]) >= global_median
         )
 
         # ------------------------------------------------------------------
@@ -1650,7 +1697,9 @@ def apply(
             )
 
         # §7.3 candidate_component_ok
-        candidate_component_ok = candidate_threshold_ok and duration_ok
+        candidate_component_ok = candidate_threshold_ok and (
+            True if pure_mode_b else duration_ok
+        )
 
         # §7.4 confirmed_median_ok — mode-agnostic B condition.  Note: this
         # primitive does NOT consume the legacy ``b_enabled`` toggle; the
@@ -1692,25 +1741,137 @@ def apply(
             1 if cand_duration_gate_passed else 0
         )
 
-        # Trigger source diagnostic (meaningful in OFF only; repeated
-        # triggers in active states are suppressed per §15.3).
-        if state_at_bar_start == ZigZagFSMState.OFF:
-            if a_trig and b_trig:
-                trigger_source_arr[t] = _TRIGGER_SOURCE_BOTH
-            elif a_trig:
-                trigger_source_arr[t] = _TRIGGER_SOURCE_A
-            elif b_trig:
-                trigger_source_arr[t] = _TRIGGER_SOURCE_B
+        # ------------------------------------------------------------------
+        # WP-V3-5: Unified mode dispatcher (§8 Mode Semantics + §9 step 2).
+        # Mode-specific OFF transitions ONLY when state_at_bar_start == OFF
+        # AND not on a daily-reset bar (§9 step 2).  Outside OFF, repeated
+        # triggers are silently suppressed (§8 / §15.3).  D3 invariant:
+        # trigger_source != "none" iff actual OFF departure on a non-reset
+        # bar.
+        # ------------------------------------------------------------------
+        immediate_used_this_bar = False
+        if state_at_bar_start == ZigZagFSMState.OFF and not is_reset:
+            if resolved_mode == "A":
+                # §8.1: candidate_component_ok -> WAIT, source=candidate_threshold.
+                if candidate_component_ok:
+                    state = ZigZagFSMState.WAIT_FIRST_ST_FLIP
+                    trigger_source_arr[t] = _TRIGGER_SOURCE_A
+
+            elif resolved_mode == "B":
+                # §8.2: b_component_ok -> WAIT, source=confirmed_median.
+                # Duration gate is materialised but does NOT influence
+                # Mode B runtime decisions (one-shot INFO logged at init).
+                if b_component_ok:
+                    state = ZigZagFSMState.WAIT_FIRST_ST_FLIP
+                    trigger_source_arr[t] = _TRIGGER_SOURCE_B
+
+            elif resolved_mode == "C":
+                # §8.3: candidate_component_ok AND immediate_allowed
+                #   -> FREEZE, held_pos=candidate_leg_direction, used=1.
+                # Pure C blocked by unknown direction/trade_mode stays OFF —
+                # NO WAIT fallback (§8.3 last paragraph).
+                if candidate_component_ok and immediate_allowed:
+                    state = ZigZagFSMState.ST_ACTIVE_FREEZE
+                    held_pos = cand_dir_t
+                    confirmed_legs_since_start = 0
+                    trigger_source_arr[t] = _TRIGGER_SOURCE_A
+                    immediate_used_this_bar = True
+                # else: stays OFF, source remains "none".
+
+            elif resolved_mode == "A+B":
+                # §8.4 table.  Gate-blocked A is not an A-source for
+                # trigger_source (candidate_component_ok already enforces
+                # gate, so a "false" component is naturally not counted).
+                a_fired = candidate_component_ok
+                b_fired = b_component_ok
+                if a_fired and b_fired:
+                    state = ZigZagFSMState.WAIT_FIRST_ST_FLIP
+                    trigger_source_arr[t] = _TRIGGER_SOURCE_BOTH
+                elif a_fired:
+                    state = ZigZagFSMState.WAIT_FIRST_ST_FLIP
+                    trigger_source_arr[t] = _TRIGGER_SOURCE_A
+                elif b_fired:
+                    state = ZigZagFSMState.WAIT_FIRST_ST_FLIP
+                    trigger_source_arr[t] = _TRIGGER_SOURCE_B
+                # else: OFF stays OFF, source remains "none".
+
+            elif resolved_mode == "C+B":
+                # §8.5 table.  C has priority over B; B-rescue applies when
+                # immediate is blocked by direction/trade_mode but B fired.
+                # Gate-blocked C is NOT a candidate source for trigger_source
+                # (the false candidate_component_ok value already excludes it).
+                c_fired = candidate_component_ok
+                b_fired = b_component_ok
+                if c_fired and immediate_allowed:
+                    # OFF -> FREEZE; trigger_source = "both" if B also fired.
+                    state = ZigZagFSMState.ST_ACTIVE_FREEZE
+                    held_pos = cand_dir_t
+                    confirmed_legs_since_start = 0
+                    trigger_source_arr[t] = (
+                        _TRIGGER_SOURCE_BOTH if b_fired else _TRIGGER_SOURCE_A
+                    )
+                    immediate_used_this_bar = True
+                elif c_fired and (not immediate_allowed) and b_fired:
+                    # B-rescue: immediate blocked, B fired → OFF -> WAIT.
+                    state = ZigZagFSMState.WAIT_FIRST_ST_FLIP
+                    trigger_source_arr[t] = _TRIGGER_SOURCE_BOTH
+                elif (not c_fired) and b_fired:
+                    # B alone (gate-blocked C is not a candidate source).
+                    state = ZigZagFSMState.WAIT_FIRST_ST_FLIP
+                    trigger_source_arr[t] = _TRIGGER_SOURCE_B
+                # else: OFF stays OFF (covers both
+                #   {C true, immediate blocked, B false}  and
+                #   {C false, B false} rows of §8.5).
+            else:
+                raise ConfigError(
+                    f"apply(): unknown resolved ZigZag mode {resolved_mode!r}; "
+                    f"expected one of: A, B, C, A+B, C+B"
+                )
+
+        # WP-V3-7: §10.4 immediate_candidate_entry_block_reason priority.
+        # Computed AFTER the dispatcher so ``immediate_used_this_bar`` is
+        # already set.
+        #
+        # Full whitelist from ТЗ v3 §10.4 (priority order):
+        #   1. daily_reset
+        #   2. filter_off         ← UNREACHABLE from apply(): the disabled-filter
+        #                           path in backtest.run_single_backtest never
+        #                           calls apply(), so filter_diagnostics=None and
+        #                           no immediate arrays exist for disabled filters.
+        #   3. state_not_off
+        #   4. mode_not_c
+        #   5. height_gate_failed
+        #   6. duration_gate_failed
+        #   7. unknown_candidate_direction
+        #   8. trade_mode_disallows_direction
+        #   9. none               ← only when immediate entry actually used
+        if is_reset:
+            _imm_reason = _IMM_REASON_DAILY_RESET
+        elif state_at_bar_start != ZigZagFSMState.OFF:
+            _imm_reason = _IMM_REASON_STATE_NOT_OFF
+        elif resolved_mode not in ("C", "C+B"):
+            _imm_reason = _IMM_REASON_MODE_NOT_C
+        elif not candidate_threshold_ok:
+            _imm_reason = _IMM_REASON_HEIGHT_GATE_FAILED
+        elif gate_enabled and not duration_ok:
+            _imm_reason = _IMM_REASON_DURATION_GATE_FAILED
+        elif cand_dir_t == 0:
+            _imm_reason = _IMM_REASON_UNKNOWN_DIR
+        elif not _trade_mode_allows_direction(cand_dir_t, trade_mode):
+            _imm_reason = _IMM_REASON_TRADE_MODE_DISALLOWS
+        else:
+            # All checks passed → immediate entry succeeded.
+            _imm_reason = _IMM_REASON_NONE
+        immediate_used_arr[t] = np.int8(1 if immediate_used_this_bar else 0)
+        immediate_block_reason_arr[t] = _imm_reason
 
         # ----- FSM transitions (canonical order, plan §5.2 / §5.5) -----
 
-        # 1) OFF → WAIT (filter trigger).  Repeated triggers in non-OFF
-        #    states are silently suppressed (§15.3).
-        if state == ZigZagFSMState.OFF and (a_trig or b_trig):
-            state = ZigZagFSMState.WAIT_FIRST_ST_FLIP
-
         # 2) WAIT → FREEZE (allowed ST flip).  Same-bar trigger + allowed
         #    flip is the canonical "trigger first, then flip" path (§5.5).
+        #    Mode C immediate entry skips WAIT entirely and writes FREEZE
+        #    directly above; same-bar opposite ST flip on a Mode C entry bar
+        #    cannot reach this branch (state is already FREEZE, not WAIT).
         if state == ZigZagFSMState.WAIT_FIRST_ST_FLIP and flip_dir != 0:
             if _is_first_flip_allowed(flip_dir, trade_mode):
                 state = ZigZagFSMState.ST_ACTIVE_FREEZE
@@ -1910,12 +2071,23 @@ def apply(
         "b_component_ok": b_component_ok_arr,
         "immediate_allowed": immediate_allowed_arr,
         "candidate_duration_gate_passed": candidate_duration_gate_passed_arr,
-        # WP-V3-4 P7: per-bar immutable snapshots captured at bar start
-        # (used by tests; consumed by WP-V3-5 mode dispatcher and WP-V3-6
-        # FSM ordering hardening).
-        "snapshot_state_at_bar_start": snapshot_state_at_bar_start_arr,
-        "snapshot_held_pos_at_bar_start": snapshot_held_pos_at_bar_start_arr,
-        "snapshot_confirmed_legs_at_bar_start": snapshot_confirmed_legs_at_bar_start_arr,
+        # WP-V3-4 P7 / ТЗ v3 §7, §9: per-bar immutable snapshots captured
+        # at bar start (BEFORE daily-reset and any FSM transition).
+        # Canonical names per ТЗ v3 §7; consumed by WP-V3-5 mode dispatcher
+        # and WP-V3-6 FSM ordering hardening.
+        "state_at_bar_start": state_at_bar_start_arr,
+        "held_pos_at_bar_start": held_pos_at_bar_start_arr,
+        "confirmed_legs_at_bar_start": confirmed_legs_at_bar_start_arr,
+        # --- v3 WP-V3-7: additional §10.2 immediate diagnostics ---
+        # candidate_height_pct already exported above (WP9 key).
+        # candidate_age_bars / candidate_leg_direction echoed from per_bar.
+        "zigzag_mode": zigzag_mode_arr,
+        "candidate_age_bars": cand_age_bars,
+        "candidate_leg_direction": cand_leg_dir,
+        "candidate_duration_gate_enabled": candidate_duration_gate_enabled_arr,
+        "candidate_duration_max_bars": candidate_duration_max_bars_arr,
+        "immediate_candidate_entry_used": immediate_used_arr,
+        "immediate_candidate_entry_block_reason": immediate_block_reason_arr,
     }
 
     return ZigZagSTFilterResult(

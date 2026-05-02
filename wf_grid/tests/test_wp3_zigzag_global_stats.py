@@ -588,6 +588,29 @@ class TestV3ModeMateriailzation:
         stats = build_zigzag_global_stats(MANY_LEG_SAWTOOTH.close, cfg)
         assert stats.zigzag_mode == "A"
 
+    def test_a3_raw_config_without_triggers_materializes_a(self):
+        """A3: materialized dataclass defaults must not imply legacy A+B."""
+        from supertrend_optimizer.core.trade_filter_config import (
+            build_trade_filter_config_from_raw,
+        )
+
+        cfg = build_trade_filter_config_from_raw({
+            "enabled": True,
+            "type": "zigzag_st_mode",
+            "zigzag": {
+                "reversal_threshold": 0.005,
+                "candidate_trigger_threshold": 0.012,
+                "local_window": 5,
+            },
+            "lifecycle": {
+                "freeze_confirmed_legs": 3,
+                "stop_check": "confirm_bar_only",
+                "stopping_exit": "opposite_st_flip",
+            },
+        })
+        stats = build_zigzag_global_stats(MANY_LEG_SAWTOOTH.close, cfg)
+        assert stats.zigzag_mode == "A"
+
     def test_a4_legacy_candidate_only_materializes_a(self):
         """A4: legacy ct=true, cm=false → materialized mode A."""
         cfg = _make_filter_config(mode=None, triggers_ct=True, triggers_cm=False)

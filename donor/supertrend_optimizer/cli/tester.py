@@ -37,6 +37,7 @@ from supertrend_optimizer.core.trade_filter_config import (
     build_trade_filter_config_from_raw,
     collect_raw_user_keys,
     collect_trade_filter_unknown_keys,
+    resolve_trade_filter_mode_in_place,
     validate_trade_filter,
 )
 
@@ -387,6 +388,7 @@ def load_tester_config(config_path: Optional[str]) -> Dict[str, Any]:
                 "trade_filter validation failed:\n"
                 + "\n".join(f"  - {e}" for e in errors)
             )
+        resolve_trade_filter_mode_in_place(tf_cfg, raw_user_keys)
         config["trade_filter"] = tf_cfg
 
         # Phase 2 (WP-T2 + WP-T5 advanced into WP-T2 fail-fast slot, plan §5.5):

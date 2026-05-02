@@ -32,6 +32,9 @@ import pandas as pd
 
 from supertrend_optimizer.core.backtest import generate_positions
 from supertrend_optimizer.core.metrics import calculate_all_metrics
+from supertrend_optimizer.core.trade_filter_config import (
+    resolve_trade_filter_mode_in_place,
+)
 from supertrend_optimizer.core.zigzag_st_filter import build_zigzag_global_stats
 from supertrend_optimizer.data.loader import load_ohlc_csv
 from supertrend_optimizer.data.validator import validate_ohlc_data
@@ -160,6 +163,15 @@ def _echo_thresholds(
         "global_median": float(zigzag_global_stats.global_median),
         "local_window": int(zz.local_window),
         "freeze_confirmed_legs": int(lc.freeze_confirmed_legs),
+        "zigzag_mode": getattr(zigzag_global_stats, "zigzag_mode", ""),
+        "candidate_duration_gate_enabled": bool(
+            getattr(zigzag_global_stats, "candidate_duration_gate_enabled", False)
+        ),
+        "candidate_duration_max_bars": (
+            int(getattr(zigzag_global_stats, "candidate_duration_max_bars"))
+            if getattr(zigzag_global_stats, "candidate_duration_max_bars", None) is not None
+            else -1
+        ),
     }
 
 
@@ -231,17 +243,19 @@ def _compute_summary_counters(
         + blocked_stopping
     )
 
-    # lifecycle_starts: transitions WAIT_FIRST_ST_FLIP -> ST_ACTIVE_FREEZE
+    # lifecycle_starts: transitions from inactive states into lifecycle-active
+    # states.  This covers same-bar Mode C starts and freeze_confirmed_legs=0
+    # starts that land directly in ST_ACTIVE_MONITORING.
     state_arr = filter_diagnostics["trade_filter_state"]
+    lifecycle_active = (
+        (state_arr == "ST_ACTIVE_FREEZE")
+        | (state_arr == "ST_ACTIVE_MONITORING")
+    )
+    lifecycle_starts = int(len(state_arr) > 0 and lifecycle_active[0])
     if len(state_arr) > 1:
-        lifecycle_starts = int(
-            np.sum(
-                (state_arr[1:] == "ST_ACTIVE_FREEZE")
-                & (state_arr[:-1] == "WAIT_FIRST_ST_FLIP")
-            )
+        lifecycle_starts += int(
+            np.sum(lifecycle_active[1:] & ~lifecycle_active[:-1])
         )
-    else:
-        lifecycle_starts = 0
 
     # median_stop_triggered: cross-source from bar-level int8 mask
     median_stop_triggered = int(
@@ -261,6 +275,23 @@ def _compute_summary_counters(
                 (trades_df["exit_reason"] == "filter_stopping_opposite_flip").sum()
             )
 
+    immediate_used = filter_diagnostics.get("immediate_candidate_entry_used")
+    immediate_reasons = filter_diagnostics.get(
+        "immediate_candidate_entry_block_reason"
+    )
+    immediate_entries_count = (
+        int(np.sum(immediate_used == 1)) if immediate_used is not None else 0
+    )
+    immediate_blocked_reasons = frozenset({
+        "duration_gate_failed",
+        "unknown_candidate_direction",
+        "trade_mode_disallows_direction",
+    })
+    immediate_entries_blocked_count = (
+        sum(1 for r in np.asarray(immediate_reasons) if r in immediate_blocked_reasons)
+        if immediate_reasons is not None else 0
+    )
+
     return {
         "raw_st_flips": raw_st_flips,
         "passed_entry_signals": passed_entry_signals,
@@ -275,6 +306,8 @@ def _compute_summary_counters(
         "median_stop_triggered": median_stop_triggered,
         "daily_reset_count": daily_reset_count,
         "exits_opposite_flip": exits_opposite_flip,
+        "immediate_entries_count": immediate_entries_count,
+        "immediate_entries_blocked_count": immediate_entries_blocked_count,
     }
 
 
@@ -318,8 +351,24 @@ def _build_filter_diagnostics_summary(
     )
     bars_in_state = _bars_in_state_histogram(result.filter_diagnostics)
 
+    zigzag_mode = str(getattr(zigzag_global_stats, "zigzag_mode", "") or "")
+    gate_enabled = bool(
+        getattr(zigzag_global_stats, "candidate_duration_gate_enabled", False)
+    )
+    gate_max_bars = getattr(zigzag_global_stats, "candidate_duration_max_bars", None)
+    gate_max_bars_out = int(gate_max_bars) if gate_max_bars is not None else -1
+
     return {
         "mode": "zigzag_st_mode",
+        "zigzag_mode": zigzag_mode,
+        "candidate_duration_gate_enabled": gate_enabled,
+        "candidate_duration_max_bars": gate_max_bars_out,
+        "immediate_entries_count": counters.get("immediate_entries_count", 0),
+        "immediate_entries_blocked_count": counters.get(
+            "immediate_entries_blocked_count", 0
+        ),
+        "lifecycle_starts_count": counters.get("lifecycle_starts", 0),
+        "median_stop_triggered_count": counters.get("median_stop_triggered", 0),
         "thresholds": thresholds,
         "global_offset": global_offset,
         "counters": counters,
@@ -517,6 +566,12 @@ def run_all_periods(
         trade_filter_config is not None and trade_filter_config.enabled
     )
     if filter_enabled and zigzag_global_stats is None:
+        triggers_marker = getattr(trade_filter_config, "_raw_triggers_present", None)
+        raw_user_keys = (
+            frozenset({("trade_filter", "triggers")})
+            if triggers_marker is True else frozenset()
+        )
+        resolve_trade_filter_mode_in_place(trade_filter_config, raw_user_keys)
         zigzag_global_stats = build_zigzag_global_stats(
             close=df["close"].values,
             trade_filter_config=trade_filter_config,

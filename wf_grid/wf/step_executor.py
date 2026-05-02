@@ -146,10 +146,15 @@ def _compute_filter_diagnostics_summary(
         # at the first allowed ST flip → ST_ACTIVE_FREEZE, NOT at OFF → WAIT.
         # Bar 0 counts if the FSM is already in ST_ACTIVE_FREEZE (same-bar
         # trigger + allowed flip).
-        is_freeze = state_np == "ST_ACTIVE_FREEZE"
-        lifecycle_starts = int(n > 0 and is_freeze[0])
+        lifecycle_active = (
+            (state_np == "ST_ACTIVE_FREEZE")
+            | (state_np == "ST_ACTIVE_MONITORING")
+        )
+        lifecycle_starts = int(n > 0 and lifecycle_active[0])
         if n > 1:
-            lifecycle_starts += int(np.sum(is_freeze[1:] & ~is_freeze[:-1]))
+            lifecycle_starts += int(
+                np.sum(lifecycle_active[1:] & ~lifecycle_active[:-1])
+            )
         summary["lifecycle_starts_count"] = lifecycle_starts
 
     # §10.6.4 n_filter_blocked_entries
@@ -188,6 +193,41 @@ def _compute_filter_diagnostics_summary(
         summary["daily_reset_count"] = int(
             np.sum(np.asarray(daily_reset_arr) == 1)
         )
+
+    # ------------------------------------------------------------------
+    # WP-V3-8: immediate entries counts (§11.3)
+    # ------------------------------------------------------------------
+    _IMM_BLOCKED_REASONS = frozenset({
+        "duration_gate_failed",
+        "unknown_candidate_direction",
+        "trade_mode_disallows_direction",
+    })
+    imm_used_arr = filter_diagnostics.get("immediate_candidate_entry_used")
+    if imm_used_arr is not None:
+        summary["immediate_entries_count"] = int(
+            np.sum(np.asarray(imm_used_arr) == 1)
+        )
+    imm_reason_arr = filter_diagnostics.get("immediate_candidate_entry_block_reason")
+    if imm_reason_arr is not None:
+        summary["immediate_entries_blocked_count"] = sum(
+            1 for r in np.asarray(imm_reason_arr) if r in _IMM_BLOCKED_REASONS
+        )
+
+    # ZigZag mode and gate config (§11.3 params section)
+    zigzag_mode_arr_raw = filter_diagnostics.get("zigzag_mode")
+    if zigzag_mode_arr_raw is not None:
+        arr = np.asarray(zigzag_mode_arr_raw)
+        summary["zigzag_mode"] = str(arr[0]) if len(arr) > 0 else ""
+
+    gate_en_arr_raw = filter_diagnostics.get("candidate_duration_gate_enabled")
+    if gate_en_arr_raw is not None:
+        arr = np.asarray(gate_en_arr_raw)
+        summary["candidate_duration_gate_enabled"] = bool(int(arr[0])) if len(arr) > 0 else False
+
+    gate_mb_arr_raw = filter_diagnostics.get("candidate_duration_max_bars")
+    if gate_mb_arr_raw is not None:
+        arr = np.asarray(gate_mb_arr_raw)
+        summary["candidate_duration_max_bars"] = int(arr[0]) if len(arr) > 0 else -1
 
     return summary
 

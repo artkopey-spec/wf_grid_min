@@ -122,6 +122,98 @@ class TestDisabledTradeFilter:
         assert cfg.trade_filter.enabled is False
         assert cfg.trade_filter.type == "zigzag_st_mode"
 
+
+class TestV3InitFailureKeyset:
+    """Spec §4.5: validator can emit canonical init-failure keys."""
+
+    def _keys_for(self, tf_raw: dict) -> list[str]:
+        from supertrend_optimizer.core.trade_filter_config import (
+            build_trade_filter_config_from_raw,
+            collect_raw_user_keys,
+            validate_trade_filter,
+        )
+
+        errors: list[str] = []
+        keys: list[str] = []
+        validate_trade_filter(
+            build_trade_filter_config_from_raw(tf_raw),
+            errors,
+            collect_raw_user_keys({"trade_filter": tf_raw}),
+            error_keys=keys,
+        )
+        assert errors
+        return keys
+
+    def _base_raw(self) -> dict:
+        return {
+            "enabled": True,
+            "type": "zigzag_st_mode",
+            "zigzag": {
+                "reversal_threshold": 0.005,
+                "candidate_trigger_threshold": 0.012,
+                "local_window": 5,
+            },
+            "lifecycle": {
+                "freeze_confirmed_legs": 3,
+                "stop_check": "confirm_bar_only",
+                "stopping_exit": "opposite_st_flip",
+            },
+        }
+
+    @pytest.mark.parametrize(
+        "mutate, expected_key",
+        [
+            (lambda raw: raw["zigzag"].update({"mode": "bad"}), "mode_invalid_literal"),
+            (
+                lambda raw: (raw["zigzag"].update({"mode": "A"}), raw.update({
+                    "triggers": {
+                        "candidate_threshold": {"enabled": True},
+                        "confirmed_median": {"enabled": True},
+                    }
+                })),
+                "mode_conflicts_with_legacy_triggers",
+            ),
+            (
+                lambda raw: raw["zigzag"].update({"candidate_entry": "legacy"}),
+                "candidate_entry_deprecated",
+            ),
+            (
+                lambda raw: raw["zigzag"].update({
+                    "candidate_duration_gate": {"enabled": "yes", "max_bars": 3}
+                }),
+                "duration_gate_enabled_invalid_type",
+            ),
+            (
+                lambda raw: raw["zigzag"].update({
+                    "candidate_duration_gate": {"enabled": True}
+                }),
+                "duration_gate_max_bars_missing",
+            ),
+            (
+                lambda raw: raw["zigzag"].update({
+                    "candidate_duration_gate": {"enabled": False, "max_bars": 3}
+                }),
+                "duration_gate_max_bars_present_when_disabled",
+            ),
+            (
+                lambda raw: raw["zigzag"].update({
+                    "candidate_duration_gate": {"enabled": True, "max_bars": "3"}
+                }),
+                "duration_gate_max_bars_invalid_type",
+            ),
+            (
+                lambda raw: raw["zigzag"].update({
+                    "candidate_duration_gate": {"enabled": True, "max_bars": 0}
+                }),
+                "duration_gate_max_bars_below_one",
+            ),
+        ],
+    )
+    def test_v3_init_failure_keys(self, mutate, expected_key):
+        raw = self._base_raw()
+        mutate(raw)
+        assert expected_key in self._keys_for(raw)
+
     def test_disabled_without_type_ok(self, tmp_path):
         """enabled=false without type is valid (§11.1)."""
         cfg = _assert_ok(tmp_path, _MINIMAL_BASE + (

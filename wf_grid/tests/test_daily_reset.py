@@ -752,6 +752,10 @@ class TestDailyResetFSM:
         assert result.positions[3] == 0
 
     def test_fsm_simultaneous_reset_and_trigger(self):
+        """Per ТЗ v3 §9.2: reset bar forces all candidate/B/immediate primitives
+        to false; no mode-specific OFF transition fires on a reset bar.  End-of-
+        bar state must remain OFF even if the candidate height would otherwise
+        clear the threshold.  Counter stays at the post-reset value (-1)."""
         n = 3
         per_bar = _make_per_bar(
             n=n,
@@ -765,8 +769,11 @@ class TestDailyResetFSM:
         )
 
         states = list(result.filter_diagnostics["trade_filter_state"])
-        assert states[2] == "ST_ACTIVE_FREEZE"
-        assert result.filter_diagnostics["confirmed_legs_since_start"][2] == 0
+        # v3 contract: trigger on reset bar is suppressed (primitives forced false)
+        assert states[2] == "OFF"
+        assert result.filter_diagnostics["confirmed_legs_since_start"][2] == -1
+        # Trigger source must be "none" — no OFF departure happened on reset bar
+        assert result.filter_diagnostics["trade_filter_trigger_source"][2] == "none"
 
     def test_fsm_apply_test_override_daily_reset_event(self):
         n = 3
@@ -887,6 +894,25 @@ class TestDailyResetDiagnostics:
             "filter_block_reason",
             "daily_reset_enabled",
             "daily_reset_event",
+            # v3 WP-V3-3: per-bar candidate state
+            "candidate_age_bars",
+            "candidate_leg_direction",
+            # v3 WP-V3-4: runtime primitives + immutable bar-start snapshots
+            "candidate_threshold_ok",
+            "candidate_component_ok",
+            "confirmed_median_ok",
+            "b_component_ok",
+            "immediate_allowed",
+            "candidate_duration_gate_passed",
+            "state_at_bar_start",
+            "held_pos_at_bar_start",
+            "confirmed_legs_at_bar_start",
+            # v3 WP-V3-7: §10.2 immediate diagnostics
+            "zigzag_mode",
+            "candidate_duration_gate_enabled",
+            "candidate_duration_max_bars",
+            "immediate_candidate_entry_used",
+            "immediate_candidate_entry_block_reason",
         }
 
     def test_daily_reset_arrays_dtype_int8(self):

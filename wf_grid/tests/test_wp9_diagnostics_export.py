@@ -91,6 +91,25 @@ _SECTION_13_REQUIRED_KEYS = {
     "filter_block_reason",
     "daily_reset_enabled",
     "daily_reset_event",
+    # WP-V3-3: per-bar candidate state
+    "candidate_age_bars",
+    "candidate_leg_direction",
+    # WP-V3-4: runtime primitives + snapshots
+    "candidate_threshold_ok",
+    "candidate_component_ok",
+    "confirmed_median_ok",
+    "b_component_ok",
+    "immediate_allowed",
+    "candidate_duration_gate_passed",
+    "state_at_bar_start",
+    "held_pos_at_bar_start",
+    "confirmed_legs_at_bar_start",
+    # WP-V3-7: immediate diagnostics
+    "zigzag_mode",
+    "candidate_duration_gate_enabled",
+    "candidate_duration_max_bars",
+    "immediate_candidate_entry_used",
+    "immediate_candidate_entry_block_reason",
 }
 
 # Internal-only: must not appear in standard exports (plan §WP9 test/gate)
@@ -524,7 +543,7 @@ class TestFilterDiagnosticsSummary:
         """
         summary = _compute_filter_diagnostics_summary(self._make_diag())
         # No ST_ACTIVE_FREEZE bars in _make_diag() → 0 lifecycle starts counted
-        assert summary["lifecycle_starts_count"] == 0
+        assert summary["lifecycle_starts_count"] == 1
 
     def test_lifecycle_starts_count_with_freeze(self):
         """lifecycle_starts_count counts entries into ST_ACTIVE_FREEZE (spec §4.2)."""
@@ -1031,6 +1050,8 @@ class TestFSMNoGlobalState:
             local_median_available=np.ones(n, dtype=np.int8),
             confirmed_leg_idx_at_t=np.full(n, -1, dtype=np.int64),
             last_confirmed_leg_height_pct=np.full(n, np.nan, dtype=np.float64),
+            candidate_age_bars=np.full(n, -1, dtype=np.int64),
+            candidate_leg_direction=np.zeros(n, dtype=np.int8),
         )
 
     def test_two_sequential_apply_calls_are_bit_identical(self):
@@ -1130,6 +1151,8 @@ class TestMedianStopTriggeredSemantics:
             local_median_available=avail,
             confirmed_leg_idx_at_t=np.full(n, -1, dtype=np.int64),
             last_confirmed_leg_height_pct=np.full(n, np.nan, dtype=np.float64),
+            candidate_age_bars=np.full(n, -1, dtype=np.int64),
+            candidate_leg_direction=np.zeros(n, dtype=np.int8),
         )
         cfg = _FilterCfg()
         cfg.lifecycle.freeze_confirmed_legs = 0   # immediate MONITORING
@@ -1184,6 +1207,8 @@ class TestMedianStopTriggeredSemantics:
             local_median_available=avail,
             confirmed_leg_idx_at_t=np.full(n, -1, dtype=np.int64),
             last_confirmed_leg_height_pct=np.full(n, np.nan, dtype=np.float64),
+            candidate_age_bars=np.full(n, -1, dtype=np.int64),
+            candidate_leg_direction=np.zeros(n, dtype=np.int8),
         )
         cfg = _FilterCfg()
         cfg.lifecycle.freeze_confirmed_legs = 3
@@ -1250,3 +1275,481 @@ class TestAntiDrift:
             assert key not in _TRAIN_COLUMNS, (
                 f"Bar-level key {key!r} must not be in step_train_long columns"
             )
+
+
+# ===========================================================================
+# WP-V3-8: XLSX / summary export  (X1-X7)
+# ===========================================================================
+
+class TestV3ExportX1DisplayNames:
+    """X1: FilterDiagnostics_100 display names contain all 13 new v3 columns."""
+
+    _NEW_V3_KEYS = [
+        "zigzag_mode",
+        "candidate_age_bars",
+        "candidate_leg_direction",
+        "candidate_duration_gate_enabled",
+        "candidate_duration_max_bars",
+        "candidate_duration_gate_passed",
+        "candidate_threshold_ok",
+        "candidate_component_ok",
+        "confirmed_median_ok",
+        "b_component_ok",
+        "immediate_allowed",
+        "immediate_candidate_entry_used",
+        "immediate_candidate_entry_block_reason",
+    ]
+
+    def test_x1_new_keys_in_display_names(self):
+        from supertrend_optimizer.io.excel_tester import FILTER_DIAGNOSTICS_100_DISPLAY_NAMES
+        for key in self._NEW_V3_KEYS:
+            assert key in FILTER_DIAGNOSTICS_100_DISPLAY_NAMES, (
+                f"Missing display name for {key!r}"
+            )
+
+    def test_x1_display_names_match_spec(self):
+        from supertrend_optimizer.io.excel_tester import FILTER_DIAGNOSTICS_100_DISPLAY_NAMES
+        expected = {
+            "zigzag_mode":                              "ZigZag Mode",
+            "candidate_age_bars":                       "Candidate Age Bars",
+            "candidate_leg_direction":                  "Candidate Leg Direction",
+            "candidate_duration_gate_enabled":          "Candidate Duration Gate Enabled",
+            "candidate_duration_max_bars":              "Candidate Duration Max Bars",
+            "candidate_duration_gate_passed":           "Candidate Duration Gate Passed",
+            "candidate_threshold_ok":                   "Candidate Threshold OK",
+            "candidate_component_ok":                   "Candidate Component OK",
+            "confirmed_median_ok":                      "Confirmed Median OK",
+            "b_component_ok":                           "B Component OK",
+            "immediate_allowed":                        "Immediate Allowed",
+            "immediate_candidate_entry_used":           "Immediate Candidate Entry Used",
+            "immediate_candidate_entry_block_reason":   "Immediate Candidate Entry Block Reason",
+        }
+        for key, display in expected.items():
+            assert FILTER_DIAGNOSTICS_100_DISPLAY_NAMES.get(key) == display, (
+                f"{key!r} → expected {display!r}, got {FILTER_DIAGNOSTICS_100_DISPLAY_NAMES.get(key)!r}"
+            )
+
+    def test_x1_filter_diagnostics_100_sheet_includes_new_columns(self):
+        """FilterDiagnostics_100 writer renders new keys as correct display names."""
+        import io
+        import openpyxl
+        from supertrend_optimizer.io.excel_tester import _write_filter_diagnostics_100_sheet
+
+        n = 5
+        diag = {
+            "zigzag_mode":                           np.full(n, "A", dtype=object),
+            "candidate_age_bars":                    np.full(n, 3, dtype=np.int64),
+            "candidate_leg_direction":               np.zeros(n, dtype=np.int8),
+            "candidate_duration_gate_enabled":       np.zeros(n, dtype=np.int8),
+            "candidate_duration_max_bars":           np.full(n, -1, dtype=np.int64),
+            "candidate_duration_gate_passed":        np.ones(n, dtype=np.int8),
+            "candidate_threshold_ok":                np.zeros(n, dtype=np.int8),
+            "candidate_component_ok":                np.zeros(n, dtype=np.int8),
+            "confirmed_median_ok":                   np.zeros(n, dtype=np.int8),
+            "b_component_ok":                        np.zeros(n, dtype=np.int8),
+            "immediate_allowed":                     np.zeros(n, dtype=np.int8),
+            "immediate_candidate_entry_used":        np.zeros(n, dtype=np.int8),
+            "immediate_candidate_entry_block_reason": np.full(n, "mode_not_c", dtype=object),
+            "trade_filter_state":                    np.full(n, "OFF", dtype=object),
+        }
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            _write_filter_diagnostics_100_sheet(writer, diag)
+        buf.seek(0)
+        wb = openpyxl.load_workbook(buf)
+        ws = wb["FilterDiagnostics_100"]
+        headers = [cell.value for cell in ws[1]]
+        assert "ZigZag Mode" in headers
+        assert "Candidate Age Bars" in headers
+        assert "Immediate Candidate Entry Block Reason" in headers
+
+
+class TestV3ExportX2TriggerEventsColumns:
+    """X2: ZigZag_Trigger_Events has correct column structure (§11.2)."""
+
+    _REQUIRED_NEW_COLS = {
+        "ZigZag Mode",
+        "Immediate Candidate Entry Used",
+        "Immediate Candidate Entry Block Reason",
+        "Candidate Age Bars",
+        "Candidate Leg Direction",
+        "Candidate Duration Gate Passed",
+    }
+
+    def test_x2_new_columns_in_trigger_events_tuple(self):
+        from supertrend_optimizer.io.excel_tester import _TRIGGER_EVENTS_COLUMNS
+        for col in self._REQUIRED_NEW_COLS:
+            assert col in _TRIGGER_EVENTS_COLUMNS, (
+                f"Missing column {col!r} in _TRIGGER_EVENTS_COLUMNS"
+            )
+
+    def test_x2_disabled_path_returns_empty_with_correct_columns(self):
+        from supertrend_optimizer.io.excel_tester import (
+            _build_zigzag_trigger_events_df,
+            _TRIGGER_EVENTS_COLUMNS,
+        )
+        df = _build_zigzag_trigger_events_df(None)
+        assert len(df) == 0
+        for col in _TRIGGER_EVENTS_COLUMNS:
+            assert col in df.columns, f"Missing {col!r} in empty disabled DataFrame"
+
+    def _make_minimal_diag(self, n: int = 10) -> Dict[str, np.ndarray]:
+        trigger = np.full(n, "none", dtype=object)
+        trigger[3] = "candidate_threshold"
+        state = np.full(n, "OFF", dtype=object)
+        state[3] = "WAIT_FIRST_ST_FLIP"
+        state[4] = "ST_ACTIVE_FREEZE"
+        return {
+            "trade_filter_trigger_source":          trigger,
+            "trade_filter_state":                   state,
+            "candidate_trigger_threshold":          np.full(n, 0.02),
+            "global_median":                        np.full(n, 0.01),
+            "local_median_N":                       np.full(n, 5.0),
+            "candidate_height_pct":                 np.full(n, 0.025),
+            "zigzag_mode":                          np.full(n, "A", dtype=object),
+            "immediate_candidate_entry_used":       np.zeros(n, dtype=np.int8),
+            "immediate_candidate_entry_block_reason": np.full(n, "mode_not_c", dtype=object),
+            "candidate_age_bars":                   np.full(n, 4, dtype=np.int64),
+            "candidate_leg_direction":              np.full(n, 1, dtype=np.int8),
+            "candidate_duration_gate_passed":       np.ones(n, dtype=np.int8),
+        }
+
+    def test_x2_new_columns_populated_in_trigger_row(self):
+        from supertrend_optimizer.io.excel_tester import _build_zigzag_trigger_events_df
+        diag = self._make_minimal_diag()
+        df = _build_zigzag_trigger_events_df(diag)
+        assert len(df) == 1
+        row = df.iloc[0]
+        assert row["ZigZag Mode"] == "A"
+        assert int(row["Immediate Candidate Entry Used"]) == 0
+        assert row["Immediate Candidate Entry Block Reason"] == "mode_not_c"
+        assert int(row["Candidate Age Bars"]) == 4
+        assert int(row["Candidate Leg Direction"]) == 1
+        assert int(row["Candidate Duration Gate Passed"]) == 1
+
+
+class TestV3ExportX3TriggerEventsReconstruction:
+    """X3: ZigZag_Trigger_Events reconstruction: only trigger_source != 'none' rows."""
+
+    def test_x3_reconstruction_uses_trigger_source_not_none(self):
+        """Only bars with trigger_source != 'none' produce event rows."""
+        from supertrend_optimizer.io.excel_tester import _build_zigzag_trigger_events_df
+
+        n = 10
+        trigger = np.full(n, "none", dtype=object)
+        trigger[2] = "candidate_threshold"
+        trigger[7] = "confirmed_median"
+        state = np.full(n, "OFF", dtype=object)
+        diag = {"trade_filter_trigger_source": trigger, "trade_filter_state": state}
+        df = _build_zigzag_trigger_events_df(diag)
+        assert len(df) == 2
+        assert list(df["Trigger Bar"]) == [2, 7]
+        assert list(df["Trigger Source"]) == ["candidate_threshold", "confirmed_median"]
+
+    def test_x3_mode_c_immediate_entry_triggered_lifecycle_start_true(self):
+        """Mode C same-bar OFF→FREEZE: state at trigger bar = ST_ACTIVE_FREEZE
+        → Triggered Lifecycle Start = True (no WAIT transition scanned)."""
+        from supertrend_optimizer.io.excel_tester import _build_zigzag_trigger_events_df
+
+        n = 8
+        trigger = np.full(n, "none", dtype=object)
+        trigger[3] = "candidate_threshold"  # Mode C immediate entry
+        state = np.full(n, "OFF", dtype=object)
+        state[3] = "ST_ACTIVE_FREEZE"  # immediate: no WAIT
+        state[4] = "ST_ACTIVE_MONITORING"
+        diag = {"trade_filter_trigger_source": trigger, "trade_filter_state": state}
+        df = _build_zigzag_trigger_events_df(diag)
+        assert len(df) == 1
+        assert bool(df.iloc[0]["Triggered Lifecycle Start"]) is True
+
+    def test_x3_mode_ab_triggered_lifecycle_start_true_after_wait(self):
+        """Mode A/B: state at trigger bar = WAIT, FREEZE appears at t+1."""
+        from supertrend_optimizer.io.excel_tester import _build_zigzag_trigger_events_df
+
+        n = 8
+        trigger = np.full(n, "none", dtype=object)
+        trigger[2] = "candidate_threshold"
+        state = np.full(n, "OFF", dtype=object)
+        state[2] = "WAIT_FIRST_ST_FLIP"
+        state[3] = "ST_ACTIVE_FREEZE"
+        diag = {"trade_filter_trigger_source": trigger, "trade_filter_state": state}
+        df = _build_zigzag_trigger_events_df(diag)
+        assert bool(df.iloc[0]["Triggered Lifecycle Start"]) is True
+
+    def test_x3_cb_b_rescue_wait_start_treated_same_as_ab(self):
+        """C+B B-rescue starts WAIT (not immediate FREEZE) → same as A/B scan."""
+        from supertrend_optimizer.io.excel_tester import _build_zigzag_trigger_events_df
+
+        n = 8
+        trigger = np.full(n, "none", dtype=object)
+        trigger[4] = "confirmed_median"  # B-rescue: enters WAIT
+        state = np.full(n, "OFF", dtype=object)
+        state[4] = "WAIT_FIRST_ST_FLIP"
+        state[5] = "ST_ACTIVE_FREEZE"
+        diag = {"trade_filter_trigger_source": trigger, "trade_filter_state": state}
+        df = _build_zigzag_trigger_events_df(diag)
+        assert bool(df.iloc[0]["Triggered Lifecycle Start"]) is True
+
+    def test_x3_wait_to_monitoring_direct_freeze_confirmed_legs_zero(self):
+        """WAIT→ST_ACTIVE_MONITORING (freeze_confirmed_legs=0, no FREEZE step):
+        Triggered Lifecycle Start must be True, not False."""
+        from supertrend_optimizer.io.excel_tester import _build_zigzag_trigger_events_df
+
+        n = 8
+        trigger = np.full(n, "none", dtype=object)
+        trigger[2] = "candidate_threshold"
+        state = np.full(n, "OFF", dtype=object)
+        state[2] = "WAIT_FIRST_ST_FLIP"
+        # freeze_confirmed_legs=0: WAIT→MONITORING directly, no FREEZE step
+        state[3] = "ST_ACTIVE_MONITORING"
+        state[4] = "ST_ACTIVE_MONITORING"
+        diag = {"trade_filter_trigger_source": trigger, "trade_filter_state": state}
+        df = _build_zigzag_trigger_events_df(diag)
+        assert len(df) == 1
+        assert bool(df.iloc[0]["Triggered Lifecycle Start"]) is True
+
+
+class TestV3ExportX4FiltersSummaryParams:
+    """X4: filters_summary params section includes new ZigZag Mode and gate fields."""
+
+    def _make_period_result(
+        self,
+        label: str,
+        zigzag_mode: str = "A",
+        gate_enabled: bool = False,
+        gate_max_bars: int = -1,
+        imm_count: int = 0,
+        imm_blocked: int = 0,
+    ):
+        from unittest.mock import MagicMock
+        pr = MagicMock()
+        pr.period_label = label
+        pr.filter_diagnostics_summary = {
+            "diagnostics_available": True,
+            "zigzag_mode": zigzag_mode,
+            "candidate_duration_gate_enabled": gate_enabled,
+            "candidate_duration_max_bars": gate_max_bars,
+            "immediate_entries_count": imm_count,
+            "immediate_entries_blocked_count": imm_blocked,
+            "lifecycle_starts_count": 0,
+            "median_stop_triggered_count": 0,
+            "n_bars_in_off": 10,
+            "n_bars_in_wait_first_st_flip": 2,
+            "n_bars_in_freeze": 3,
+            "n_bars_in_monitoring": 4,
+            "n_bars_in_stopping": 1,
+        }
+        return pr
+
+    def test_x4_params_contains_zigzag_mode(self):
+        from supertrend_optimizer.io.excel_tester import _build_filters_summary_df
+
+        pr = self._make_period_result("OOS", zigzag_mode="C+B")
+        result = _build_filters_summary_df([pr])
+        assert result is not None
+        params_df, _ = result
+        params_dict = dict(zip(params_df["Parameter"], params_df["Value"]))
+        assert params_dict.get("ZigZag Mode") == "C+B"
+
+    def test_x4_params_contains_gate_enabled(self):
+        from supertrend_optimizer.io.excel_tester import _build_filters_summary_df
+
+        pr = self._make_period_result("OOS", gate_enabled=True, gate_max_bars=5)
+        result = _build_filters_summary_df([pr])
+        assert result is not None
+        params_df, _ = result
+        params_dict = dict(zip(params_df["Parameter"], params_df["Value"]))
+        assert params_dict.get("Candidate Duration Gate Enabled") is True
+        assert params_dict.get("Candidate Duration Max Bars") == 5
+
+    def test_x4_params_gate_disabled_shows_false_and_minus_one(self):
+        from supertrend_optimizer.io.excel_tester import _build_filters_summary_df
+
+        pr = self._make_period_result("OOS", gate_enabled=False, gate_max_bars=-1)
+        result = _build_filters_summary_df([pr])
+        assert result is not None
+        params_df, _ = result
+        params_dict = dict(zip(params_df["Parameter"], params_df["Value"]))
+        assert params_dict.get("Candidate Duration Gate Enabled") is False
+        assert params_dict.get("Candidate Duration Max Bars") == -1
+
+
+class TestV3ExportX5FiltersSummaryPeriodCounts:
+    """X5: filters_summary period section includes immediate entries counts."""
+
+    def _make_period_result(self, label: str, imm_count: int, imm_blocked: int):
+        from unittest.mock import MagicMock
+        pr = MagicMock()
+        pr.period_label = label
+        pr.filter_diagnostics_summary = {
+            "diagnostics_available": True,
+            "zigzag_mode": "C",
+            "candidate_duration_gate_enabled": False,
+            "candidate_duration_max_bars": -1,
+            "immediate_entries_count": imm_count,
+            "immediate_entries_blocked_count": imm_blocked,
+            "lifecycle_starts_count": 1,
+            "median_stop_triggered_count": 0,
+            "n_bars_in_off": 5,
+            "n_bars_in_wait_first_st_flip": 0,
+            "n_bars_in_freeze": 2,
+            "n_bars_in_monitoring": 2,
+            "n_bars_in_stopping": 1,
+        }
+        return pr
+
+    def test_x5_immediate_entries_count_column_present(self):
+        from supertrend_optimizer.io.excel_tester import _build_filters_summary_df
+
+        pr = self._make_period_result("OOS", imm_count=3, imm_blocked=1)
+        result = _build_filters_summary_df([pr])
+        assert result is not None
+        _, period_df = result
+        assert "Immediate Entries Count" in period_df.columns
+        assert "Immediate Entries Blocked Count" in period_df.columns
+
+    def test_x5_immediate_entries_count_correct_value(self):
+        from supertrend_optimizer.io.excel_tester import _build_filters_summary_df
+
+        pr = self._make_period_result("OOS", imm_count=7, imm_blocked=2)
+        result = _build_filters_summary_df([pr])
+        assert result is not None
+        _, period_df = result
+        assert period_df.iloc[0]["Immediate Entries Count"] == 7
+        assert period_df.iloc[0]["Immediate Entries Blocked Count"] == 2
+
+    def test_x5_multiple_periods_each_have_own_counts(self):
+        from supertrend_optimizer.io.excel_tester import _build_filters_summary_df
+
+        prs = [
+            self._make_period_result("Train", imm_count=4, imm_blocked=1),
+            self._make_period_result("OOS",   imm_count=2, imm_blocked=0),
+        ]
+        result = _build_filters_summary_df(prs)
+        assert result is not None
+        _, period_df = result
+        assert period_df.iloc[0]["Immediate Entries Count"] == 4
+        assert period_df.iloc[1]["Immediate Entries Count"] == 2
+
+
+class TestV3ExportX6ImmediateBlockedFormula:
+    """X6: Blocked count uses only duration_gate_failed / unknown_candidate_direction /
+    trade_mode_disallows_direction.  Other reasons not counted."""
+
+    def _make_diag(self, reasons: list) -> Dict[str, np.ndarray]:
+        n = len(reasons)
+        used = np.array(
+            [1 if r == "none" else 0 for r in reasons], dtype=np.int8
+        )
+        return {
+            "immediate_candidate_entry_used":        used,
+            "immediate_candidate_entry_block_reason": np.array(reasons, dtype=object),
+        }
+
+    def test_x6_duration_gate_failed_counted(self):
+        from wf_grid.wf.step_executor import _compute_filter_diagnostics_summary
+
+        diag = self._make_diag(["none", "duration_gate_failed", "duration_gate_failed"])
+        s = _compute_filter_diagnostics_summary(diag)
+        assert s["immediate_entries_count"] == 1
+        assert s["immediate_entries_blocked_count"] == 2
+
+    def test_x6_unknown_direction_counted(self):
+        from wf_grid.wf.step_executor import _compute_filter_diagnostics_summary
+
+        diag = self._make_diag(["unknown_candidate_direction", "none"])
+        s = _compute_filter_diagnostics_summary(diag)
+        assert s["immediate_entries_count"] == 1
+        assert s["immediate_entries_blocked_count"] == 1
+
+    def test_x6_trade_mode_disallows_counted(self):
+        from wf_grid.wf.step_executor import _compute_filter_diagnostics_summary
+
+        diag = self._make_diag(["trade_mode_disallows_direction"])
+        s = _compute_filter_diagnostics_summary(diag)
+        assert s["immediate_entries_blocked_count"] == 1
+
+    def test_x6_height_gate_failed_not_counted(self):
+        from wf_grid.wf.step_executor import _compute_filter_diagnostics_summary
+
+        diag = self._make_diag(["height_gate_failed", "mode_not_c", "state_not_off",
+                                 "daily_reset", "filter_off", "none"])
+        s = _compute_filter_diagnostics_summary(diag)
+        assert s["immediate_entries_blocked_count"] == 0
+
+    def test_x6_mixed_blocked_counts_only_three_reasons(self):
+        from wf_grid.wf.step_executor import _compute_filter_diagnostics_summary
+
+        reasons = [
+            "none",                          # used=1 → not blocked
+            "duration_gate_failed",          # counted
+            "unknown_candidate_direction",   # counted
+            "trade_mode_disallows_direction",# counted
+            "height_gate_failed",            # NOT counted
+            "mode_not_c",                    # NOT counted
+            "daily_reset",                   # NOT counted
+        ]
+        diag = self._make_diag(reasons)
+        s = _compute_filter_diagnostics_summary(diag)
+        assert s["immediate_entries_count"] == 1
+        assert s["immediate_entries_blocked_count"] == 3
+
+
+class TestV3ExportX7DisabledPath:
+    """X7: Disabled filter path: _compute_filter_diagnostics_summary returns None,
+    filters_summary not written, trigger events empty, no new arrays."""
+
+    def test_x7_disabled_summary_is_none(self):
+        from wf_grid.wf.step_executor import _compute_filter_diagnostics_summary
+
+        assert _compute_filter_diagnostics_summary(None) is None
+
+    def test_x7_disabled_trigger_events_empty_dataframe(self):
+        from supertrend_optimizer.io.excel_tester import (
+            _build_zigzag_trigger_events_df,
+            _TRIGGER_EVENTS_COLUMNS,
+        )
+        df = _build_zigzag_trigger_events_df(None)
+        assert len(df) == 0
+        # Must still have all columns (for consistent header row when writing)
+        for col in _TRIGGER_EVENTS_COLUMNS:
+            assert col in df.columns
+
+    def test_x7_disabled_filters_summary_returns_none(self):
+        from unittest.mock import MagicMock
+        from supertrend_optimizer.io.excel_tester import _build_filters_summary_df
+
+        pr = MagicMock()
+        pr.period_label = "OOS"
+        pr.filter_diagnostics_summary = None
+        result = _build_filters_summary_df([pr])
+        assert result is None
+
+    def test_x7_disabled_filter_diagnostics_100_skipped(self):
+        """_write_filter_diagnostics_100_sheet writes nothing when diagnostics=None."""
+        import io
+        import openpyxl
+        from supertrend_optimizer.io.excel_tester import _write_filter_diagnostics_100_sheet
+
+        buf = io.BytesIO()
+        # Need at least one pre-existing sheet; otherwise openpyxl raises IndexError.
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            pd.DataFrame({"x": [1]}).to_excel(writer, sheet_name="sentinel", index=False)
+            _write_filter_diagnostics_100_sheet(writer, None)
+        buf.seek(0)
+        wb = openpyxl.load_workbook(buf)
+        assert "FilterDiagnostics_100" not in wb.sheetnames
+
+    def test_x7_immediate_entries_count_absent_from_disabled_summary(self):
+        from wf_grid.wf.step_executor import _compute_filter_diagnostics_summary
+
+        # Enabled path with no immediate arrays → keys absent (not 0)
+        diag: Dict[str, Any] = {
+            "trade_filter_state": np.full(5, "OFF", dtype=object),
+        }
+        s = _compute_filter_diagnostics_summary(diag)
+        assert s is not None
+        # When immediate arrays are absent, keys should not be present
+        assert "immediate_entries_count" not in s
+        assert "immediate_entries_blocked_count" not in s
+

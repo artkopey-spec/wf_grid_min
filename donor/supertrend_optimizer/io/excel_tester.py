@@ -183,6 +183,7 @@ CYCLE_SHEET_COLUMNS: Tuple[str, ...] = (
     "Макс. высота ноги",
     "Доля ног выше порога, %",
     "Сделок в цикле",
+    "Фин результат цикла, %",
     "% сделок с положительным фин результатом в цикле",
 )
 
@@ -385,6 +386,28 @@ def _cycle_positive_trades_pct(
     return positive / len(cycle_trades) * 100.0
 
 
+def _cycle_final_result_pct(
+    trades_df: Optional[pd.DataFrame],
+    cycle_trades: List[Any],
+) -> float:
+    if not cycle_trades:
+        return float("nan")
+    if trades_df is None or "net_pnl_pct" not in trades_df.columns:
+        return float("nan")
+
+    total = 0.0
+    for row in cycle_trades:
+        pnl = getattr(row, "net_pnl_pct", np.nan)
+        try:
+            pnl_f = float(pnl)
+        except (TypeError, ValueError):
+            return float("nan")
+        if not np.isfinite(pnl_f):
+            return float("nan")
+        total += pnl_f
+    return total
+
+
 def _build_cycle_sheet_df(
     filter_diagnostics: Dict[str, np.ndarray],
     df: Optional[pd.DataFrame],
@@ -556,6 +579,9 @@ def _build_cycle_sheet_df(
             "Макс. высота ноги": max_leg_height,
             "Доля ног выше порога, %": share_above_threshold,
             "Сделок в цикле": len(cycle_trades),
+            "Фин результат цикла, %": (
+                _cycle_final_result_pct(trades_df, cycle_trades)
+            ),
             "% сделок с положительным фин результатом в цикле": (
                 _cycle_positive_trades_pct(trades_df, cycle_trades)
             ),

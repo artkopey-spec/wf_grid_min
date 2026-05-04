@@ -39,6 +39,7 @@ def _expected_cycle_columns() -> list[str]:
         "Макс. высота ноги",
         "Доля ног выше порога, %",
         "Сделок в цикле",
+        "Фин результат цикла, %",
         "% сделок с положительным фин результатом в цикле",
     ]
 
@@ -235,7 +236,7 @@ def test_cycle_sheet_constants_contract():
 
     assert excel_tester.CYCLE_SHEET_NAME == "cycle"
     assert list(excel_tester.CYCLE_SHEET_COLUMNS) == _expected_cycle_columns()
-    assert len(excel_tester.CYCLE_SHEET_COLUMNS) == 22
+    assert len(excel_tester.CYCLE_SHEET_COLUMNS) == 23
 
 
 def test_cycle_float_scalar_materialize_contract():
@@ -312,7 +313,7 @@ def test_headers_contract_and_empty_builder_output(monkeypatch):
     excel_tester = _excel_tester_module()
     assert excel_tester.CYCLE_SHEET_NAME == "cycle"
     assert list(excel_tester.CYCLE_SHEET_COLUMNS) == _expected_cycle_columns()
-    assert len(excel_tester.CYCLE_SHEET_COLUMNS) == 22
+    assert len(excel_tester.CYCLE_SHEET_COLUMNS) == 23
 
     result = excel_tester._build_cycle_sheet_df({}, _df(3))
     assert list(result.columns) == _expected_cycle_columns()
@@ -468,11 +469,60 @@ def test_positive_trades_percent_scale_and_non_finite_guard(monkeypatch):
     )
     trades = pd.DataFrame({"entry_index": [2, 3, 4], "net_pnl_pct": [2.5, 0.0, -1.0]})
     result = excel_tester._build_cycle_sheet_df(diag, _df(5), trades)
+    assert result.iloc[0]["Фин результат цикла, %"] == pytest.approx(1.5)
     assert result.iloc[0]["% сделок с положительным фин результатом в цикле"] == pytest.approx(100.0 / 3.0)
 
     bad_trades = pd.DataFrame({"entry_index": [2, 3], "net_pnl_pct": [1.0, math.inf]})
     bad = excel_tester._build_cycle_sheet_df(diag, _df(5), bad_trades)
+    assert pd.isna(bad.iloc[0]["Фин результат цикла, %"])
     assert pd.isna(bad.iloc[0]["% сделок с положительным фин результатом в цикле"])
+
+
+def test_cycle_final_result_is_nan_when_cycle_has_no_trades(monkeypatch):
+    excel_tester = _excel_tester_module()
+    _patch_no_legs(monkeypatch, excel_tester)
+    diag = _diagnostics(
+        ["OFF", "ST_ACTIVE_FREEZE", "ST_ACTIVE_MONITORING", "OFF"],
+        trigger_sources=["none", "candidate_threshold", "none", "none"],
+        candidate_dirs=[0, 1, 0, 0],
+    )
+
+    result = excel_tester._build_cycle_sheet_df(diag, _df(4))
+
+    assert result.iloc[0]["Сделок в цикле"] == 0
+    assert pd.isna(result.iloc[0]["Фин результат цикла, %"])
+
+
+def test_cycle_final_result_nan_pnl_is_guarded(monkeypatch):
+    excel_tester = _excel_tester_module()
+    _patch_no_legs(monkeypatch, excel_tester)
+    diag = _diagnostics(
+        ["OFF", "ST_ACTIVE_FREEZE", "ST_ACTIVE_MONITORING", "OFF"],
+        trigger_sources=["none", "candidate_threshold", "none", "none"],
+        candidate_dirs=[0, 1, 0, 0],
+    )
+    trades = pd.DataFrame({"entry_index": [2], "net_pnl_pct": [math.nan]})
+
+    result = excel_tester._build_cycle_sheet_df(diag, _df(4), trades)
+
+    assert result.iloc[0]["Сделок в цикле"] == 1
+    assert pd.isna(result.iloc[0]["Фин результат цикла, %"])
+
+
+def test_cycle_final_result_missing_pnl_column_is_nan(monkeypatch):
+    excel_tester = _excel_tester_module()
+    _patch_no_legs(monkeypatch, excel_tester)
+    diag = _diagnostics(
+        ["OFF", "ST_ACTIVE_FREEZE", "ST_ACTIVE_MONITORING", "OFF"],
+        trigger_sources=["none", "candidate_threshold", "none", "none"],
+        candidate_dirs=[0, 1, 0, 0],
+    )
+    trades = pd.DataFrame({"entry_index": [2]})
+
+    result = excel_tester._build_cycle_sheet_df(diag, _df(4), trades)
+
+    assert result.iloc[0]["Сделок в цикле"] == 1
+    assert pd.isna(result.iloc[0]["Фин результат цикла, %"])
 
 
 def test_acceptance_active_starts_at_zero_and_adjacent_cycles(monkeypatch):
@@ -728,7 +778,7 @@ def test_acceptance_enabled_export_without_daily_reset_event_writes_empty_cycle(
     ws = openpyxl.load_workbook(output)["cycle"]
     assert [cell.value for cell in ws[1]] == _expected_cycle_columns()
     assert ws.max_row == 1
-    assert ws.auto_filter.ref == "A1:V1"
+    assert ws.auto_filter.ref == "A1:W1"
 
 
 def test_acceptance_enabled_filter_diagnostics_none_does_not_call_builder(monkeypatch, tmp_path):
@@ -772,7 +822,7 @@ def test_write_cycle_sheet_autofilter_and_datetime_format(tmp_path):
     wb = openpyxl.load_workbook(path)
     ws = wb["cycle"]
     assert [cell.value for cell in ws[1]] == list(excel_tester.CYCLE_SHEET_COLUMNS)
-    assert ws.auto_filter.ref == "A1:V1"
+    assert ws.auto_filter.ref == "A1:W1"
     assert ws["A2"].number_format == "YYYY-MM-DD HH:MM:SS"
     assert ws["B2"].number_format == "YYYY-MM-DD HH:MM:SS"
 
@@ -789,7 +839,7 @@ def test_write_empty_cycle_sheet_keeps_autofilter(tmp_path):
         )
 
     wb = openpyxl.load_workbook(path)
-    assert wb["cycle"].auto_filter.ref == "A1:V1"
+    assert wb["cycle"].auto_filter.ref == "A1:W1"
 
 
 def test_enabled_export_writes_cycle_headers_and_autofilter(monkeypatch, tmp_path):
@@ -840,6 +890,39 @@ def test_enabled_export_writes_cycle_when_diagnostic_flags_off(monkeypatch, tmp_
     assert "FilterDiagnostics_100" not in wb.sheetnames
     assert "ZigZag_Trigger_Events" not in wb.sheetnames
     assert "cycle" in wb.sheetnames
+
+
+def test_enabled_export_writes_cycle_final_result_numeric_to_xlsx(tmp_path):
+    excel_tester = _excel_tester_module()
+    import openpyxl
+
+    diag = _diagnostics(
+        ["OFF", "ST_ACTIVE_FREEZE", "ST_ACTIVE_MONITORING", "ST_ACTIVE_MONITORING", "OFF"],
+        trigger_sources=["none", "candidate_threshold", "none", "none", "none"],
+        candidate_dirs=[0, 1, 0, 0, 0],
+        local_window=1,
+    )
+    trades = pd.DataFrame(
+        {
+            "entry_index": [2, 3, 5],
+            "net_pnl_pct": [0.5, -1.5, 99.0],
+        }
+    )
+
+    output = excel_tester.export_tester_results(
+        [_period_result(diag, trades)],
+        str(tmp_path / "cycle_final_result.xlsx"),
+        trade_filter_config=_enabled_cfg(export_state_columns=False, export_trigger_columns=False),
+        df=_df(5),
+    )
+    wb = openpyxl.load_workbook(output, data_only=True)
+    ws = wb["cycle"]
+    headers = [cell.value for cell in ws[1]]
+    col_idx = headers.index("Фин результат цикла, %") + 1
+    value = ws.cell(row=2, column=col_idx).value
+
+    assert isinstance(value, (int, float))
+    assert value == pytest.approx(-1.0)
 
 
 def test_disabled_export_does_not_write_cycle_or_call_builder(monkeypatch, tmp_path):

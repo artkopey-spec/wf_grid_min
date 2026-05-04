@@ -300,6 +300,7 @@ class TestDisabledLegacyGolden:
         assert "FilterDiagnostics_100" not in wb.sheetnames
         assert "ZigZag_Trigger_Events" not in wb.sheetnames
         assert "filters_summary" not in wb.sheetnames
+        assert "cycle" not in wb.sheetnames
 
     def test_disabled_no_filter_columns_signals(self) -> None:
         df = _make_synthetic_ohlc()

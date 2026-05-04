@@ -2,20 +2,20 @@
 # SUPER TREND PARAMETERS
 # =========================
 supertrend:
-  atr_period:        37     # длина ATR; больше = плавнее, меньше = чувствительнее
-  multiplier:        6.0    # ширина каналов; меньше = агрессивнее сигналы
+  atr_period:        50     # длина ATR; больше = плавнее, меньше = чувствительнее
+  multiplier:        3.0    # ширина каналов; меньше = агрессивнее сигналы
 
 
 # =========================
 # TRADING MODE
 # =========================
-trade_mode:          revers  #жим: long | short | revers (long+short)
+trade_mode:          revers  # режим: long | short | revers (long+short)
 
 
 # =========================
 # COSTS
 # =========================
-commission:          0.0003    # комиссия за операцию (0.0003 = 0.03%)
+commission:          0.0000    # комиссия за операцию (0.0003 = 0.03%)
 
 
 # =========================
@@ -66,8 +66,8 @@ export:
 # TRADE FILTER (Phase 2, ZigZag SuperTrend mode)
 # =========================
 # Документирует контракт фильтра. Отсутствие блока ИЛИ enabled: false =>
-# baseline-bit-identical поведение (Appendix A v1.1 §11.1). Раскомментируйте и
-# выставьте enabled: true ТОЛЬКО при segmentation.mode: legacy
+# baseline-bit-identical поведение (Appendix A v1.1 §11.1).
+# Включённый фильтр (enabled: true) поддерживается только при segmentation.mode: legacy
 # (Phase 2 v0.4 не поддерживает enabled-фильтр в equal_blocks — конфигурация
 # отвергается до backtest, см. Phase 2 plan §5.5).
 #
@@ -80,17 +80,17 @@ trade_filter:
   zigzag:
     global_stats_source: full_dataset      # only full_dataset supported in v1
     leg_height_mode: pct                   # fractions of price (NOT 0–100)
-    reversal_threshold: 0.001              # 0.5% of price; required when enabled
+    reversal_threshold: 0.001              # 0.1% доли цены; required when enabled
     candidate_trigger_threshold: auto      # numeric fraction (e.g. 0.012) | auto
     candidate_trigger_quantile: 0.80       # required only when threshold is auto
     global_median: auto
     local_window: 5                        # rolling N for local_median_N
 
-  triggers:
-    candidate_threshold:
-      enabled: true                        # contour A — early candidate trigger
-    confirmed_median:
-      enabled: false                        # contour B — confirmed median trigger
+    daily_reset: true                      # reset ZigZag/FSM on calendar day boundary
+    mode: "C"                                # v3 mode: A | B | C | A+B | C+B
+    candidate_duration_gate:
+      enabled: false
+      #max_bars: 24
 
   lifecycle:
     freeze_confirmed_legs: 5               # # confirmed legs after lifecycle start

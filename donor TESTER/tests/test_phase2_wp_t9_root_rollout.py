@@ -5,7 +5,8 @@ These checks pin the production-facing root artifacts that sit outside the
 canonical ``donor TESTER`` implementation:
 
 * repo-root ``run_batch_tester.py`` remains a compatibility wrapper;
-* repo-root ``config_tester.yaml`` keeps a disabled Phase 2 template;
+* repo-root ``config_tester.yaml`` loads via ``load_tester_config`` (ZigZag filter
+  may be enabled when ``segmentation.mode: legacy`` — see file comments);
 * the user-facing filter document exists and points to the spec.
 """
 
@@ -47,16 +48,18 @@ def test_root_entrypoint_help_smoke() -> None:
     assert "--config" in result.stdout
 
 
-def test_root_config_template_is_disabled_and_baseline_safe() -> None:
+def test_root_config_loads_with_legacy_segmentation_and_zigzag_filter() -> None:
     text = ROOT_CONFIG.read_text(encoding="utf-8")
 
-    assert "# trade_filter:" in text
-    assert "#   enabled: false" in text
     assert "segmentation.mode: legacy" in text
+    assert "trade_filter:" in text
+    assert "type: zigzag_st_mode" in text
 
     cfg = load_tester_config(str(ROOT_CONFIG))
     tf_cfg = cfg.get("trade_filter")
-    assert tf_cfg is None or tf_cfg.enabled is False
+    assert tf_cfg is not None
+    assert tf_cfg.enabled is True
+    assert tf_cfg.type == "zigzag_st_mode"
 
 
 def test_user_facing_filter_doc_deliverable_exists() -> None:

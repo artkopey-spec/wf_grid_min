@@ -1,4 +1,4 @@
-schema_version: 1                      # Версия схемы конфига; обязательна для strict-validator (Этап 2)
+﻿schema_version: 1                      # Версия схемы конфига; обязательна для strict-validator (Этап 2)
 
 data:                                  # Блок данных и параметров годовой нормализации
   file_path: "data.csv"                # Путь к CSV; от каталога, из которого запущен run.py
@@ -87,9 +87,10 @@ trade_filter:                          # Блок WP2: фильтр сделок
     global_median: "auto"
     local_window: 5                      # rolling N для local_median_N
     daily_reset: true                    # Календарный reset ZigZag/FSM при смене даты
-    mode: "B"
+    mode: "C+B"
     candidate_duration_gate:
-      enabled: false
+      enabled: true
+      max_bars: 24
 
   lifecycle:
     freeze_confirmed_legs: 5             # Подтверждённых ног после старта lifecycle

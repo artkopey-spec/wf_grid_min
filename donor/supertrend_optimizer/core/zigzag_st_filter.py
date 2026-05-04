@@ -66,6 +66,7 @@ __all__ = [
     "ZigZagFSMState",
     "ZigZagSTFilterResult",
     "detect_confirmed_legs_close_only",
+    "compute_confirmed_legs_reset_aware",
     "build_zigzag_global_stats",
     "compute_zigzag_per_bar",
     "detect_st_flip",
@@ -618,6 +619,24 @@ def detect_confirmed_legs_close_only(
     if arr is None:
         return []
     return list(_run_close_only_zigzag_pass(arr, r).legs)
+
+
+def compute_confirmed_legs_reset_aware(
+    close: np.ndarray,
+    reversal_threshold: float,
+    *,
+    daily_reset_event: np.ndarray,
+) -> List[ConfirmedLeg]:
+    """Return reset-aware confirmed ZigZag legs from the shared close-only pass."""
+    arr, r = _validate_close_and_threshold(
+        close, reversal_threshold, fn_name="compute_confirmed_legs_reset_aware"
+    )
+    if arr is None:
+        return []
+    pass_result = _run_close_only_zigzag_pass(
+        arr, r, daily_reset_event=daily_reset_event
+    )
+    return list(pass_result.legs)
 
 
 # ---------------------------------------------------------------------------

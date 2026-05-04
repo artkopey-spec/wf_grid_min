@@ -17,6 +17,10 @@ import pandas as pd
 from supertrend_optimizer.testing.runner import PeriodResult, SegmentResult
 from supertrend_optimizer.utils.constants import INVALID_METRIC_VALUE
 from supertrend_optimizer.io.excel_format_helpers import format_excel_export_df
+from supertrend_optimizer.core.zigzag_st_filter import (
+    compute_confirmed_legs_reset_aware,
+    compute_zigzag_per_bar,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +159,33 @@ _TRIGGER_EVENTS_COLUMNS = (
     "Candidate Duration Gate Passed",
 )
 
+# Cycle sheet contract (plan_xlsx_cycle_sheet_implementation §4, §11).
+CYCLE_SHEET_NAME = "cycle"
+CYCLE_SHEET_COLUMNS: Tuple[str, ...] = (
+    "Начало цикла",
+    "Конец цикла",
+    "Направление цикла",
+    "Баров в цикле",
+    "Ног ZigZag в цикле",
+    "Медиана ног",
+    "Ног выше порога триггера кандидата",
+    "Размер цикла, %",
+    "ID цикла",
+    "Start bar index",
+    "End bar index",
+    "Цена начала",
+    "Цена конца",
+    "High цикла",
+    "Low цикла",
+    "Макс. движение по циклу, %",
+    "Макс. просадка внутри цикла, %",
+    "Причина завершения",
+    "Макс. высота ноги",
+    "Доля ног выше порога, %",
+    "Сделок в цикле",
+    "% сделок с положительным фин результатом в цикле",
+)
+
 # Legacy export: diagnostic sheet for very short trades (100% slice only)
 FALSE_START_SHEET_NAME = "false start"
 
@@ -212,6 +243,349 @@ def _excel_safe_datetime_value(value: Any) -> Any:
     if isinstance(value, datetime) and value.tzinfo is not None:
         return value.replace(tzinfo=None)
     return value
+
+
+def _materialize_cycle_float_scalar(values: Any, n: int) -> Optional[float]:
+    """Materialize a uniform finite scalar from the aligned diagnostics prefix."""
+    if values is None or n <= 0:
+        return None
+    arr = np.asarray(values, dtype=object)
+    if arr.ndim == 0:
+        arr = arr.reshape(1)
+
+    finite_values: List[float] = []
+    for value in arr[:n]:
+        if isinstance(value, (bool, np.bool_)):
+            return None
+        try:
+            value_f = float(value)
+        except (TypeError, ValueError):
+            if pd.isna(value):
+                continue
+            return None
+        if np.isfinite(value_f):
+            finite_values.append(value_f)
+
+    if not finite_values:
+        return None
+    first = finite_values[0]
+    if any(value != first for value in finite_values):
+        return None
+    return float(first)
+
+
+def _materialize_cycle_candidate_threshold(values: Any, n: int) -> Optional[float]:
+    return _materialize_cycle_float_scalar(values, n)
+
+
+def _materialize_cycle_reversal_threshold(values: Any, n: int) -> Optional[float]:
+    scalar = _materialize_cycle_float_scalar(values, n)
+    if scalar is None or scalar <= 0.0 or scalar >= 1.0:
+        return None
+    return scalar
+
+
+def _materialize_cycle_local_window(values: Any, n: int) -> Optional[int]:
+    scalar = _materialize_cycle_float_scalar(values, n)
+    if scalar is None or not float(scalar).is_integer():
+        return None
+    window = int(scalar)
+    if window < 1:
+        return None
+    return window
+
+
+def _cycle_direction_symbol(direction: Any) -> str:
+    try:
+        direction_i = int(direction)
+    except (TypeError, ValueError):
+        return ""
+    if direction_i > 0:
+        return "+"
+    if direction_i < 0:
+        return "-"
+    return ""
+
+
+def _resolve_cycle_direction(
+    trigger_source: Any,
+    candidate_leg_direction: Any,
+    start_bar: int,
+    confirmed_legs: List[Any],
+) -> str:
+    source = str(trigger_source)
+    if source in ("candidate_threshold", "both"):
+        return _cycle_direction_symbol(candidate_leg_direction)
+    if source == "confirmed_median":
+        for leg in confirmed_legs:
+            if getattr(leg, "confirm_bar", None) == start_bar:
+                return _cycle_direction_symbol(getattr(leg, "direction", None))
+    return ""
+
+
+def _empty_cycle_sheet_df() -> pd.DataFrame:
+    return pd.DataFrame(columns=CYCLE_SHEET_COLUMNS)
+
+
+def _completed_cycle_segments(state_arr: np.ndarray) -> List[Tuple[int, int]]:
+    segments: List[Tuple[int, int]] = []
+    start: Optional[int] = None
+    for idx, state in enumerate(state_arr):
+        active = str(state) != "OFF"
+        if active and start is None:
+            start = idx
+        elif not active and start is not None:
+            segments.append((start, idx - 1))
+            start = None
+    return segments
+
+
+def _cycle_trades_for_segment(
+    trades_df: Optional[pd.DataFrame],
+    start_bar: int,
+    end_bar: int,
+) -> List[Any]:
+    if trades_df is None or len(trades_df) == 0 or "entry_index" not in trades_df.columns:
+        return []
+
+    rows: List[Any] = []
+    for row in trades_df.itertuples(index=False):
+        entry_index = getattr(row, "entry_index", np.nan)
+        if pd.isna(entry_index):
+            continue
+        try:
+            entry_signal_idx = max(int(entry_index) - 1, 0)
+        except (TypeError, ValueError):
+            continue
+        if start_bar <= entry_signal_idx <= end_bar:
+            rows.append(row)
+    return rows
+
+
+def _cycle_positive_trades_pct(
+    trades_df: Optional[pd.DataFrame],
+    cycle_trades: List[Any],
+) -> float:
+    if not cycle_trades:
+        return float("nan")
+    if trades_df is None or "net_pnl_pct" not in trades_df.columns:
+        return float("nan")
+
+    positive = 0
+    for row in cycle_trades:
+        pnl = getattr(row, "net_pnl_pct", np.nan)
+        try:
+            pnl_f = float(pnl)
+        except (TypeError, ValueError):
+            return float("nan")
+        if not np.isfinite(pnl_f):
+            return float("nan")
+        if pnl_f > 0.0:
+            positive += 1
+    return positive / len(cycle_trades) * 100.0
+
+
+def _build_cycle_sheet_df(
+    filter_diagnostics: Dict[str, np.ndarray],
+    df: Optional[pd.DataFrame],
+    trades_df: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
+    result_empty = _empty_cycle_sheet_df()
+    required_keys = (
+        "trade_filter_state",
+        "trade_filter_trigger_source",
+        "candidate_trigger_threshold",
+        "zigzag_reversal_threshold",
+        "local_window",
+        "daily_reset_event",
+        "candidate_leg_direction",
+    )
+    if not isinstance(filter_diagnostics, dict):
+        return result_empty
+    if df is None or not {"close", "high", "low"}.issubset(df.columns):
+        return result_empty
+    if any(key not in filter_diagnostics for key in required_keys):
+        return result_empty
+
+    try:
+        close = np.asarray(df["close"].to_numpy(), dtype=np.float64)
+        high = np.asarray(df["high"].to_numpy(), dtype=np.float64)
+        low = np.asarray(df["low"].to_numpy(), dtype=np.float64)
+    except (TypeError, ValueError):
+        return result_empty
+
+    arrays: Dict[str, np.ndarray] = {
+        key: np.asarray(filter_diagnostics[key]) for key in required_keys
+    }
+    n = min(
+        len(df),
+        len(arrays["trade_filter_state"]),
+        len(close),
+        len(high),
+        len(low),
+        len(arrays["trade_filter_trigger_source"]),
+        len(arrays["candidate_leg_direction"]),
+        len(arrays["candidate_trigger_threshold"]),
+        len(arrays["zigzag_reversal_threshold"]),
+        len(arrays["local_window"]),
+        len(arrays["daily_reset_event"]),
+    )
+    if n == 0:
+        return result_empty
+
+    close = close[:n]
+    high = high[:n]
+    low = low[:n]
+    state_arr = arrays["trade_filter_state"][:n]
+    trigger_source_arr = arrays["trade_filter_trigger_source"][:n]
+    candidate_dir_arr = arrays["candidate_leg_direction"][:n]
+    daily_reset_arr = arrays["daily_reset_event"][:n]
+
+    candidate_threshold = _materialize_cycle_candidate_threshold(
+        arrays["candidate_trigger_threshold"], n
+    )
+    reversal_threshold = _materialize_cycle_reversal_threshold(
+        arrays["zigzag_reversal_threshold"], n
+    )
+    if reversal_threshold is None:
+        return result_empty
+    local_window = _materialize_cycle_local_window(arrays["local_window"], n)
+    if local_window is None:
+        return result_empty
+
+    per_bar = compute_zigzag_per_bar(
+        close,
+        reversal_threshold,
+        local_window,
+        daily_reset_event=daily_reset_arr,
+    )
+    confirmed_legs = compute_confirmed_legs_reset_aware(
+        close,
+        reversal_threshold,
+        daily_reset_event=daily_reset_arr,
+    )
+
+    index = df.iloc[:n].index
+    rows: List[Dict[str, Any]] = []
+    for start_bar, end_bar in _completed_cycle_segments(state_arr):
+        interval = slice(start_bar, end_bar + 1)
+        direction = _resolve_cycle_direction(
+            trigger_source_arr[start_bar],
+            candidate_dir_arr[start_bar],
+            start_bar,
+            confirmed_legs,
+        )
+
+        leg_mask = np.asarray(per_bar.confirm_event[interval]) == 1
+        leg_heights = np.asarray(per_bar.last_confirmed_leg_height_pct[interval], dtype=np.float64)[leg_mask]
+        leg_heights = leg_heights[np.isfinite(leg_heights)]
+        legs_count = int(len(leg_heights))
+        if legs_count:
+            median_legs = float(np.median(leg_heights))
+            max_leg_height = float(np.max(leg_heights))
+        else:
+            median_legs = float("nan")
+            max_leg_height = float("nan")
+
+        if candidate_threshold is None:
+            legs_above_threshold: Any = float("nan")
+            share_above_threshold = float("nan")
+        else:
+            legs_above_threshold = int(np.sum(leg_heights > candidate_threshold))
+            share_above_threshold = (
+                float(legs_above_threshold) / legs_count * 100.0
+                if legs_count > 0 else float("nan")
+            )
+
+        interval_close = close[interval]
+        interval_high = high[interval]
+        interval_low = low[interval]
+        ohlc_valid = bool(
+            np.all(np.isfinite(interval_close))
+            and np.all(np.isfinite(interval_high))
+            and np.all(np.isfinite(interval_low))
+        )
+        close_start = float(close[start_bar]) if ohlc_valid else float("nan")
+        close_end = float(close[end_bar]) if ohlc_valid else float("nan")
+        high_cycle = float(np.max(interval_high)) if ohlc_valid else float("nan")
+        low_cycle = float(np.min(interval_low)) if ohlc_valid else float("nan")
+
+        if ohlc_valid and close_start > 0.0:
+            cycle_size_pct = (close_end - close_start) / close_start * 100.0
+            if direction == "+":
+                max_move_pct = (high_cycle - close_start) / close_start * 100.0
+                max_drawdown_pct = (close_start - low_cycle) / close_start * 100.0
+            elif direction == "-":
+                max_move_pct = (close_start - low_cycle) / close_start * 100.0
+                max_drawdown_pct = (high_cycle - close_start) / close_start * 100.0
+            else:
+                max_move_pct = float("nan")
+                max_drawdown_pct = float("nan")
+        else:
+            cycle_size_pct = float("nan")
+            max_move_pct = float("nan")
+            max_drawdown_pct = float("nan")
+
+        off_bar = end_bar + 1
+        end_reason = (
+            "daily_reset"
+            if off_bar < n and int(daily_reset_arr[off_bar]) == 1
+            else "FSM_OFF"
+        )
+        cycle_trades = _cycle_trades_for_segment(trades_df, start_bar, end_bar)
+
+        rows.append({
+            "Начало цикла": _excel_safe_datetime_value(index[start_bar]),
+            "Конец цикла": _excel_safe_datetime_value(index[end_bar]),
+            "Направление цикла": direction,
+            "Баров в цикле": end_bar - start_bar + 1,
+            "Ног ZigZag в цикле": legs_count,
+            "Медиана ног": median_legs,
+            "Ног выше порога триггера кандидата": legs_above_threshold,
+            "Размер цикла, %": cycle_size_pct,
+            "ID цикла": 0,
+            "Start bar index": start_bar,
+            "End bar index": end_bar,
+            "Цена начала": close_start,
+            "Цена конца": close_end,
+            "High цикла": high_cycle,
+            "Low цикла": low_cycle,
+            "Макс. движение по циклу, %": max_move_pct,
+            "Макс. просадка внутри цикла, %": max_drawdown_pct,
+            "Причина завершения": end_reason,
+            "Макс. высота ноги": max_leg_height,
+            "Доля ног выше порога, %": share_above_threshold,
+            "Сделок в цикле": len(cycle_trades),
+            "% сделок с положительным фин результатом в цикле": (
+                _cycle_positive_trades_pct(trades_df, cycle_trades)
+            ),
+        })
+
+    if not rows:
+        return result_empty
+
+    result = pd.DataFrame(rows, columns=CYCLE_SHEET_COLUMNS)
+    result = result.sort_values("Start bar index", kind="stable").reset_index(drop=True)
+    result["ID цикла"] = np.arange(1, len(result) + 1, dtype=np.int64)
+    return result.loc[:, list(CYCLE_SHEET_COLUMNS)]
+
+
+def _write_cycle_sheet(writer: pd.ExcelWriter, cycle_df: pd.DataFrame) -> None:
+    cycle_df.to_excel(writer, sheet_name=CYCLE_SHEET_NAME, index=False)
+
+    ws = writer.sheets[CYCLE_SHEET_NAME]
+    from openpyxl.utils import get_column_letter
+
+    n_cols = len(cycle_df.columns)
+    if n_cols > 0:
+        ws.auto_filter.ref = f"A1:{get_column_letter(n_cols)}1"
+
+    datetime_columns = {"Начало цикла", "Конец цикла"}
+    for col_idx, col_name in enumerate(cycle_df.columns, start=1):
+        if col_name not in datetime_columns:
+            continue
+        for row_idx in range(2, len(cycle_df) + 2):
+            ws.cell(row=row_idx, column=col_idx).number_format = "YYYY-MM-DD HH:MM:SS"
 
 
 def _price_matches_exec_entry(exec_price: Any, entry_price: Any, rtol: float = 1e-5, atol: float = 1e-8) -> bool:
@@ -1221,6 +1595,11 @@ def export_tester_results(
             # filters_summary (gated: export_state_columns=True)
             if export_state_cols:
                 _write_filters_summary_sheet(writer, period_results)
+
+            # cycle (independent of diagnostic export flags; requires enabled + diagnostics)
+            if fd_100 is not None:
+                cycle_df = _build_cycle_sheet_df(fd_100, df, trades_100_raw)
+                _write_cycle_sheet(writer, cycle_df)
 
     return output_path
 

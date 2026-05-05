@@ -1063,20 +1063,31 @@ class ZigZagFSMState(IntEnum):
 
     Numeric codes are stable internal identifiers — diagnostics expose the
     string names via :data:`_FSM_STATE_NAMES` for human-readable arrays.
+
+    ST_COUNTING_ZZ_LEGS (exit-off mode B only) replaces FREEZE/MONITORING for
+    leg-count stopping (docs/plan_exit_off_modes.txt).
     """
     OFF = 0
     WAIT_FIRST_ST_FLIP = 1
     ST_ACTIVE_FREEZE = 2
     ST_ACTIVE_MONITORING = 3
     ST_STOPPING = 4
+    ST_COUNTING_ZZ_LEGS = 5
 
+
+# Single source of truth: state name strings live in
+# ``supertrend_optimizer.core._fsm_state_names.FSM_STATE_NAMES`` (plan
+# §7.4 canonical order). Locally we build an ``enum_value -> name`` map
+# by iterating the shared tuple and looking up the enum via ``getattr``.
+# Any rename in the shared tuple is automatically picked up; a typo or
+# orphaned name fails fast with AttributeError at import time.
+from supertrend_optimizer.core._fsm_state_names import (  # noqa: E402
+    FSM_STATE_NAMES as _SHARED_FSM_STATE_NAMES,
+)
 
 _FSM_STATE_NAMES: Dict[int, str] = {
-    int(ZigZagFSMState.OFF): "OFF",
-    int(ZigZagFSMState.WAIT_FIRST_ST_FLIP): "WAIT_FIRST_ST_FLIP",
-    int(ZigZagFSMState.ST_ACTIVE_FREEZE): "ST_ACTIVE_FREEZE",
-    int(ZigZagFSMState.ST_ACTIVE_MONITORING): "ST_ACTIVE_MONITORING",
-    int(ZigZagFSMState.ST_STOPPING): "ST_STOPPING",
+    int(getattr(ZigZagFSMState, _name)): _name
+    for _name in _SHARED_FSM_STATE_NAMES
 }
 
 
@@ -1521,6 +1532,32 @@ def apply(
     a_enabled, b_enabled = _resolve_trigger_toggles(trade_filter_config)
     freeze_confirmed_legs = _resolve_freeze_confirmed_legs(trade_filter_config)
 
+    # Exit-off mode B: ZZ leg count stop (docs/plan_exit_off_modes.txt)
+    _lc_apply = getattr(trade_filter_config, "lifecycle", None)
+    is_exit_b = False
+    exit_off_zz_target = -1
+    exit_off_mode_echo = "exit A"
+    exit_off_zz_leg_echo = -1
+    if _lc_apply is not None:
+        _eom_v = getattr(_lc_apply, "exit_off_mode", "exit A")
+        if _eom_v == "exit B":
+            is_exit_b = True
+            _c_v = getattr(_lc_apply, "exit_off_zz_leg_count", None)
+            if isinstance(_c_v, int) and not isinstance(_c_v, bool) and _c_v >= 1:
+                exit_off_zz_target = int(_c_v)
+            exit_off_mode_echo = "exit B"
+            if isinstance(_c_v, int) and not isinstance(_c_v, bool):
+                exit_off_zz_leg_echo = int(_c_v)
+            else:
+                exit_off_zz_leg_echo = -1
+
+    if is_exit_b and exit_off_zz_target < 1:
+        raise ConfigError(
+            "apply(): exit_off_mode='exit B' requires exit_off_zz_leg_count >= 1; "
+            f"got {getattr(_lc_apply, 'exit_off_zz_leg_count', None)!r}. "
+            "Ensure trade filter config is validated before calling apply()."
+        )
+
     candidate_trigger_threshold = float(zigzag_global_stats.candidate_trigger_threshold)
     global_median = float(zigzag_global_stats.global_median)
     if not math.isfinite(candidate_trigger_threshold) or not math.isfinite(global_median):
@@ -1571,6 +1608,13 @@ def apply(
     stopping_started_at_arr = np.full(n, -1, dtype=np.int64)
     filter_allowed_entry_arr = np.zeros(n, dtype=np.int8)
     filter_block_reason_arr = np.full(n, "none", dtype=object)
+
+    exit_off_mode_arr = np.full(n, exit_off_mode_echo, dtype=object)
+    exit_off_zz_leg_count_arr = np.full(
+        n, np.int64(exit_off_zz_leg_echo), dtype=np.int64
+    )
+    zz_legs_since_lifecycle_start_arr = np.full(n, -1, dtype=np.int64)
+    zz_leg_stop_triggered_arr = np.zeros(n, dtype=np.int8)
 
     # ------------------------------------------------------------------
     # WP-V3-4: Runtime primitives & snapshots (ТЗ v3 §7, §10.2, §10.3).
@@ -1647,6 +1691,7 @@ def apply(
 
     state = ZigZagFSMState.OFF
     confirmed_legs_since_start = -1   # -1 = lifecycle never started
+    zz_legs_since_lifecycle_start = -1
     held_pos: int = 0                 # FSM-owned position (§2.2 / §5.4)
     _stopping_start: int = -1         # bar index when STOPPING lifecycle started
 
@@ -1654,6 +1699,7 @@ def apply(
     # 4) Main FSM loop.
     # ------------------------------------------------------------------
     for t in range(n):
+        just_reached_exit_b_threshold = False
         # ----- §9 step 0: Capture immutable bar-start snapshots ----------
         # WP-V3-4 P7 / ТЗ v3 §9 step 0: snapshots are captured BEFORE the
         # daily-reset wipe (§9 step 1) so that on a reset bar the snapshot
@@ -1672,6 +1718,7 @@ def apply(
         if daily_reset_event[t]:
             state = ZigZagFSMState.OFF
             confirmed_legs_since_start = -1
+            zz_legs_since_lifecycle_start = -1
             held_pos = 0
             _stopping_start = -1
 
@@ -1786,13 +1833,19 @@ def apply(
 
             elif resolved_mode == "C":
                 # §8.3: candidate_component_ok AND immediate_allowed
-                #   -> FREEZE, held_pos=candidate_leg_direction, used=1.
+                #   -> FREEZE or ST_COUNTING_ZZ_LEGS (exit B), held_pos=candidate_leg_direction, used=1.
                 # Pure C blocked by unknown direction/trade_mode stays OFF —
                 # NO WAIT fallback (§8.3 last paragraph).
                 if candidate_component_ok and immediate_allowed:
-                    state = ZigZagFSMState.ST_ACTIVE_FREEZE
-                    held_pos = cand_dir_t
-                    confirmed_legs_since_start = 0
+                    if is_exit_b:
+                        state = ZigZagFSMState.ST_COUNTING_ZZ_LEGS
+                        held_pos = cand_dir_t
+                        zz_legs_since_lifecycle_start = 0
+                        confirmed_legs_since_start = -1
+                    else:
+                        state = ZigZagFSMState.ST_ACTIVE_FREEZE
+                        held_pos = cand_dir_t
+                        confirmed_legs_since_start = 0
                     trigger_source_arr[t] = _TRIGGER_SOURCE_A
                     immediate_used_this_bar = True
                 # else: stays OFF, source remains "none".
@@ -1822,10 +1875,16 @@ def apply(
                 c_fired = candidate_component_ok
                 b_fired = b_component_ok
                 if c_fired and immediate_allowed:
-                    # OFF -> FREEZE; trigger_source = "both" if B also fired.
-                    state = ZigZagFSMState.ST_ACTIVE_FREEZE
-                    held_pos = cand_dir_t
-                    confirmed_legs_since_start = 0
+                    # OFF -> FREEZE or ST_COUNTING_ZZ_LEGS (exit B); trigger_source = "both" if B also fired.
+                    if is_exit_b:
+                        state = ZigZagFSMState.ST_COUNTING_ZZ_LEGS
+                        held_pos = cand_dir_t
+                        zz_legs_since_lifecycle_start = 0
+                        confirmed_legs_since_start = -1
+                    else:
+                        state = ZigZagFSMState.ST_ACTIVE_FREEZE
+                        held_pos = cand_dir_t
+                        confirmed_legs_since_start = 0
                     trigger_source_arr[t] = (
                         _TRIGGER_SOURCE_BOTH if b_fired else _TRIGGER_SOURCE_A
                     )
@@ -1893,43 +1952,78 @@ def apply(
         #    cannot reach this branch (state is already FREEZE, not WAIT).
         if state == ZigZagFSMState.WAIT_FIRST_ST_FLIP and flip_dir != 0:
             if _is_first_flip_allowed(flip_dir, trade_mode):
-                state = ZigZagFSMState.ST_ACTIVE_FREEZE
-                confirmed_legs_since_start = 0
+                if is_exit_b:
+                    state = ZigZagFSMState.ST_COUNTING_ZZ_LEGS
+                    zz_legs_since_lifecycle_start = 0
+                    confirmed_legs_since_start = -1
+                else:
+                    state = ZigZagFSMState.ST_ACTIVE_FREEZE
+                    confirmed_legs_since_start = 0
                 held_pos = flip_dir   # lifecycle entry position (§5.2)
 
         # 3) Increment confirmed_legs_since_start on confirm bars in
         #    active states.  Gated on ``state_at_bar_start`` so the
         #    same-bar lifecycle start (WAIT → FREEZE) does NOT count its
         #    own coincident confirm event (spec §4.3 / plan §3.3 step 6).
-        if confirmed and state_at_bar_start in (
-            ZigZagFSMState.ST_ACTIVE_FREEZE,
-            ZigZagFSMState.ST_ACTIVE_MONITORING,
+        #
+        # Reset-gate (plan_exit_off_modes_v2.txt §5 step 7, invariant R3 §11.6):
+        # ``not is_reset`` ensures that on a reset bar with confirm_event[t]==1
+        # the counter does NOT receive a spurious +1 over the wiped sentinel
+        # (-1 → 0). Required for BOTH counters — exit A and exit B — even when
+        # confirm_event cannot currently coincide with daily_reset upstream;
+        # the gate makes invariant R3 §11.6 explicit and protects against
+        # future ZigZag pipeline changes (PR3 §13).
+        if (
+            confirmed
+            and not is_reset
+            and state_at_bar_start in (
+                ZigZagFSMState.ST_ACTIVE_FREEZE,
+                ZigZagFSMState.ST_ACTIVE_MONITORING,
+            )
         ):
             confirmed_legs_since_start += 1
 
-        # 4) FREEZE → MONITORING once freeze_confirmed_legs legs have
-        #    accumulated.  ``freeze_confirmed_legs == 0`` → immediate
-        #    transition (counter=0 >= 0).
-        if state == ZigZagFSMState.ST_ACTIVE_FREEZE:
-            if confirmed_legs_since_start >= freeze_confirmed_legs:
-                state = ZigZagFSMState.ST_ACTIVE_MONITORING
-
-        # 5) MONITORING → STOPPING on confirm-bar median check (§4.4 /
-        #    §15.7 fail-closed).  Gated on ``state_at_bar_start`` so the
-        #    confirm-bar that completes FREEZE → MONITORING does NOT fire
-        #    stop-check on the same bar (spec §17.16).
         if (
-            state == ZigZagFSMState.ST_ACTIVE_MONITORING
-            and state_at_bar_start == ZigZagFSMState.ST_ACTIVE_MONITORING
-            and confirmed
+            confirmed
+            and not is_reset
+            and state_at_bar_start == ZigZagFSMState.ST_COUNTING_ZZ_LEGS
         ):
-            if median_valid:
-                if float(local_median_N[t]) < global_median:
-                    state = ZigZagFSMState.ST_STOPPING
-                    median_stop_triggered_arr[t] = np.int8(1)  # §13 (WP9)
-                # else stay in MONITORING
-            else:
-                state = ZigZagFSMState.ST_STOPPING  # fail-closed
+            zz_legs_since_lifecycle_start += 1
+
+        if not is_exit_b:
+            # 4) FREEZE → MONITORING once freeze_confirmed_legs legs have
+            #    accumulated.  ``freeze_confirmed_legs == 0`` → immediate
+            #    transition (counter=0 >= 0).
+            if state == ZigZagFSMState.ST_ACTIVE_FREEZE:
+                if confirmed_legs_since_start >= freeze_confirmed_legs:
+                    state = ZigZagFSMState.ST_ACTIVE_MONITORING
+
+            # 5) MONITORING → STOPPING on confirm-bar median check (§4.4 /
+            #    §15.7 fail-closed).  Gated on ``state_at_bar_start`` so the
+            #    confirm-bar that completes FREEZE → MONITORING does NOT fire
+            #    stop-check on the same bar (spec §17.16).
+            if (
+                state == ZigZagFSMState.ST_ACTIVE_MONITORING
+                and state_at_bar_start == ZigZagFSMState.ST_ACTIVE_MONITORING
+                and confirmed
+            ):
+                if median_valid:
+                    if float(local_median_N[t]) < global_median:
+                        state = ZigZagFSMState.ST_STOPPING
+                        median_stop_triggered_arr[t] = np.int8(1)  # §13 (WP9)
+                    # else stay in MONITORING
+                else:
+                    state = ZigZagFSMState.ST_STOPPING  # fail-closed
+
+        if (
+            is_exit_b
+            and state == ZigZagFSMState.ST_COUNTING_ZZ_LEGS
+            and exit_off_zz_target >= 1
+            and zz_legs_since_lifecycle_start >= exit_off_zz_target
+        ):
+            state = ZigZagFSMState.ST_STOPPING
+            zz_leg_stop_triggered_arr[t] = np.int8(1)
+            just_reached_exit_b_threshold = True
 
         # 6) Update held_pos for ST flips while in active states.
         #    Only applies when the state was ALREADY active at bar_start
@@ -1940,10 +2034,12 @@ def apply(
             and state in (
                 ZigZagFSMState.ST_ACTIVE_FREEZE,
                 ZigZagFSMState.ST_ACTIVE_MONITORING,
+                ZigZagFSMState.ST_COUNTING_ZZ_LEGS,
             )
             and state_at_bar_start in (
                 ZigZagFSMState.ST_ACTIVE_FREEZE,
                 ZigZagFSMState.ST_ACTIVE_MONITORING,
+                ZigZagFSMState.ST_COUNTING_ZZ_LEGS,
             )
         ):
             held_pos = _update_held_pos(held_pos, flip_dir, trade_mode)
@@ -1958,9 +2054,11 @@ def apply(
         # §4.5, §14.17 and §15.7 (fail-closed: "if no open position, state
         # transitions to OFF immediately").
         if state == ZigZagFSMState.ST_STOPPING and cur_pos == 0:
-            state = ZigZagFSMState.OFF
-            confirmed_legs_since_start = -1
-            held_pos = 0
+            if not (is_exit_b and just_reached_exit_b_threshold):
+                state = ZigZagFSMState.OFF
+                confirmed_legs_since_start = -1
+                zz_legs_since_lifecycle_start = -1
+                held_pos = 0
 
         if t + 1 < n:
             if state in (ZigZagFSMState.OFF, ZigZagFSMState.WAIT_FIRST_ST_FLIP):
@@ -1969,6 +2067,7 @@ def apply(
             elif state in (
                 ZigZagFSMState.ST_ACTIVE_FREEZE,
                 ZigZagFSMState.ST_ACTIVE_MONITORING,
+                ZigZagFSMState.ST_COUNTING_ZZ_LEGS,
             ):
                 # FSM-owned position — NOT a passthrough of raw ST output
                 # (plan §2.2 / §5.4; fixes WP5 P1 note).
@@ -1976,14 +2075,17 @@ def apply(
 
             else:  # ST_STOPPING — only reachable here when cur_pos != 0
                 # Hold; close only on opposite ST flip (§4.5 / §17.21..§17.23).
-                # No new entries, no reverses.
-                if flip_dir != 0 and (
+                # No new entries, no reverses.  Exit B: no close on threshold bar.
+                if just_reached_exit_b_threshold:
+                    next_pos = np.int8(cur_pos)
+                elif flip_dir != 0 and (
                     (cur_pos > 0 and flip_dir == -1)
                     or (cur_pos < 0 and flip_dir == +1)
                 ):
                     next_pos = np.int8(0)
                     state = ZigZagFSMState.OFF
                     confirmed_legs_since_start = -1
+                    zz_legs_since_lifecycle_start = -1
                     held_pos = 0
                 else:
                     next_pos = np.int8(cur_pos)
@@ -2045,6 +2147,7 @@ def apply(
         state_code_arr[t] = int(state)
         state_arr[t] = _FSM_STATE_NAMES[int(state)]
         confirmed_legs_since_start_arr[t] = confirmed_legs_since_start
+        zz_legs_since_lifecycle_start_arr[t] = zz_legs_since_lifecycle_start
 
         # §13 WP9: stopping_started_at_index
         if state == ZigZagFSMState.ST_STOPPING:
@@ -2078,6 +2181,10 @@ def apply(
         "stopping_started_at_index": stopping_started_at_arr,
         "filter_allowed_entry": filter_allowed_entry_arr,
         "filter_block_reason": filter_block_reason_arr,
+        "exit_off_mode": exit_off_mode_arr,
+        "exit_off_zz_leg_count": exit_off_zz_leg_count_arr,
+        "zz_legs_since_lifecycle_start": zz_legs_since_lifecycle_start_arr,
+        "zz_leg_stop_triggered": zz_leg_stop_triggered_arr,
         "daily_reset_enabled": np.full(n, int(daily_reset_enabled), dtype=np.int8),
         "daily_reset_event": np.asarray(daily_reset_event, dtype=np.int8),
         # --- v3 WP-V3-4: runtime primitives + bar-start snapshots ---

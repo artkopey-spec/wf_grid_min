@@ -913,6 +913,11 @@ class TestDailyResetDiagnostics:
             "candidate_duration_max_bars",
             "immediate_candidate_entry_used",
             "immediate_candidate_entry_block_reason",
+            # exit-off modes (plan_exit_off_modes_v2.txt §6)
+            "exit_off_mode",
+            "exit_off_zz_leg_count",
+            "zz_legs_since_lifecycle_start",
+            "zz_leg_stop_triggered",
         }
 
     def test_daily_reset_arrays_dtype_int8(self):

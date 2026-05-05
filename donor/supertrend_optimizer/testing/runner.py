@@ -30,6 +30,10 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
+from supertrend_optimizer.core._fsm_state_names import (
+    FSM_STATE_NAMES as _FSM_STATES,
+    ACTIVE_LIFECYCLE_STATES as _ACTIVE_LIFECYCLE_STATES,
+)
 from supertrend_optimizer.core.backtest import generate_positions
 from supertrend_optimizer.core.metrics import calculate_all_metrics
 from supertrend_optimizer.core.trade_filter_config import (
@@ -126,16 +130,6 @@ PERIOD_SPLITS = [
 # WP-T4 private helpers — filter_diagnostics_summary construction
 # ---------------------------------------------------------------------------
 
-# All five canonical FSM state names (spec §13; also used as bars_in_state keys).
-_FSM_STATES = (
-    "OFF",
-    "WAIT_FIRST_ST_FLIP",
-    "ST_ACTIVE_FREEZE",
-    "ST_ACTIVE_MONITORING",
-    "ST_STOPPING",
-)
-
-
 def _echo_thresholds(
     trade_filter_config: Any,
     zigzag_global_stats: Any,
@@ -163,6 +157,14 @@ def _echo_thresholds(
         "global_median": float(zigzag_global_stats.global_median),
         "local_window": int(zz.local_window),
         "freeze_confirmed_legs": int(lc.freeze_confirmed_legs),
+        "exit_off_mode": str(getattr(lc, "exit_off_mode", "exit A")),
+        "exit_off_zz_leg_count": (
+            int(getattr(lc, "exit_off_zz_leg_count"))
+            if str(getattr(lc, "exit_off_mode", "exit A")) == "exit B"
+            and isinstance(getattr(lc, "exit_off_zz_leg_count", None), int)
+            and not isinstance(getattr(lc, "exit_off_zz_leg_count", None), bool)
+            else -1
+        ),
         "zigzag_mode": getattr(zigzag_global_stats, "zigzag_mode", ""),
         "candidate_duration_gate_enabled": bool(
             getattr(zigzag_global_stats, "candidate_duration_gate_enabled", False)
@@ -244,13 +246,11 @@ def _compute_summary_counters(
     )
 
     # lifecycle_starts: transitions from inactive states into lifecycle-active
-    # states.  This covers same-bar Mode C starts and freeze_confirmed_legs=0
-    # starts that land directly in ST_ACTIVE_MONITORING.
+    # states.  Uses shared ACTIVE_LIFECYCLE_STATES (plan §7.4).
     state_arr = filter_diagnostics["trade_filter_state"]
-    lifecycle_active = (
-        (state_arr == "ST_ACTIVE_FREEZE")
-        | (state_arr == "ST_ACTIVE_MONITORING")
-    )
+    lifecycle_active = np.zeros(len(state_arr), dtype=bool)
+    for _s in _ACTIVE_LIFECYCLE_STATES:
+        lifecycle_active |= (state_arr == _s)
     lifecycle_starts = int(len(state_arr) > 0 and lifecycle_active[0])
     if len(state_arr) > 1:
         lifecycle_starts += int(
@@ -260,6 +260,10 @@ def _compute_summary_counters(
     # median_stop_triggered: cross-source from bar-level int8 mask
     median_stop_triggered = int(
         np.sum(filter_diagnostics["median_stop_triggered"])
+    )
+    zz_leg_t = filter_diagnostics.get("zz_leg_stop_triggered")
+    zz_leg_stop_triggered = (
+        int(np.sum(zz_leg_t == 1)) if zz_leg_t is not None else 0
     )
     daily_reset_event = filter_diagnostics.get("daily_reset_event")
     daily_reset_count = (
@@ -304,6 +308,7 @@ def _compute_summary_counters(
         "blocked_stopping": blocked_stopping,
         "lifecycle_starts": lifecycle_starts,
         "median_stop_triggered": median_stop_triggered,
+        "zz_leg_stop_triggered": zz_leg_stop_triggered,
         "daily_reset_count": daily_reset_count,
         "exits_opposite_flip": exits_opposite_flip,
         "immediate_entries_count": immediate_entries_count,
@@ -369,6 +374,11 @@ def _build_filter_diagnostics_summary(
         ),
         "lifecycle_starts_count": counters.get("lifecycle_starts", 0),
         "median_stop_triggered_count": counters.get("median_stop_triggered", 0),
+        "zz_leg_stop_triggered_count": counters.get("zz_leg_stop_triggered", 0),
+        # §7.3 / §14.7: also expose exit-off echo scalars at top level
+        # so WF Grid and Tester summary shapes are equivalent (not just in thresholds).
+        "exit_off_mode": thresholds.get("exit_off_mode", "exit A"),
+        "exit_off_zz_leg_count": thresholds.get("exit_off_zz_leg_count", -1),
         "thresholds": thresholds,
         "global_offset": global_offset,
         "counters": counters,

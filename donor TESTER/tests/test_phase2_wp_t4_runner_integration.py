@@ -301,9 +301,12 @@ class TestFilterDiagnosticsSummaryStructure:
 
     def test_top_level_keys_present(self, period_result_enabled) -> None:
         s = period_result_enabled.filter_diagnostics_summary
-        assert set(s.keys()) == {
-            "mode", "thresholds", "global_offset", "counters", "bars_in_state"
-        }
+        # Core keys that must always be present (superset check — new exit-off
+        # and gate keys were added in PR5/PR6 without removing the legacy ones).
+        required = {"mode", "thresholds", "global_offset", "counters", "bars_in_state"}
+        assert required.issubset(set(s.keys())), (
+            f"Required top-level keys missing: {required - set(s.keys())}"
+        )
 
     def test_mode_value(self, period_result_enabled) -> None:
         assert period_result_enabled.filter_diagnostics_summary["mode"] == "zigzag_st_mode"
@@ -378,18 +381,27 @@ class TestFilterDiagnosticsSummaryStructure:
     def test_sanity_invariant_3_lifecycle_starts_from_state_transitions(
         self, period_result_enabled
     ) -> None:
-        """plan §3.3.2 sanity invariant 3 (cross-source with state array)."""
+        """plan §3.3.2 sanity invariant 3 (cross-source with state array).
+
+        After PR5, lifecycle_starts uses ACTIVE_LIFECYCLE_STATES (all 4 active
+        states: ST_ACTIVE_FREEZE, ST_ACTIVE_MONITORING, ST_COUNTING_ZZ_LEGS,
+        ST_STOPPING), not only the WAIT_FIRST → ST_ACTIVE_FREEZE transition.
+        The invariant: lifecycle_starts == number of transitions from any
+        non-active state to any active state (including the first bar if active).
+        """
+        from supertrend_optimizer.core._fsm_state_names import ACTIVE_LIFECYCLE_STATES
         c = period_result_enabled.filter_diagnostics_summary["counters"]
         state_arr = period_result_enabled.filter_diagnostics["trade_filter_state"]
-        expected = int(
-            np.sum(
-                (state_arr[1:] == "ST_ACTIVE_FREEZE")
-                & (state_arr[:-1] == "WAIT_FIRST_ST_FLIP")
-            )
-        )
-        assert c["lifecycle_starts"] == expected, (
+        active_set = set(ACTIVE_LIFECYCLE_STATES)
+
+        active_mask = np.array([s in active_set for s in state_arr], dtype=bool)
+        lifecycle_starts = int(len(active_mask) > 0 and active_mask[0])
+        if len(active_mask) > 1:
+            lifecycle_starts += int(np.sum(active_mask[1:] & ~active_mask[:-1]))
+
+        assert c["lifecycle_starts"] == lifecycle_starts, (
             f"Invariant 3: lifecycle_starts={c['lifecycle_starts']} != "
-            f"state-array transitions={expected}"
+            f"state-array active-transitions={lifecycle_starts}"
         )
 
     def test_sanity_invariant_4_median_stop_triggered_from_bar_mask(
@@ -430,14 +442,17 @@ class TestFilterDiagnosticsSummaryStructure:
             f"Invariant 6: sum(bars_in_state)={bars_sum} != n_positions={n_pos}"
         )
 
-    def test_bars_in_state_all_five_keys_present(
+    def test_bars_in_state_all_six_keys_present(
         self, period_result_enabled
     ) -> None:
+        """After PR5 (exit B), FSM has 6 states including ST_COUNTING_ZZ_LEGS."""
+        from supertrend_optimizer.core._fsm_state_names import FSM_STATE_NAMES
         bis = period_result_enabled.filter_diagnostics_summary["bars_in_state"]
-        assert set(bis.keys()) == {
-            "OFF", "WAIT_FIRST_ST_FLIP",
-            "ST_ACTIVE_FREEZE", "ST_ACTIVE_MONITORING", "ST_STOPPING",
-        }
+        assert set(bis.keys()) == set(FSM_STATE_NAMES), (
+            f"bars_in_state keys mismatch:\n"
+            f"  expected (FSM_STATE_NAMES): {sorted(FSM_STATE_NAMES)}\n"
+            f"  observed: {sorted(bis.keys())}"
+        )
 
 
 # ---------------------------------------------------------------------------

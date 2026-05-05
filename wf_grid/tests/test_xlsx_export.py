@@ -917,3 +917,89 @@ class TestBucketMatrixMedianExport:
         assert sheets.index("DISCLAIMER") < sheets.index("WF_Config")
         assert sheets.index("WF_Config") < sheets.index("summary")
         assert sheets.index("WF_Train_Trades") < sheets.index("BucketMatrix_Median")
+
+
+# ===========================================================================
+# §8.4-8.5 Exit-off filter summary columns pass-through in WF_N sheets
+# ===========================================================================
+
+_EXIT_OFF_SUMMARY_COLUMNS = [
+    "n_bars_in_counting_zz_legs",
+    "zz_leg_stop_triggered_count",
+    "exit_off_mode",
+    "exit_off_zz_leg_count",
+]
+
+
+def _make_step_oos_with_filter_summary(
+    gp_ids=("atr10_m2.50_both",), n_steps=2
+) -> pd.DataFrame:
+    """Build step_oos_long that includes exit-off filter summary columns."""
+    rows = []
+    for gp_id in gp_ids:
+        for s in range(1, n_steps + 1):
+            rows.append({
+                "grid_point_id": gp_id,
+                "wf_step": s,
+                "step_status": "ok",
+                "sum_pnl_pct": 5.0,
+                "sharpe": 1.2,
+                "sortino": 1.5,
+                "max_drawdown": -0.10,
+                "num_trades": 10,
+                "profit_factor": 1.8,
+                "effective_oos_bars": 100,
+                "used_prepend": True,
+                "prepend_bars_applied": 50,
+                # §8.4-8.5: exit-off filter summary columns
+                "exit_off_mode": "exit B",
+                "exit_off_zz_leg_count": 2,
+                "n_bars_in_counting_zz_legs": 5,
+                "zz_leg_stop_triggered_count": 1,
+                "filter_states_visited": "OFF,ST_COUNTING_ZZ_LEGS",
+                "n_bars_in_off": 95,
+                "lifecycle_starts_count": 1,
+                "median_stop_triggered_count": 0,
+            })
+    return pd.DataFrame(rows)
+
+
+class TestExitOffColumnPassthroughWFNSheets:
+    """§8.4-8.5: When step_oos_long contains exit-off filter summary columns,
+    the WF_N sheets in the exported workbook must also contain them (no silent drop).
+    """
+
+    def test_wf_n_sheet_contains_exit_off_summary_columns(self, tmp_path):
+        path = _export(
+            tmp_path,
+            step_oos_long=_make_step_oos_with_filter_summary(),
+        )
+        # Read the first WF step sheet (WF_01)
+        sheets = _sheets(path)
+        wf_step_sheets = [
+            s for s in sheets if s.startswith("WF_") and s not in ("WF_Config", "WF_Trades", "WF_Train_Trades")
+        ]
+        assert wf_step_sheets, "No WF_N step sheets found in workbook"
+
+        wf1_df = _read_sheet(path, wf_step_sheets[0])
+        for col in _EXIT_OFF_SUMMARY_COLUMNS:
+            assert col in wf1_df.columns, (
+                f"§8.4 FAIL: exit-off column '{col}' missing from {wf_step_sheets[0]} sheet. "
+                "Check xlsx_writer does not drop filter summary columns."
+            )
+
+    def test_wf_n_sheet_exit_off_mode_value_preserved(self, tmp_path):
+        path = _export(
+            tmp_path,
+            step_oos_long=_make_step_oos_with_filter_summary(),
+        )
+        sheets = _sheets(path)
+        wf_step_sheets = [
+            s for s in sheets if s.startswith("WF_") and s not in ("WF_Config", "WF_Trades", "WF_Train_Trades")
+        ]
+        wf1_df = _read_sheet(path, wf_step_sheets[0])
+        if "exit_off_mode" in wf1_df.columns:
+            vals = wf1_df["exit_off_mode"].dropna().unique()
+            assert "exit B" in vals, (
+                f"§8.4: expected 'exit B' in exit_off_mode column, got {vals}"
+            )

@@ -491,8 +491,12 @@ def _write_step_sheet(
     step_idx: int,
     sheet_name: str,
 ) -> None:
-    """Write WF_01..WF_N sheet: all grid points at this wf_step, key metrics."""
-    cols = [
+    """Write WF_01..WF_N sheet: all grid points at this wf_step, key metrics.
+
+    Core columns come first in a fixed order; filter summary columns (§8.4, exit-off)
+    are appended after the core when present (no silent drop — plan §8.4 / §2).
+    """
+    core_cols = [
         "grid_point_id",
         "atr_period",
         "multiplier",
@@ -508,11 +512,37 @@ def _write_step_sheet(
         "used_prepend",
         "prepend_bars_applied",
     ]
+    # §8.4: filter summary columns — included when present (exit-off modes + others).
+    filter_summary_cols = [
+        "filter_states_visited",
+        "n_bars_in_off",
+        "n_bars_in_wait_first_st_flip",
+        "n_bars_in_freeze",
+        "n_bars_in_monitoring",
+        "n_bars_in_counting_zz_legs",
+        "n_bars_in_stopping",
+        "n_filter_blocked_entries",
+        "lifecycle_starts_count",
+        "median_stop_triggered_count",
+        "zz_leg_stop_triggered_count",
+        "exit_off_mode",
+        "exit_off_zz_leg_count",
+        "filter_diagnostics_available",
+        "trigger_count_candidate_threshold",
+        "trigger_count_confirmed_median",
+        "trigger_count_both",
+        "stopping_started_count",
+    ]
 
     step_df = step_oos_long[step_oos_long["wf_step"] == step_idx].copy()
     step_df = _expand_grid_point_id(step_df)
-    present = [c for c in cols if c in step_df.columns]
-    step_df = step_df[present].reset_index(drop=True)
+    present_core = [c for c in core_cols if c in step_df.columns]
+    present_filter = [c for c in filter_summary_cols if c in step_df.columns]
+    # Extra columns not in either list (forward-compat): append at end
+    known = set(core_cols) | set(filter_summary_cols)
+    extra = [c for c in step_df.columns if c not in known]
+    cols = present_core + present_filter + extra
+    step_df = step_df[cols].reset_index(drop=True)
 
     format_excel_export_df(step_df).to_excel(writer, sheet_name=sheet_name, index=False)
     _apply_autofilter(writer, sheet_name, step_df)

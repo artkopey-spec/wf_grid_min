@@ -44,6 +44,13 @@ _V3_INIT_FAILURE_KEYS = frozenset({
     "duration_gate_max_bars_present_when_disabled",
     "duration_gate_max_bars_invalid_type",
     "duration_gate_max_bars_below_one",
+    # exit-off modes (docs/plan_exit_off_modes.txt)
+    "exit_off_mode_invalid_literal",
+    "exit_off_mode_invalid_type",
+    "exit_off_zz_leg_count_missing",
+    "exit_off_zz_leg_count_invalid_type",
+    "exit_off_zz_leg_count_below_one",
+    "exit_off_zz_leg_count_present_when_exit_a",
 })
 
 # WP-T3 step 6 — caller_pipeline whitelist for type=zigzag_st_mode.
@@ -127,6 +134,10 @@ class TradeFilterLifecycleConfig:
     freeze_confirmed_legs: int = 5                      # integer >= 0
     stop_check: str = "confirm_bar_only"                # literal; §11 lifecycle enum
     stopping_exit: str = "opposite_st_flip"             # literal; §11 lifecycle enum
+    # Exit-off modes: "exit A" (median stop) | "exit B" (ZZ leg count). Stored as object
+    # so YAML type mismatches surface in validate_trade_filter.
+    exit_off_mode: object = "exit A"
+    exit_off_zz_leg_count: object = None                # int >= 1 when exit_off_mode == "exit B"
 
 
 @dataclass
@@ -194,6 +205,7 @@ TRADE_FILTER_ALLOWED_KEYS: dict[str, frozenset[str]] = {
     "trade_filter.triggers.confirmed_median": frozenset({"enabled"}),
     "trade_filter.lifecycle": frozenset({
         "freeze_confirmed_legs", "stop_check", "stopping_exit",
+        "exit_off_mode", "exit_off_zz_leg_count",
     }),
     "trade_filter.diagnostics": frozenset({
         "export_state_columns", "export_trigger_columns",
@@ -310,6 +322,8 @@ def build_trade_filter_config_from_raw(tf_raw: dict) -> TradeFilterConfig:
         freeze_confirmed_legs=lc_raw.get("freeze_confirmed_legs", 5),
         stop_check=lc_raw.get("stop_check", "confirm_bar_only"),
         stopping_exit=lc_raw.get("stopping_exit", "opposite_st_flip"),
+        exit_off_mode=lc_raw.get("exit_off_mode", "exit A"),
+        exit_off_zz_leg_count=lc_raw.get("exit_off_zz_leg_count", None),
     )
 
     diag_raw: dict = tf_raw.get("diagnostics") or {}
@@ -713,6 +727,80 @@ def validate_trade_filter(
             f"{sorted(_LIFECYCLE_STOPPING_EXIT_VALUES)}, got {lc.stopping_exit!r}"
         )
 
+    # ------------------------------------------------------------------
+    # exit_off_mode / exit_off_zz_leg_count (docs/plan_exit_off_modes.txt)
+    # ------------------------------------------------------------------
+    eom_key = ("trade_filter", "lifecycle", "exit_off_mode")
+    eoc_key = ("trade_filter", "lifecycle", "exit_off_zz_leg_count")
+    exit_mode_key_present = eom_key in raw_user_keys
+    exit_count_key_present = eoc_key in raw_user_keys
+
+    if exit_mode_key_present:
+        eom_raw = lc.exit_off_mode
+        if not isinstance(eom_raw, str):
+            _append_validation_error(
+                errors,
+                "trade_filter.lifecycle.exit_off_mode must be str literal "
+                "\"exit A\" or \"exit B\", got "
+                f"{type(eom_raw).__name__!r} ({eom_raw!r})",
+                error_keys,
+                "exit_off_mode_invalid_type",
+            )
+        elif eom_raw not in ("exit A", "exit B"):
+            _append_validation_error(
+                errors,
+                "trade_filter.lifecycle.exit_off_mode must be \"exit A\" or "
+                f"\"exit B\"; got {eom_raw!r}",
+                error_keys,
+                "exit_off_mode_invalid_literal",
+            )
+
+    if exit_mode_key_present and isinstance(lc.exit_off_mode, str) and lc.exit_off_mode in (
+        "exit A",
+        "exit B",
+    ):
+        _effective_exit_off = lc.exit_off_mode
+    else:
+        _effective_exit_off = "exit A"
+
+    if exit_count_key_present and _effective_exit_off != "exit B":
+        _append_validation_error(
+            errors,
+            "trade_filter.lifecycle.exit_off_zz_leg_count must be absent when "
+            "trade_filter.lifecycle.exit_off_mode is \"exit A\" or exit_off_mode "
+            "is omitted from YAML",
+            error_keys,
+            "exit_off_zz_leg_count_present_when_exit_a",
+        )
+
+    if _effective_exit_off == "exit B":
+        if not exit_count_key_present:
+            _append_validation_error(
+                errors,
+                "trade_filter.lifecycle.exit_off_zz_leg_count is required when "
+                "trade_filter.lifecycle.exit_off_mode is \"exit B\"",
+                error_keys,
+                "exit_off_zz_leg_count_missing",
+            )
+        else:
+            c_raw = lc.exit_off_zz_leg_count
+            if isinstance(c_raw, bool) or not isinstance(c_raw, int):
+                _append_validation_error(
+                    errors,
+                    "trade_filter.lifecycle.exit_off_zz_leg_count must be int >= 1, "
+                    f"got {c_raw!r}",
+                    error_keys,
+                    "exit_off_zz_leg_count_invalid_type",
+                )
+            elif c_raw < 1:
+                _append_validation_error(
+                    errors,
+                    "trade_filter.lifecycle.exit_off_zz_leg_count must be int >= 1, "
+                    f"got {c_raw!r}",
+                    error_keys,
+                    "exit_off_zz_leg_count_below_one",
+                )
+
     # NOTE: freeze_confirmed_legs < local_window is VALID — not a warning, not a
     # reject (Appendix A v1.1 §3.2, §17.20; plan §6.5 Note 1).  No check here.
 
@@ -861,6 +949,23 @@ def resolve_trade_filter_mode_in_place(
     zz.mode = resolve_zigzag_mode(None, triggers_cfg)
 
 
+def resolve_exit_off_mode_in_place(
+    trade_filter_config: Optional[TradeFilterConfig],
+    raw_user_keys: frozenset[tuple[str, ...]],
+) -> None:
+    """Materialize default exit-off mode when the YAML key is absent.
+
+    When ``trade_filter.lifecycle.exit_off_mode`` is not present in the parsed
+    YAML, set ``lifecycle.exit_off_mode`` to ``\"exit A\"`` so runtime and
+    tests see a single resolved value (docs/plan_exit_off_modes.txt §10).
+    """
+    if trade_filter_config is None or not trade_filter_config.enabled:
+        return
+    eom_key = ("trade_filter", "lifecycle", "exit_off_mode")
+    if eom_key not in raw_user_keys:
+        trade_filter_config.lifecycle.exit_off_mode = "exit A"
+
+
 __all__ = [
     "TradeFilterConfig",
     "TradeFilterZigZagConfig",
@@ -876,6 +981,7 @@ __all__ = [
     "TRADE_FILTER_ALLOWED_KEYS",
     "resolve_zigzag_mode",
     "resolve_trade_filter_mode_in_place",
+    "resolve_exit_off_mode_in_place",
     # Constant whitelists exported for tests / CLI gate logic
     "_LIFECYCLE_STOP_CHECK_VALUES",
     "_LIFECYCLE_STOPPING_EXIT_VALUES",

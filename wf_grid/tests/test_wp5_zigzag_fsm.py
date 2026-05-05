@@ -195,7 +195,7 @@ def _positions_from_trend(trend: np.ndarray, trade_mode: str = "both") -> np.nda
 
 class TestZigZagFSMStateEnum:
 
-    def test_five_canonical_states(self):
+    def test_six_canonical_states(self):
         names = {s.name for s in ZigZagFSMState}
         assert names == {
             "OFF",
@@ -203,6 +203,7 @@ class TestZigZagFSMStateEnum:
             "ST_ACTIVE_FREEZE",
             "ST_ACTIVE_MONITORING",
             "ST_STOPPING",
+            "ST_COUNTING_ZZ_LEGS",
         }
 
     def test_state_codes_stable(self):
@@ -211,6 +212,7 @@ class TestZigZagFSMStateEnum:
         assert int(ZigZagFSMState.ST_ACTIVE_FREEZE) == 2
         assert int(ZigZagFSMState.ST_ACTIVE_MONITORING) == 3
         assert int(ZigZagFSMState.ST_STOPPING) == 4
+        assert int(ZigZagFSMState.ST_COUNTING_ZZ_LEGS) == 5
 
 
 class TestZigZagSTFilterResultDataclass:
@@ -3122,7 +3124,8 @@ class TestV3RegressionI8ZigZagFSMStateCodes:
 
     Canonical codes per original plan / Appendix A v1.1 §4:
       OFF=0, WAIT_FIRST_ST_FLIP=1, ST_ACTIVE_FREEZE=2,
-      ST_ACTIVE_MONITORING=3, ST_STOPPING=4.
+      ST_ACTIVE_MONITORING=3, ST_STOPPING=4, ST_COUNTING_ZZ_LEGS=5
+      (ST_COUNTING_ZZ_LEGS: exit-off mode B — counting confirmed ZZ legs).
     """
 
     def test_i8_off_is_zero(self):
@@ -3140,9 +3143,12 @@ class TestV3RegressionI8ZigZagFSMStateCodes:
     def test_i8_stopping_is_four(self):
         assert int(ZigZagFSMState.ST_STOPPING) == 4
 
-    def test_i8_exactly_five_states(self):
-        """No new states added; the enum has exactly 5 members."""
-        assert len(ZigZagFSMState) == 5
+    def test_i8_counting_zz_legs_is_five(self):
+        assert int(ZigZagFSMState.ST_COUNTING_ZZ_LEGS) == 5
+
+    def test_i8_exactly_six_states(self):
+        """Exit-off mode B adds ST_COUNTING_ZZ_LEGS; the enum has 6 members."""
+        assert len(ZigZagFSMState) == 6
 
 
 

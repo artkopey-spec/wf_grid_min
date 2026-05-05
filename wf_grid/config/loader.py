@@ -195,6 +195,8 @@ _ALLOWED_KEYS: dict[str, set[str]] = {
         "freeze_confirmed_legs",
         "stop_check",
         "stopping_exit",
+        "exit_off_mode",
+        "exit_off_zz_leg_count",
     },
     "trade_filter.diagnostics": {
         "export_state_columns",
@@ -290,6 +292,7 @@ def load_grid_config(path: str, ohlc_data: Optional[pd.DataFrame] = None) -> Gri
     # v3 WP-V3-2: resolve effective zigzag mode in-place after validation so
     # build_zigzag_global_stats can read zigzag.mode directly (always non-None).
     _resolve_trade_filter_mode_in_place(cfg, raw_user_keys)
+    _resolve_exit_off_mode_in_place(cfg, raw_user_keys)
 
     if ohlc_data is not None:
         cfg = _resolve_periods_per_year(cfg, ohlc_data)
@@ -566,6 +569,7 @@ def _validate_trade_filter_legacy_inline(  # pragma: no cover  (kept for diff re
 
 from supertrend_optimizer.core.trade_filter_config import (  # noqa: E402
     resolve_trade_filter_mode_in_place as _resolve_trade_filter_mode_shared,
+    resolve_exit_off_mode_in_place as _resolve_exit_off_mode_shared,
 )
 
 
@@ -585,6 +589,15 @@ def _resolve_trade_filter_mode_in_place(
     WP-V3-2 (РўР— v3 В§3.1, В§5)
     """
     _resolve_trade_filter_mode_shared(cfg.trade_filter, raw_user_keys)
+    return
+
+
+def _resolve_exit_off_mode_in_place(
+    cfg: GridConfig,
+    raw_user_keys: frozenset[tuple[str, ...]],
+) -> None:
+    """Resolve default lifecycle.exit_off_mode when YAML key is absent."""
+    _resolve_exit_off_mode_shared(cfg.trade_filter, raw_user_keys)
     return
 
 

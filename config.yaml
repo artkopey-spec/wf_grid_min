@@ -6,8 +6,8 @@ data:                                  # Блок данных и парамет
   annualization_basis: "trading"       # Использовать торговый календарь, не календарный
 
 optimization:                          # Блок параметров перебора сетки
-  atr_period_range: [50, 99]           # Диапазон ATR period: от 20 до 40 включительно
-  multiplier_range: [3.0, 10.0]         # Диапазон множителя SuperTrend: от 1.5 до 4.0
+  atr_period_range: [50, 60]           # Диапазон ATR period: от 20 до 40 включительно
+  multiplier_range: [5.0, 10.0]         # Диапазон множителя SuperTrend: от 1.5 до 4.0
   multiplier_step: 0.2                 # Шаг перебора multiplier
   trade_mode: "revers"                 # Реверсивный режим торговли
 
@@ -75,13 +75,13 @@ execution:                             # WP-PAR: parallelization controls (plan 
   fallback_to_sequential: false        # On infra failure do NOT silently retry sequential
 
 trade_filter:                          # Блок WP2: фильтр сделок ZigZag + SuperTrend
-  enabled: true                        # Включён: полный цикл с глобальной статистикой и режимом A+B
+  enabled: true                       # Safe rollout default (WP11 rollback contract)
   type: "zigzag_st_mode"
 
   zigzag:
     global_stats_source: "full_dataset"  # В v1 только full_dataset
     leg_height_mode: "pct"               # Доли цены, не 0-100
-    reversal_threshold: 0.001            # 0.5% цены; дробь в (0, 1)
+    reversal_threshold: 0.002            # 0.5% цены; дробь в (0, 1)
     candidate_trigger_threshold: auto    # Дробь (0-1) или auto
     candidate_trigger_quantile: 0.80     # При auto обязательно; типично 0.7-0.9
     global_median: "auto"
@@ -95,6 +95,8 @@ trade_filter:                          # Блок WP2: фильтр сделок
     freeze_confirmed_legs: 5             # Подтверждённых ног после старта lifecycle
     stop_check: "confirm_bar_only"       # В v1 только этот литерал
     stopping_exit: "opposite_st_flip"    # В v1 только этот литерал
+    exit_off_mode: "exit B"              # «exit B» + exit_off_zz_leg_count (int >= 1); при «exit A» count не указывать
+    exit_off_zz_leg_count: 3             # подтверждённых ZZ-ног до ST_STOPPING (exit B)
 
   diagnostics:
     export_state_columns: true

@@ -195,4 +195,21 @@ class BacktestResult:
                         f"!= positions length {pos_len}. "
                         "All diagnostic arrays must match positions length."
                     )
+            # §12.6 strict dtype contract for new exit-off arrays (when present).
+            # This catches silent dtype drift early at result construction time.
+            _expected_dtypes = {
+                "exit_off_mode": object,
+                "exit_off_zz_leg_count": np.int64,
+                "zz_legs_since_lifecycle_start": np.int64,
+                "zz_leg_stop_triggered": np.int8,
+            }
+            for _k, _dt in _expected_dtypes.items():
+                if _k not in self.filter_diagnostics:
+                    continue
+                _arr = np.asarray(self.filter_diagnostics[_k])
+                if _arr.dtype != _dt:
+                    raise ValueError(
+                        f"BacktestResult dtype contract violated: "
+                        f"filter_diagnostics[{_k!r}] dtype {_arr.dtype} != expected {_dt}."
+                    )
 

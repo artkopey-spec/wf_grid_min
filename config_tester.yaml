@@ -96,6 +96,7 @@ trade_filter:
     freeze_confirmed_legs: 5               # # confirmed legs after lifecycle start
     stop_check: confirm_bar_only           # only literal supported in v1
     stopping_exit: opposite_st_flip        # only literal supported in v1
+    exit_off_mode: "exit A"                # "exit B" requires exit_off_zz_leg_count (int >= 1); omit count for exit A
 
   diagnostics:
     export_state_columns: true

@@ -4,8 +4,8 @@ Test #25 — filter_diagnostics keyset/dtype contract (spec §13).
 Plan reference: docs/zigzag_st_tester_phase2_implementation_plan.txt §10 #25
 Spec reference: Appendix A v1.1 §3.3.1, §3.3.3, §3.3.4, spec v1.1 §13
 
-Contract (audit-fix v0.5 + daily_reset plan v3):
-(a) STRICT set equality: set(filter_diagnostics.keys()) == EXPECTED_KEYSET (21 keys exactly).
+Contract (audit-fix v0.5 + daily_reset plan v3 + v3 diagnostics + exit-off mode):
+(a) STRICT set equality: set(filter_diagnostics.keys()) == EXPECTED_KEYSET (41 keys exactly).
 (b) Shape == (len(positions),) for each array.
 (c) dtype per §3.3.4:
     - float64 keys: candidate_height_pct, candidate_trigger_threshold,
@@ -29,35 +29,49 @@ import pytest
 from pathlib import Path
 
 
-# Exact 21-key set from spec §13 + daily_reset plan v3.
+# Exact keyset produced by zigzag_st_filter.apply → run_period (WP9 §13 + v3 + exit-off).
 EXPECTED_KEYSET = frozenset({
-    # Core state (3)
+    "b_component_ok",
+    "candidate_age_bars",
+    "candidate_component_ok",
+    "candidate_duration_gate_enabled",
+    "candidate_duration_gate_passed",
+    "candidate_duration_max_bars",
+    "candidate_height_pct",
+    "candidate_leg_direction",
+    "candidate_threshold_ok",
+    "candidate_trigger_threshold",
+    "confirmed_legs_at_bar_start",
+    "confirmed_legs_since_start",
+    "confirmed_median_ok",
+    "daily_reset_enabled",
+    "daily_reset_event",
+    "exit_off_mode",
+    "exit_off_zz_leg_count",
+    "filter_allowed_entry",
+    "filter_block_reason",
+    "freeze_confirmed_legs",
+    "global_median",
+    "global_stats_available",
+    "held_pos_at_bar_start",
+    "immediate_allowed",
+    "immediate_candidate_entry_block_reason",
+    "immediate_candidate_entry_used",
+    "local_median_N",
+    "local_median_available",
+    "local_window",
+    "median_stop_triggered",
+    "st_flip_dir",
+    "state_at_bar_start",
+    "stopping_started_at_index",
     "trade_filter_enabled",
     "trade_filter_state",
     "trade_filter_state_code",
-    # Trigger (2)
     "trade_filter_trigger_source",
-    "st_flip_dir",
-    # ZigZag params (5)
+    "zigzag_mode",
     "zigzag_reversal_threshold",
-    "candidate_height_pct",
-    "candidate_trigger_threshold",
-    "local_median_N",
-    "local_median_available",
-    # Stats (4)
-    "local_window",
-    "global_median",
-    "global_stats_available",
-    "confirmed_legs_since_start",
-    # Decision (3)
-    "filter_allowed_entry",
-    "filter_block_reason",
-    "median_stop_triggered",
-    # Lifecycle (4)
-    "freeze_confirmed_legs",
-    "stopping_started_at_index",
-    "daily_reset_enabled",
-    "daily_reset_event",
+    "zz_leg_stop_triggered",
+    "zz_legs_since_lifecycle_start",
 })
 
 # 2.0-TESTER legacy keys that MUST NOT appear
@@ -168,7 +182,13 @@ class TestDiagnosticsDtypeContract:
         r = _run_enabled(df)
         fd = r.filter_diagnostics
 
-        for key in ("trade_filter_state", "trade_filter_trigger_source", "filter_block_reason"):
+        for key in (
+            "trade_filter_state",
+            "trade_filter_trigger_source",
+            "filter_block_reason",
+            "exit_off_mode",
+            "zigzag_mode",
+        ):
             assert key in fd, f"Missing key: {key}"
             arr = fd[key]
             assert arr.dtype == object or np.issubdtype(arr.dtype, np.str_), (
@@ -279,4 +299,128 @@ class TestDiagnosticsDtypeContract:
         assert not found_legacy, (
             f"Found 2.0-TESTER legacy keys in filter_diagnostics: {found_legacy}. "
             "These must NOT be present in Phase 2 output."
+        )
+
+
+class TestExitOffExactDtypeContract:
+    """§2 / §12.6 (plan_exit_off_modes_v2.txt): STRICT exact-dtype check for 4 new
+    exit-off per-bar arrays.
+
+    Plan §6 requires:
+      exit_off_mode                    → dtype=object  (str echo)
+      exit_off_zz_leg_count            → dtype=int64   (echo, sentinel -1 for exit A)
+      zz_legs_since_lifecycle_start    → dtype=int64   (-1 sentinel outside lifecycle)
+      zz_leg_stop_triggered            → dtype=int8    (binary 0/1 flag)
+
+    Unlike TestDiagnosticsDtypeContract.test_numeric_array_keys_have_numeric_dtype
+    which only checks np.issubdtype(..., np.number), these tests enforce the EXACT
+    dtype required by §2 to prevent silent platform-dependent widening (e.g. int32
+    on some Windows builds) or erroneous narrowing.
+    """
+
+    def _run_exit_a(self):
+        df = _make_synthetic_ohlc()
+        return _run_enabled(df)
+
+    def _run_exit_b(self):
+        """Run with exit B (count=2) to ensure counting state is reached."""
+        from supertrend_optimizer.testing.runner import run_period
+        from supertrend_optimizer.core.zigzag_st_filter import build_zigzag_global_stats
+        from supertrend_optimizer.utils.enums import ExecutionModel
+        from supertrend_optimizer.core.trade_filter_config import (
+            TradeFilterConfig, TradeFilterZigZagConfig, TradeFilterTriggersConfig,
+            TradeFilterLifecycleConfig, TradeFilterDiagnosticsConfig,
+            TradeFilterTriggerToggleConfig,
+        )
+        df = _make_synthetic_ohlc()
+        cfg = TradeFilterConfig(
+            enabled=True, type="zigzag_st_mode",
+            zigzag=TradeFilterZigZagConfig(
+                reversal_threshold=0.03, local_window=20,
+                candidate_trigger_threshold=0.4,
+            ),
+            triggers=TradeFilterTriggersConfig(
+                candidate_threshold=TradeFilterTriggerToggleConfig(enabled=True),
+                confirmed_median=TradeFilterTriggerToggleConfig(enabled=False),
+            ),
+            lifecycle=TradeFilterLifecycleConfig(
+                freeze_confirmed_legs=0, stop_check="confirm_bar_only",
+                stopping_exit="opposite_st_flip",
+                exit_off_mode="exit B",
+                exit_off_zz_leg_count=2,
+            ),
+            diagnostics=TradeFilterDiagnosticsConfig(
+                export_state_columns=True, export_trigger_columns=True,
+            ),
+        )
+        stats = build_zigzag_global_stats(df["close"].values, cfg)
+        return run_period(
+            df=df, atr_period=14, multiplier=3.0,
+            trade_mode="revers", commission=0.001,
+            execution_model=ExecutionModel.OPEN_TO_OPEN,
+            trade_filter_config=cfg,
+            zigzag_global_stats=stats,
+        )
+
+    def test_exit_off_mode_exact_dtype_object_exit_a(self):
+        r = self._run_exit_a()
+        arr = r.filter_diagnostics["exit_off_mode"]
+        assert arr.dtype == object, (
+            f"§2: exit_off_mode (exit A) expected dtype=object, got {arr.dtype}"
+        )
+
+    def test_exit_off_mode_exact_dtype_object_exit_b(self):
+        r = self._run_exit_b()
+        arr = r.filter_diagnostics["exit_off_mode"]
+        assert arr.dtype == object, (
+            f"§2: exit_off_mode (exit B) expected dtype=object, got {arr.dtype}"
+        )
+
+    def test_exit_off_zz_leg_count_exact_dtype_int64_exit_a(self):
+        r = self._run_exit_a()
+        arr = r.filter_diagnostics["exit_off_zz_leg_count"]
+        assert arr.dtype == np.int64, (
+            f"§2: exit_off_zz_leg_count (exit A) expected dtype=int64, got {arr.dtype}"
+        )
+
+    def test_exit_off_zz_leg_count_exact_dtype_int64_exit_b(self):
+        r = self._run_exit_b()
+        arr = r.filter_diagnostics["exit_off_zz_leg_count"]
+        assert arr.dtype == np.int64, (
+            f"§2: exit_off_zz_leg_count (exit B) expected dtype=int64, got {arr.dtype}"
+        )
+
+    def test_zz_legs_since_lifecycle_start_exact_dtype_int64(self):
+        """Both exit A and exit B must produce int64 (sentinel -1 vs counters)."""
+        r_a = self._run_exit_a()
+        r_b = self._run_exit_b()
+        for label, r in (("exit A", r_a), ("exit B", r_b)):
+            arr = r.filter_diagnostics["zz_legs_since_lifecycle_start"]
+            assert arr.dtype == np.int64, (
+                f"§2: zz_legs_since_lifecycle_start ({label}) expected int64, got {arr.dtype}"
+            )
+
+    def test_zz_leg_stop_triggered_exact_dtype_int8(self):
+        """Both exit A (all-zero) and exit B must produce int8 flag array."""
+        r_a = self._run_exit_a()
+        r_b = self._run_exit_b()
+        for label, r in (("exit A", r_a), ("exit B", r_b)):
+            arr = r.filter_diagnostics["zz_leg_stop_triggered"]
+            assert arr.dtype == np.int8, (
+                f"§2: zz_leg_stop_triggered ({label}) expected int8, got {arr.dtype}"
+            )
+
+    def test_exit_a_sentinel_values_correct_dtype(self):
+        """exit A sentinel: exit_off_zz_leg_count==-1, zz_legs_since_lifecycle_start==-1."""
+        r = self._run_exit_a()
+        fd = r.filter_diagnostics
+        zz_count = fd["exit_off_zz_leg_count"]
+        zz_legs  = fd["zz_legs_since_lifecycle_start"]
+        assert zz_count.dtype == np.int64 and np.all(zz_count == -1), (
+            f"§2: exit_off_zz_leg_count sentinel wrong: dtype={zz_count.dtype}, "
+            f"values={set(zz_count.tolist())}"
+        )
+        assert zz_legs.dtype == np.int64 and np.all(zz_legs == -1), (
+            f"§2: zz_legs_since_lifecycle_start sentinel wrong: dtype={zz_legs.dtype}, "
+            f"values={set(zz_legs.tolist())}"
         )

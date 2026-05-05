@@ -13,6 +13,10 @@ from typing import Any, Dict, Optional, TYPE_CHECKING, Union
 import numpy as np
 import pandas as pd
 
+from supertrend_optimizer.core._fsm_state_names import (
+    FSM_STATE_NAMES as _ALL_FSM_STATES,
+    ACTIVE_LIFECYCLE_STATES as _ACTIVE_LIFECYCLE_STATES,
+)
 from supertrend_optimizer.engine.run import run_single_backtest
 from supertrend_optimizer.core.metrics import calculate_all_metrics
 from supertrend_optimizer.utils.constants import INVALID_METRIC_VALUE, MAX_VALID_METRIC
@@ -91,15 +95,6 @@ class StepResult:
 # WP9: filter diagnostics summary helper
 # ---------------------------------------------------------------------------
 
-_ALL_FSM_STATES = (
-    "OFF",
-    "WAIT_FIRST_ST_FLIP",
-    "ST_ACTIVE_FREEZE",
-    "ST_ACTIVE_MONITORING",
-    "ST_STOPPING",
-)
-
-
 def _compute_filter_diagnostics_summary(
     filter_diagnostics: Optional[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
@@ -135,21 +130,21 @@ def _compute_filter_diagnostics_summary(
         )
         summary["n_bars_in_freeze"] = int(np.sum(state_np == "ST_ACTIVE_FREEZE"))
         summary["n_bars_in_monitoring"] = int(np.sum(state_np == "ST_ACTIVE_MONITORING"))
+        summary["n_bars_in_counting_zz_legs"] = int(
+            np.sum(state_np == "ST_COUNTING_ZZ_LEGS")
+        )
         summary["n_bars_in_stopping"] = int(np.sum(state_np == "ST_STOPPING"))
 
         # filter_states_visited: comma-joined sorted list of observed states
         visited = sorted(s for s in _ALL_FSM_STATES if np.any(state_np == s))
         summary["filter_states_visited"] = ",".join(visited) if visited else ""
 
-        # lifecycle_starts_count: transitions INTO ST_ACTIVE_FREEZE from any
-        # non-FREEZE predecessor.  Per spec §4.2, the trading lifecycle starts
-        # at the first allowed ST flip → ST_ACTIVE_FREEZE, NOT at OFF → WAIT.
-        # Bar 0 counts if the FSM is already in ST_ACTIVE_FREEZE (same-bar
-        # trigger + allowed flip).
-        lifecycle_active = (
-            (state_np == "ST_ACTIVE_FREEZE")
-            | (state_np == "ST_ACTIVE_MONITORING")
-        )
+        # lifecycle_starts_count: transitions INTO active lifecycle states.
+        # Uses shared ACTIVE_LIFECYCLE_STATES so adding a new active state
+        # only requires one edit (in shared) — plan §7.4.
+        lifecycle_active = np.zeros(n, dtype=bool)
+        for _s in _ACTIVE_LIFECYCLE_STATES:
+            lifecycle_active |= (state_np == _s)
         lifecycle_starts = int(n > 0 and lifecycle_active[0])
         if n > 1:
             lifecycle_starts += int(
@@ -168,6 +163,20 @@ def _compute_filter_diagnostics_summary(
     median_stop_arr = filter_diagnostics.get("median_stop_triggered")
     if median_stop_arr is not None:
         summary["median_stop_triggered_count"] = int(np.sum(median_stop_arr == 1))
+
+    zz_leg_arr = filter_diagnostics.get("zz_leg_stop_triggered")
+    if zz_leg_arr is not None:
+        summary["zz_leg_stop_triggered_count"] = int(np.sum(np.asarray(zz_leg_arr) == 1))
+
+    eom_arr = filter_diagnostics.get("exit_off_mode")
+    if eom_arr is not None:
+        _e = np.asarray(eom_arr)
+        summary["exit_off_mode"] = str(_e[0]) if len(_e) > 0 else ""
+
+    eoz_arr = filter_diagnostics.get("exit_off_zz_leg_count")
+    if eoz_arr is not None:
+        _z = np.asarray(eoz_arr)
+        summary["exit_off_zz_leg_count"] = int(_z[0]) if len(_z) > 0 else -1
 
     # ------------------------------------------------------------------
     # Additional informational fields (not required by §10.6.4)

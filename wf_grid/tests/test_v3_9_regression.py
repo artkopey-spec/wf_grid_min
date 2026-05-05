@@ -29,7 +29,7 @@ Pin v3 backward-compat invariants explicitly:
 
   R4 (FSM enum stability)
   -----------------------
-  ``ZigZagFSMState`` enum values (codes 0-4) are unchanged after v3.
+  ``ZigZagFSMState`` enum values (codes 0-5) are unchanged after v3.
   Required because legacy diagnostics export ``trade_filter_state_code``.
 
   R5 (ZigZagPerBar backward-compat)
@@ -553,8 +553,11 @@ class TestV39FSMEnumStability:
     def test_r4_stopping_code_is_four(self):
         assert int(ZigZagFSMState.ST_STOPPING) == 4
 
+    def test_r4_counting_zz_legs_code_is_five(self):
+        assert int(ZigZagFSMState.ST_COUNTING_ZZ_LEGS) == 5
+
     def test_r4_no_extra_states(self):
-        """No new FSM states added in v3 (anti-drift В§9 / В§10.7.2)."""
+        """FSM member set is pinned (anti-drift §9 / §10.7.2)."""
         members = {m.name for m in ZigZagFSMState}
         assert members == {
             "OFF",
@@ -562,6 +565,7 @@ class TestV39FSMEnumStability:
             "ST_ACTIVE_FREEZE",
             "ST_ACTIVE_MONITORING",
             "ST_STOPPING",
+            "ST_COUNTING_ZZ_LEGS",
         }
 
 

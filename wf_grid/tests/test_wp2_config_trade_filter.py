@@ -782,6 +782,8 @@ class TestEnabledHappyPath:
         assert lc.freeze_confirmed_legs == 3
         assert lc.stop_check == "confirm_bar_only"
         assert lc.stopping_exit == "opposite_st_flip"
+        assert lc.exit_off_mode == "exit A"
+        assert lc.exit_off_zz_leg_count is None
 
     def test_auto_threshold_with_quantile_ok(self, tmp_path):
         yaml = (
@@ -1020,3 +1022,442 @@ class TestV3CandidateDurationGate:
         yaml = _v3_yaml("C", "    candidate_duration_gate:\n      enabled: true\n      max_bars: 1\n")
         cfg = _assert_ok(tmp_path, yaml)
         assert cfg.trade_filter.zigzag.candidate_duration_gate.max_bars == 1
+
+
+# ---------------------------------------------------------------------------
+# Exit-off mode (docs/plan_exit_off_modes.txt)
+# ---------------------------------------------------------------------------
+
+class TestExitOffLifecycleValidation:
+    def test_exit_b_without_count_rejects(self, tmp_path):
+        yaml = _MINIMAL_BASE + _ENABLED_BLOCK.replace(
+            "    stopping_exit: opposite_st_flip\n",
+            "    stopping_exit: opposite_st_flip\n    exit_off_mode: \"exit B\"\n",
+        )
+        _assert_error(tmp_path, yaml, "trade_filter.lifecycle.exit_off_zz_leg_count")
+
+    def test_exit_a_with_explicit_count_rejects(self, tmp_path):
+        yaml = _MINIMAL_BASE + _ENABLED_BLOCK.replace(
+            "    stopping_exit: opposite_st_flip\n",
+            "    stopping_exit: opposite_st_flip\n"
+            "    exit_off_mode: \"exit A\"\n"
+            "    exit_off_zz_leg_count: 3\n",
+        )
+        _assert_error(tmp_path, yaml, "must be absent")
+
+    def test_exit_b_with_count_ok(self, tmp_path):
+        yaml = _MINIMAL_BASE + _ENABLED_BLOCK.replace(
+            "    stopping_exit: opposite_st_flip\n",
+            "    stopping_exit: opposite_st_flip\n"
+            "    exit_off_mode: \"exit B\"\n"
+            "    exit_off_zz_leg_count: 3\n",
+        )
+        cfg = _assert_ok(tmp_path, yaml)
+        assert cfg.trade_filter.lifecycle.exit_off_mode == "exit B"
+        assert cfg.trade_filter.lifecycle.exit_off_zz_leg_count == 3
+
+
+# ---------------------------------------------------------------------------
+# PR1: Drift-тест whitelist'ов lifecycle (plan §13 PR1 / §14.1 last bullet)
+#
+# Гарантирует, что _ALLOWED_KEYS["trade_filter.lifecycle"] в WF Grid loader
+# И TRADE_FILTER_ALLOWED_KEYS["trade_filter.lifecycle"] в shared модуле
+# идентичны. Расхождение = регрессия (план §15 R2).
+# ---------------------------------------------------------------------------
+
+class TestLifecycleWhitelistDrift:
+    """PR1 drift-test: WF loader и shared module должны иметь одинаковый
+    lifecycle whitelist (docs/plan_exit_off_modes_v2.txt §13 PR1)."""
+
+    def test_lifecycle_allowed_keys_match_shared(self):
+        from wf_grid.config.loader import _ALLOWED_KEYS as wf_allowed
+        from supertrend_optimizer.core.trade_filter_config import (
+            TRADE_FILTER_ALLOWED_KEYS as shared_allowed,
+        )
+
+        wf_lc = frozenset(wf_allowed["trade_filter.lifecycle"])
+        shared_lc = shared_allowed["trade_filter.lifecycle"]
+
+        assert wf_lc == shared_lc, (
+            f"Lifecycle whitelist drift detected!\n"
+            f"  WF only:     {sorted(wf_lc - shared_lc)}\n"
+            f"  Shared only: {sorted(shared_lc - wf_lc)}\n"
+            "Update both _ALLOWED_KEYS in loader.py AND TRADE_FILTER_ALLOWED_KEYS "
+            "in trade_filter_config.py to match."
+        )
+
+
+# ===========================================================================
+# PR2: Full validation matrix §3.1-§3.3 (plan_exit_off_modes_v2.txt §14.1)
+# ===========================================================================
+
+import copy as _copy
+
+from supertrend_optimizer.core.trade_filter_config import (
+    _V3_INIT_FAILURE_KEYS as _SHARED_FAILURE_KEYS,
+    TRADE_FILTER_ALLOWED_KEYS as _SHARED_ALLOWED,
+    build_trade_filter_config_from_raw as _build_tf,
+    collect_raw_user_keys as _collect_ruk,
+    validate_trade_filter as _shared_validate,
+)
+
+# Minimal raw dict for a fully valid enabled trade_filter (v3 mode A).
+# All lifecycle keys default to valid values; tests override specific keys.
+_VALID_ENABLED_RAW: dict = {
+    "enabled": True,
+    "type": "zigzag_st_mode",
+    "zigzag": {
+        "mode": "A",
+        "reversal_threshold": 0.005,
+        "candidate_trigger_threshold": 0.012,
+        "local_window": 5,
+    },
+    "lifecycle": {
+        "freeze_confirmed_legs": 3,
+        "stop_check": "confirm_bar_only",
+        "stopping_exit": "opposite_st_flip",
+    },
+}
+
+
+def _run_exit_off(
+    lc_overrides: dict | None = None,
+    caller: str = "wf_grid",
+) -> tuple[list[str], list[str]]:
+    """Run validate_trade_filter on a minimal valid config with lifecycle overrides.
+
+    Returns (errors, error_keys).  Uses the shared validator directly so that
+    error_keys are captured (load_grid_config only raises ConfigError text).
+    """
+    raw = {"trade_filter": _copy.deepcopy(_VALID_ENABLED_RAW)}
+    if lc_overrides:
+        raw["trade_filter"]["lifecycle"].update(lc_overrides)
+    tf = _build_tf(raw["trade_filter"])
+    ruk = _collect_ruk(raw)
+    errors: list[str] = []
+    ekeys: list[str] = []
+    _shared_validate(tf, errors, ruk, caller_pipeline=caller, error_keys=ekeys)
+    return errors, ekeys
+
+
+def _assert_no_exit_off_errors(lc_overrides: dict | None = None) -> None:
+    """Assert that no errors related to exit_off keys appear."""
+    errors, ekeys = _run_exit_off(lc_overrides)
+    exit_keys = {k for k in ekeys if "exit_off" in k or "zz_leg" in k}
+    assert not exit_keys, f"Unexpected exit_off errors: {exit_keys}"
+    exit_msgs = [e for e in errors if "exit_off" in e or "zz_leg" in e]
+    assert not exit_msgs, f"Unexpected exit_off error messages: {exit_msgs}"
+
+
+def _superset_assert(
+    ekeys: list[str],
+    required: set[str],
+    forbidden: set[str] | None = None,
+) -> None:
+    """Superset assert: required ⊆ observed; forbidden ∩ observed == ∅."""
+    observed = set(ekeys)
+    missing = required - observed
+    assert not missing, (
+        f"Required error_keys missing: {sorted(missing)}\n"
+        f"  Observed: {sorted(observed)}"
+    )
+    if forbidden:
+        present_forbidden = forbidden & observed
+        assert not present_forbidden, (
+            f"Forbidden error_keys present: {sorted(present_forbidden)}\n"
+            f"  Observed: {sorted(observed)}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# §3.1 — Valid configs
+# ---------------------------------------------------------------------------
+
+class TestExitOffValidConfigs:
+    """§3.1: Valid configurations must produce zero exit_off errors."""
+
+    def test_both_keys_absent_is_valid(self):
+        """Both keys absent -> resolved 'exit A', no errors."""
+        _assert_no_exit_off_errors()
+
+    def test_exit_a_explicit_no_count_is_valid(self):
+        """exit_off_mode: 'exit A' without count -> valid."""
+        _assert_no_exit_off_errors({"exit_off_mode": "exit A"})
+
+    def test_exit_b_with_count_1_is_valid(self):
+        """exit_off_mode: 'exit B' + count: 1 -> valid (boundary)."""
+        _assert_no_exit_off_errors({"exit_off_mode": "exit B", "exit_off_zz_leg_count": 1})
+
+    def test_exit_b_with_count_3_is_valid(self):
+        """exit_off_mode: 'exit B' + count: 3 -> valid."""
+        _assert_no_exit_off_errors({"exit_off_mode": "exit B", "exit_off_zz_leg_count": 3})
+
+    def test_exit_b_with_count_100_is_valid(self):
+        """exit_off_mode: 'exit B' + large count -> valid."""
+        _assert_no_exit_off_errors({"exit_off_mode": "exit B", "exit_off_zz_leg_count": 100})
+
+
+# ---------------------------------------------------------------------------
+# §3.2 — Single-error invalid configs
+# ---------------------------------------------------------------------------
+
+class TestExitOffInvalidSingleErrors:
+    """§3.2: Each config triggers exactly the expected error key (superset assert)."""
+
+    # --- count present when exit A (present_when_exit_a) ---
+
+    def test_absent_mode_explicit_count_present_when_exit_a(self):
+        _, ekeys = _run_exit_off({"exit_off_zz_leg_count": 3})
+        _superset_assert(ekeys, {"exit_off_zz_leg_count_present_when_exit_a"})
+
+    def test_exit_a_plus_count_null_present_when_exit_a(self):
+        _, ekeys = _run_exit_off({"exit_off_mode": "exit A", "exit_off_zz_leg_count": None})
+        _superset_assert(ekeys, {"exit_off_zz_leg_count_present_when_exit_a"})
+
+    def test_exit_a_plus_count_zero_present_when_exit_a(self):
+        _, ekeys = _run_exit_off({"exit_off_mode": "exit A", "exit_off_zz_leg_count": 0})
+        _superset_assert(ekeys, {"exit_off_zz_leg_count_present_when_exit_a"})
+
+    def test_exit_a_plus_count_int_present_when_exit_a(self):
+        _, ekeys = _run_exit_off({"exit_off_mode": "exit A", "exit_off_zz_leg_count": 3})
+        _superset_assert(ekeys, {"exit_off_zz_leg_count_present_when_exit_a"})
+
+    def test_exit_a_plus_count_str_present_when_exit_a(self):
+        _, ekeys = _run_exit_off({"exit_off_mode": "exit A", "exit_off_zz_leg_count": "3"})
+        _superset_assert(ekeys, {"exit_off_zz_leg_count_present_when_exit_a"})
+
+    # --- count missing when exit B (count_missing) ---
+
+    def test_exit_b_no_count_missing(self):
+        _, ekeys = _run_exit_off({"exit_off_mode": "exit B"})
+        _superset_assert(ekeys, {"exit_off_zz_leg_count_missing"})
+
+    # --- count below_one when exit B ---
+
+    @pytest.mark.parametrize("val", [0, -1])
+    def test_exit_b_count_below_one(self, val):
+        _, ekeys = _run_exit_off({"exit_off_mode": "exit B", "exit_off_zz_leg_count": val})
+        _superset_assert(ekeys, {"exit_off_zz_leg_count_below_one"})
+
+    # --- count invalid_type when exit B ---
+
+    @pytest.mark.parametrize("val", [True, False, 3.0, "3", None, [], {}])
+    def test_exit_b_count_invalid_type(self, val):
+        _, ekeys = _run_exit_off({"exit_off_mode": "exit B", "exit_off_zz_leg_count": val})
+        _superset_assert(ekeys, {"exit_off_zz_leg_count_invalid_type"})
+
+    # --- mode invalid_literal ---
+
+    @pytest.mark.parametrize("val", ["", "A", "B", "C", "A+B", "C+B",
+                                      "exit a", "EXIT A", "EXIT_A", "exit_A"])
+    def test_mode_invalid_literal(self, val):
+        _, ekeys = _run_exit_off({"exit_off_mode": val})
+        _superset_assert(ekeys, {"exit_off_mode_invalid_literal"})
+
+    # --- mode invalid_type ---
+
+    @pytest.mark.parametrize("val", [True, False, 1, 0, 1.0, None, [], {}])
+    def test_mode_invalid_type(self, val):
+        _, ekeys = _run_exit_off({"exit_off_mode": val})
+        _superset_assert(ekeys, {"exit_off_mode_invalid_type"})
+
+
+# ---------------------------------------------------------------------------
+# §3.3 — Combination configs (superset assert, NOT exact equality)
+# ---------------------------------------------------------------------------
+
+class TestExitOffCombinations:
+    """§3.3: Multiple error keys can fire simultaneously (plan §3.3 contract)."""
+
+    def test_invalid_literal_plus_count_int_fires_two_keys(self):
+        """mode invalid_literal + count: 3 -> {invalid_literal, present_when_exit_a}."""
+        _, ekeys = _run_exit_off({"exit_off_mode": "exit_A", "exit_off_zz_leg_count": 3})
+        _superset_assert(
+            ekeys,
+            required={"exit_off_mode_invalid_literal",
+                       "exit_off_zz_leg_count_present_when_exit_a"},
+        )
+
+    def test_invalid_literal_plus_count_zero_no_below_one(self):
+        """mode invalid_literal + count: 0 -> {invalid_literal, present_when_exit_a};
+        below_one must NOT fire (count not validated when effective != 'exit B')."""
+        _, ekeys = _run_exit_off({"exit_off_mode": "exit_A", "exit_off_zz_leg_count": 0})
+        _superset_assert(
+            ekeys,
+            required={"exit_off_mode_invalid_literal",
+                       "exit_off_zz_leg_count_present_when_exit_a"},
+            forbidden={"exit_off_zz_leg_count_below_one"},
+        )
+
+    def test_invalid_type_mode_plus_count_int_fires_two_keys(self):
+        """mode invalid_type + count: 3 -> {invalid_type (mode), present_when_exit_a}."""
+        _, ekeys = _run_exit_off({"exit_off_mode": True, "exit_off_zz_leg_count": 3})
+        _superset_assert(
+            ekeys,
+            required={"exit_off_mode_invalid_type",
+                       "exit_off_zz_leg_count_present_when_exit_a"},
+        )
+
+    def test_invalid_type_mode_plus_count_bool_no_count_type_error(self):
+        """mode invalid_type + count: True -> {mode invalid_type, present_when_exit_a};
+        count_invalid_type must NOT fire (count not validated when effective != 'exit B')."""
+        _, ekeys = _run_exit_off({"exit_off_mode": True, "exit_off_zz_leg_count": True})
+        _superset_assert(
+            ekeys,
+            required={"exit_off_mode_invalid_type",
+                       "exit_off_zz_leg_count_present_when_exit_a"},
+            forbidden={"exit_off_zz_leg_count_invalid_type"},
+        )
+
+    def test_exit_a_plus_count_bool_no_count_type_error(self):
+        """exit_off_mode: 'exit A' + count: True -> {present_when_exit_a};
+        count_invalid_type must NOT fire."""
+        _, ekeys = _run_exit_off({"exit_off_mode": "exit A", "exit_off_zz_leg_count": True})
+        _superset_assert(
+            ekeys,
+            required={"exit_off_zz_leg_count_present_when_exit_a"},
+            forbidden={"exit_off_zz_leg_count_invalid_type"},
+        )
+
+    def test_exit_b_plus_count_bool_fires_only_count_type(self):
+        """exit_off_mode: 'exit B' + count: True -> {invalid_type (count)}."""
+        _, ekeys = _run_exit_off({"exit_off_mode": "exit B", "exit_off_zz_leg_count": True})
+        _superset_assert(ekeys, required={"exit_off_zz_leg_count_invalid_type"})
+
+    def test_exit_b_plus_count_zero_fires_only_below_one(self):
+        """exit_off_mode: 'exit B' + count: 0 -> {below_one}."""
+        _, ekeys = _run_exit_off({"exit_off_mode": "exit B", "exit_off_zz_leg_count": 0})
+        _superset_assert(ekeys, required={"exit_off_zz_leg_count_below_one"})
+
+
+# ---------------------------------------------------------------------------
+# Disabled path (§1 контракт конфига — disabled filter behavior)
+# ---------------------------------------------------------------------------
+
+class TestExitOffDisabledPath:
+    """Disabled filter: strict schema still blocks unknown keys;
+    known key with invalid value is skipped."""
+
+    def test_disabled_unknown_lifecycle_key_schema_invalid(self, tmp_path):
+        """Unknown lifecycle key under disabled filter -> schema error."""
+        yaml = (
+            _MINIMAL_BASE
+            + "trade_filter:\n  enabled: false\n  type: zigzag_st_mode\n"
+            "  lifecycle:\n    unknown_key_xyz: true\n"
+        )
+        _assert_error(tmp_path, yaml, "unknown config key")
+
+    def test_disabled_known_key_invalid_value_no_error(self, tmp_path):
+        """Known lifecycle key with invalid value under disabled filter -> no error."""
+        yaml = (
+            _MINIMAL_BASE
+            + "trade_filter:\n  enabled: false\n  type: zigzag_st_mode\n"
+            "  lifecycle:\n    exit_off_mode: \"BAD_LITERAL\"\n"
+        )
+        cfg = _assert_ok(tmp_path, yaml)
+        assert cfg.trade_filter is not None
+        assert not cfg.trade_filter.enabled
+
+    def test_disabled_no_new_columns(self, tmp_path):
+        """Disabled filter: no per-bar diagnostics, filter_diagnostics_summary is None."""
+        yaml = (
+            _MINIMAL_BASE
+            + "trade_filter:\n  enabled: false\n  type: zigzag_st_mode\n"
+        )
+        cfg = _assert_ok(tmp_path, yaml)
+        assert not cfg.trade_filter.enabled
+
+
+# ---------------------------------------------------------------------------
+# caller_pipeline parity: wf_grid vs tester produce identical errors (§14.1)
+# ---------------------------------------------------------------------------
+
+class TestExitOffCallerPipelineParity:
+    """Parametrize caller_pipeline; errors must be identical for wf_grid/tester."""
+
+    @pytest.mark.parametrize("caller", ["wf_grid", "tester"])
+    def test_absent_count_with_exit_b_same_error(self, caller):
+        _, ekeys = _run_exit_off({"exit_off_mode": "exit B"}, caller=caller)
+        _superset_assert(ekeys, {"exit_off_zz_leg_count_missing"})
+
+    @pytest.mark.parametrize("caller", ["wf_grid", "tester"])
+    def test_invalid_literal_same_error(self, caller):
+        _, ekeys = _run_exit_off({"exit_off_mode": "EXIT_A"}, caller=caller)
+        _superset_assert(ekeys, {"exit_off_mode_invalid_literal"})
+
+    @pytest.mark.parametrize("caller", ["wf_grid", "tester"])
+    def test_combination_same_errors(self, caller):
+        _, ekeys = _run_exit_off(
+            {"exit_off_mode": "EXIT_A", "exit_off_zz_leg_count": 3}, caller=caller
+        )
+        _superset_assert(
+            ekeys,
+            required={"exit_off_mode_invalid_literal",
+                       "exit_off_zz_leg_count_present_when_exit_a"},
+        )
+
+    def test_wf_grid_and_tester_produce_identical_ekeys_for_all_cases(self):
+        """Exhaustive parity: for each test override, both callers return same error_keys."""
+        test_cases = [
+            {"exit_off_mode": "exit B"},
+            {"exit_off_mode": "EXIT_A"},
+            {"exit_off_mode": "exit A", "exit_off_zz_leg_count": 3},
+            {"exit_off_mode": "exit B", "exit_off_zz_leg_count": 0},
+            {"exit_off_mode": True, "exit_off_zz_leg_count": 3},
+            {"exit_off_mode": "exit B", "exit_off_zz_leg_count": "3"},
+        ]
+        for overrides in test_cases:
+            _, wf_ekeys = _run_exit_off(overrides, caller="wf_grid")
+            _, t_ekeys = _run_exit_off(overrides, caller="tester")
+            assert set(wf_ekeys) == set(t_ekeys), (
+                f"Caller parity mismatch for overrides={overrides!r}:\n"
+                f"  wf_grid: {sorted(wf_ekeys)}\n"
+                f"  tester:  {sorted(t_ekeys)}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# _V3_INIT_FAILURE_KEYS registry (§14.1 last check)
+# ---------------------------------------------------------------------------
+
+class TestExitOffFailureKeysRegistry:
+    """All 6 exit-off error keys must be in _V3_INIT_FAILURE_KEYS."""
+
+    _EXPECTED_EXIT_OFF_KEYS = {
+        "exit_off_mode_invalid_literal",
+        "exit_off_mode_invalid_type",
+        "exit_off_zz_leg_count_missing",
+        "exit_off_zz_leg_count_invalid_type",
+        "exit_off_zz_leg_count_below_one",
+        "exit_off_zz_leg_count_present_when_exit_a",
+    }
+
+    def test_all_six_keys_in_failure_registry(self):
+        missing = self._EXPECTED_EXIT_OFF_KEYS - _SHARED_FAILURE_KEYS
+        assert not missing, (
+            f"Missing from _V3_INIT_FAILURE_KEYS: {sorted(missing)}"
+        )
+
+    def test_each_key_is_reachable_by_validator(self):
+        """Verify each error key is actually emitted by the validator
+        (not just declared in the registry)."""
+        cases = {
+            "exit_off_mode_invalid_literal": {"exit_off_mode": "EXIT_A"},
+            "exit_off_mode_invalid_type": {"exit_off_mode": 42},
+            "exit_off_zz_leg_count_missing": {"exit_off_mode": "exit B"},
+            "exit_off_zz_leg_count_invalid_type": {
+                "exit_off_mode": "exit B", "exit_off_zz_leg_count": "3"
+            },
+            "exit_off_zz_leg_count_below_one": {
+                "exit_off_mode": "exit B", "exit_off_zz_leg_count": 0
+            },
+            "exit_off_zz_leg_count_present_when_exit_a": {
+                "exit_off_mode": "exit A", "exit_off_zz_leg_count": 3
+            },
+        }
+        for expected_key, overrides in cases.items():
+            _, ekeys = _run_exit_off(overrides)
+            assert expected_key in ekeys, (
+                f"Error key {expected_key!r} not emitted by validator "
+                f"for overrides={overrides!r}. Got: {ekeys}"
+            )

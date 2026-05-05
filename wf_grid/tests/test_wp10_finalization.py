@@ -58,7 +58,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _DATA_CSV = _PROJECT_ROOT / "data.csv"
 _SKIP_E2E = f"Real data file not found: {_DATA_CSV}"
 
-# Full §13 keyset (spec Appendix A v1.1 §13)
+# Full §13 keyset (spec Appendix A v1.1 §13 + exit-off §6)
 _SECTION_13_KEYS = {
     "trade_filter_enabled",
     "trade_filter_state",
@@ -77,6 +77,11 @@ _SECTION_13_KEYS = {
     "stopping_started_at_index",
     "filter_allowed_entry",
     "filter_block_reason",
+    # exit-off modes (plan_exit_off_modes_v2.txt §6)
+    "exit_off_mode",
+    "exit_off_zz_leg_count",
+    "zz_legs_since_lifecycle_start",
+    "zz_leg_stop_triggered",
 }
 
 # §10.6.4 required summary columns (n_bars_in_wait_first_st_flip added in T1.3)
@@ -86,10 +91,14 @@ _SUMMARY_COLS = [
     "n_bars_in_wait_first_st_flip",
     "n_bars_in_freeze",
     "n_bars_in_monitoring",
+    "n_bars_in_counting_zz_legs",
     "n_bars_in_stopping",
     "n_filter_blocked_entries",
     "lifecycle_starts_count",
     "median_stop_triggered_count",
+    "zz_leg_stop_triggered_count",
+    "exit_off_mode",
+    "exit_off_zz_leg_count",
 ]
 
 
@@ -1066,7 +1075,9 @@ def _write_enabled_filter_config(tmp_path: Path) -> str:
       walk_forward:
         train_size: "500bars"
         test_size: "200bars"
-        step_size: "200bars"
+        # Wider step than 200bars: full-grid summary segment blocks S1..SN would
+        # exceed Excel's 16384 column limit on data.csv-sized rolling WF.
+        step_size: "500bars"
         scheme: "rolling"
 
     gates:
@@ -1252,7 +1263,7 @@ class TestE4DisabledBaselineSchemaIntact:
           walk_forward:
             train_size: "500bars"
             test_size: "200bars"
-            step_size: "200bars"
+            step_size: "500bars"
             scheme: "rolling"
         gates:
           step:
@@ -1318,3 +1329,238 @@ class TestE5DisabledEnabledBaselineParity:
                 continue
             # No check fails — just verify column presence and no mixed invalid types
             assert col in df.columns
+
+
+# ---------------------------------------------------------------------------
+# §14.6 Negative-control: exit B summary fields survive _strip_filter_arrays
+# ---------------------------------------------------------------------------
+
+_EXIT_B_SUMMARY_COLS = [
+    "n_bars_in_counting_zz_legs",
+    "zz_leg_stop_triggered_count",
+    "exit_off_mode",
+    "exit_off_zz_leg_count",
+]
+
+
+def _write_exit_b_config(tmp_path: Path) -> str:
+    """Write a mini-grid config with exit B (count=2) for §14.6 IPC test."""
+    cfg_text = textwrap.dedent(f"""\
+    data:
+      file_path: "{_DATA_CSV.as_posix()}"
+      periods_per_year: 252
+      annualization_basis: "trading"
+
+    optimization:
+      atr_period_range: [10, 10]
+      multiplier_range: [2.0, 2.0]
+      multiplier_step: 0.5
+      trade_mode: "both"
+
+    backtest:
+      commission: 0.000235
+      min_trades_required: 1
+      early_exit_enabled: false
+      early_exit_max_drawdown: 0.50
+      early_exit_check_bars: 50
+
+    validation:
+      warmup_period: 0
+      warmup_period_auto: true
+      walk_forward:
+        train_size: "500bars"
+        test_size: "200bars"
+        step_size: "500bars"
+        scheme: "rolling"
+
+    gates:
+      step:
+        min_trades: null
+        max_drawdown_threshold: -0.50
+      candidate:
+        positive_median_threshold: 0.0
+        min_trades_median: 1.0
+        worst_segment_pnl_threshold: null
+        max_drawdown_threshold: -0.50
+
+    ranking:
+      mode: "gates_score"
+      min_segments_for_ranking: null
+      sort_by: "sum_pnl_pct_Median"
+      tiebreaker: "sum_pnl_pct_Min"
+
+    scoring:
+      score_weights:
+        sum_pnl_pct_Median: 0.45
+        profitable_segments_count: 0.35
+        abs_max_drawdown_Min: 0.20
+
+    status:
+      min_meaningful_bars: 30
+
+    trade_filter:
+      enabled: true
+      type: zigzag_st_mode
+      zigzag:
+        reversal_threshold: 0.02
+        local_window: 5
+        global_stats_source: full_dataset
+        leg_height_mode: pct
+        global_median: auto
+        candidate_trigger_threshold: 0.01
+      triggers:
+        candidate_threshold:
+          enabled: true
+        confirmed_median:
+          enabled: false
+      lifecycle:
+        freeze_confirmed_legs: 0
+        stop_check: confirm_bar_only
+        stopping_exit: opposite_st_flip
+        exit_off_mode: "exit B"
+        exit_off_zz_leg_count: 2
+    """)
+    p = tmp_path / "e2e_exit_b_config.yaml"
+    p.write_text(cfg_text, encoding="utf-8")
+    return str(p)
+
+
+@pytest.mark.slow
+class TestE6ExitBIPCNegativeControl:
+    """§14.6 Negative-control: exit B summary fields survive _strip_filter_arrays.
+
+    Verifies that:
+      - run_grid_pipeline (sequential) strips per-bar arrays (filter_diagnostics_oos=None)
+      - BUT summary fields (n_bars_in_counting_zz_legs, zz_leg_stop_triggered_count,
+        exit_off_mode, exit_off_zz_leg_count) are present in step_oos_long and not None.
+
+    This guards against silent regression: computing summary but forgetting to
+    write it into _FILTER_SUMMARY_COLUMNS / mapping (plan §14.6 / §7.6).
+    """
+
+    @pytest.fixture(scope="class")
+    def exit_b_result(self, tmp_path_factory):
+        if not _DATA_CSV.exists():
+            pytest.skip(_SKIP_E2E)
+        from wf_grid.pipeline.orchestrator import run_grid_pipeline
+        tmp = tmp_path_factory.mktemp("e2e_exit_b")
+        cfg_path = _write_exit_b_config(tmp)
+        result = run_grid_pipeline(
+            config_path=cfg_path,
+            output_path=str(tmp / "exit_b_output.xlsx"),
+            parallel_enabled=False,
+        )
+        assert result.error is None, f"E6 FAIL: exit B pipeline failed: {result.error}"
+        return result
+
+    def test_e6_pipeline_completes(self, exit_b_result):
+        assert exit_b_result.error is None
+
+    def test_e6_step_oos_long_has_exit_off_summary_cols(self, exit_b_result):
+        df = exit_b_result.step_oos_long
+        assert df is not None and len(df) > 0
+        for col in _EXIT_B_SUMMARY_COLS:
+            assert col in df.columns, (
+                f"§14.6 FAIL: '{col}' missing from step_oos_long after IPC strip"
+            )
+
+    def test_e6_exit_off_mode_col_is_exit_b_not_null(self, exit_b_result):
+        df = exit_b_result.step_oos_long
+        ok_rows = df[df["exit_off_mode"].notna()]
+        assert len(ok_rows) > 0, "§14.6 FAIL: exit_off_mode all null after IPC strip"
+        assert all(ok_rows["exit_off_mode"] == "exit B"), (
+            f"§14.6: expected 'exit B', got {set(ok_rows['exit_off_mode'].unique())}"
+        )
+
+    def test_e6_exit_off_zz_leg_count_is_2_not_null(self, exit_b_result):
+        df = exit_b_result.step_oos_long
+        ok_rows = df[df["exit_off_zz_leg_count"].notna()]
+        assert len(ok_rows) > 0, "§14.6 FAIL: exit_off_zz_leg_count all null"
+        assert all(ok_rows["exit_off_zz_leg_count"] == 2), (
+            f"§14.6: expected all 2, got {set(ok_rows['exit_off_zz_leg_count'].unique())}"
+        )
+
+    def test_e6_n_bars_in_counting_zz_legs_is_not_null(self, exit_b_result):
+        df = exit_b_result.step_oos_long
+        assert "n_bars_in_counting_zz_legs" in df.columns
+        ok_rows = df[df["n_bars_in_counting_zz_legs"].notna()]
+        assert len(ok_rows) > 0, "§14.6 FAIL: n_bars_in_counting_zz_legs all null"
+
+    def test_e6_summary_presence_proves_strip_happened(self, exit_b_result):
+        """Structural proof that _strip_filter_diagnostics_arrays ran correctly:
+        summary columns are non-null DESPITE per-bar arrays being stripped by the
+        pipeline.  This is possible only if summary was computed BEFORE stripping
+        (plan §7.6 / §14.6 design invariant: compute-then-strip)."""
+        df = exit_b_result.step_oos_long
+        assert df is not None
+        # Both summary presence AND non-null values confirm the strip-safe design:
+        # if strip happened BEFORE summary computation, these would all be null/missing.
+        for col in _EXIT_B_SUMMARY_COLS:
+            assert col in df.columns, f"§14.6: column '{col}' missing"
+            assert df[col].notna().any(), (
+                f"§14.6: '{col}' all null — summary not computed before strip"
+            )
+
+
+@pytest.mark.slow
+class TestE7ExitBIPCParallelControl:
+    """§14.6 (strict): exit B summary fields survive TRUE multiprocess IPC.
+
+    Same contract as TestE6, but with parallel_enabled=True so that
+    _mp_worker_run_grid_point is called in a separate process, result is
+    serialized via IPC queue, and _strip_filter_diagnostics_arrays fires
+    INSIDE the worker before pickling — the strictest form of the §14.6 test.
+
+    Verifies: summary scalars (exit_off_mode, n_bars_in_counting_zz_legs, etc.)
+    survive pickle→IPC→unpickle intact.
+    """
+
+    @pytest.fixture(scope="class")
+    def exit_b_parallel_result(self, tmp_path_factory):
+        if not _DATA_CSV.exists():
+            pytest.skip(_SKIP_E2E)
+        from wf_grid.pipeline.orchestrator import run_grid_pipeline
+        tmp = tmp_path_factory.mktemp("e2e_exit_b_parallel")
+        cfg_path = _write_exit_b_config(tmp)
+        result = run_grid_pipeline(
+            config_path=cfg_path,
+            output_path=str(tmp / "exit_b_parallel_output.xlsx"),
+            parallel_enabled=True,
+            max_workers=2,
+        )
+        assert result.error is None, f"E7 FAIL: parallel exit B pipeline: {result.error}"
+        return result
+
+    def test_e7_pipeline_parallel_completes(self, exit_b_parallel_result):
+        assert exit_b_parallel_result.error is None
+
+    def test_e7_exit_off_summary_cols_survive_ipc(self, exit_b_parallel_result):
+        """After IPC serialization, all 4 exit-off summary columns must be
+        present and non-null for enabled-filter rows."""
+        df = exit_b_parallel_result.step_oos_long
+        assert df is not None and len(df) > 0
+        for col in _EXIT_B_SUMMARY_COLS:
+            assert col in df.columns, (
+                f"§14.6 IPC FAIL: '{col}' missing from step_oos_long "
+                "after parallel IPC round-trip"
+            )
+            assert df[col].notna().any(), (
+                f"§14.6 IPC FAIL: '{col}' all null after parallel IPC — "
+                "summary not serialized or computed before worker strip"
+            )
+
+    def test_e7_exit_off_mode_is_exit_b_after_ipc(self, exit_b_parallel_result):
+        df = exit_b_parallel_result.step_oos_long
+        ok = df[df["exit_off_mode"].notna()]
+        assert len(ok) > 0
+        assert all(ok["exit_off_mode"] == "exit B"), (
+            f"§14.6 IPC: exit_off_mode wrong after IPC: {set(ok['exit_off_mode'].unique())}"
+        )
+
+    def test_e7_exit_off_zz_leg_count_is_2_after_ipc(self, exit_b_parallel_result):
+        df = exit_b_parallel_result.step_oos_long
+        ok = df[df["exit_off_zz_leg_count"].notna()]
+        assert len(ok) > 0
+        assert all(ok["exit_off_zz_leg_count"] == 2), (
+            f"§14.6 IPC: exit_off_zz_leg_count wrong: {set(ok['exit_off_zz_leg_count'].unique())}"
+        )

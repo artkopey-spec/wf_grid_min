@@ -110,6 +110,11 @@ _SECTION_13_REQUIRED_KEYS = {
     "candidate_duration_max_bars",
     "immediate_candidate_entry_used",
     "immediate_candidate_entry_block_reason",
+    # exit-off modes (plan_exit_off_modes_v2.txt §6)
+    "exit_off_mode",
+    "exit_off_zz_leg_count",
+    "zz_legs_since_lifecycle_start",
+    "zz_leg_stop_triggered",
 }
 
 # Internal-only: must not appear in standard exports (plan §WP9 test/gate)
@@ -1266,8 +1271,17 @@ class TestAntiDrift:
             )
 
     def test_no_bar_level_diagnostics_in_step_long(self):
-        """Bar-level diagnostic arrays must NOT appear in step_oos_long columns."""
-        bar_level_keys = list(_SECTION_13_REQUIRED_KEYS)
+        """Bar-level diagnostic arrays must NOT appear in step_oos_long columns.
+
+        Exception: exit-off echo keys (exit_off_mode, exit_off_zz_leg_count)
+        intentionally appear in BOTH per-bar and step_long — they are config
+        echo scalars (plan_exit_off_modes_v2.txt §2 mapping table).
+        """
+        # Keys that are allowed to be present in both per-bar and step_long
+        _DUAL_PRESENCE_ALLOWED = {"exit_off_mode", "exit_off_zz_leg_count"}
+        bar_level_keys = [
+            k for k in _SECTION_13_REQUIRED_KEYS if k not in _DUAL_PRESENCE_ALLOWED
+        ]
         for key in bar_level_keys:
             assert key not in _OOS_COLUMNS, (
                 f"Bar-level key {key!r} must not be in step_oos_long columns"

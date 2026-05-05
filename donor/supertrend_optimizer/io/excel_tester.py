@@ -131,6 +131,10 @@ FILTER_DIAGNOSTICS_100_DISPLAY_NAMES: Dict[str, str] = {
     "freeze_confirmed_legs":        "Freeze Confirmed Legs",
     "median_stop_triggered":        "Median Stop Triggered",
     "stopping_started_at_index":    "Stopping Started At Index",
+    "exit_off_mode":                "Exit-OFF Mode",
+    "exit_off_zz_leg_count":        "Exit-OFF ZZ Leg Count",
+    "zz_legs_since_lifecycle_start": "ZZ Legs Since Start",
+    "zz_leg_stop_triggered":        "ZZ Leg Stop Triggered",
     "filter_allowed_entry":         "Filter Allowed Entry",
     "filter_block_reason":          "Filter Block Reason",
     "trade_filter_state_code":      "Filter State Code",
@@ -943,9 +947,11 @@ def _build_filter_summary_block_df(period_results: List[PeriodResult]) -> Option
             "Bars WAIT":           bis.get("WAIT_FIRST_ST_FLIP", 0),
             "Bars FREEZE":         bis.get("ST_ACTIVE_FREEZE", 0),
             "Bars MONITORING":     bis.get("ST_ACTIVE_MONITORING", 0),
+            "Bars COUNTING ZZ":    bis.get("ST_COUNTING_ZZ_LEGS", 0),
             "Bars STOPPING":       bis.get("ST_STOPPING", 0),
             "Lifecycle Starts":    ctr.get("lifecycle_starts", s.get("lifecycle_starts_count", 0)),
             "Median Stop Events":  ctr.get("median_stop_triggered", s.get("median_stop_triggered_count", 0)),
+            "ZZ Leg Stop Events":  ctr.get("zz_leg_stop_triggered", s.get("zz_leg_stop_triggered_count", 0)),
             "Raw ST Flips":        ctr.get("raw_st_flips", 0),
             "Entries Allowed":     ctr.get("passed_entry_signals", 0),
             "Entries Blocked":     ctr.get("blocked_entry_signals", 0),
@@ -1218,6 +1224,9 @@ def _build_filters_summary_df(period_results: List[PeriodResult]) -> Optional[pd
         # WP-V3-8: gate params (§11.3)
         {"Parameter": "Candidate Duration Gate Enabled",  "Value": s0.get("candidate_duration_gate_enabled", thr.get("candidate_duration_gate_enabled", ""))},
         {"Parameter": "Candidate Duration Max Bars",      "Value": s0.get("candidate_duration_max_bars", thr.get("candidate_duration_max_bars", ""))},
+        # exit-off modes (plan_exit_off_modes_v2.txt §8.2)
+        {"Parameter": "Exit-OFF Mode",         "Value": thr.get("exit_off_mode", s0.get("exit_off_mode", ""))},
+        {"Parameter": "Exit-OFF ZZ Leg Count", "Value": thr.get("exit_off_zz_leg_count", s0.get("exit_off_zz_leg_count", -1))},
     ]
     params_df = pd.DataFrame(params_rows)
 
@@ -1244,11 +1253,13 @@ def _build_filters_summary_df(period_results: List[PeriodResult]) -> Optional[pd
             "Blocked Stopping":    ctr.get("blocked_stopping", 0),
             "Lifecycle Starts":    ctr.get("lifecycle_starts", s.get("lifecycle_starts_count", 0)),
             "Median Stops":        ctr.get("median_stop_triggered", s.get("median_stop_triggered_count", 0)),
+            "ZZ Leg Stops":        ctr.get("zz_leg_stop_triggered", s.get("zz_leg_stop_triggered_count", 0)),
             "Exits Opp Flip":      ctr.get("exits_opposite_flip", 0),
             "Bars OFF":            bis.get("OFF", s.get("n_bars_in_off", 0)),
             "Bars WAIT":           bis.get("WAIT_FIRST_ST_FLIP", s.get("n_bars_in_wait_first_st_flip", 0)),
             "Bars FREEZE":         bis.get("ST_ACTIVE_FREEZE", s.get("n_bars_in_freeze", 0)),
             "Bars MONITORING":     bis.get("ST_ACTIVE_MONITORING", s.get("n_bars_in_monitoring", 0)),
+            "Bars COUNTING ZZ":    bis.get("ST_COUNTING_ZZ_LEGS", s.get("n_bars_in_counting_zz_legs", 0)),
             "Bars STOPPING":       bis.get("ST_STOPPING", s.get("n_bars_in_stopping", 0)),
             # WP-V3-8: immediate entries (§11.3)
             "Immediate Entries Count":         s.get("immediate_entries_count", ctr.get("immediate_entries_count", 0)),

@@ -88,6 +88,7 @@ from supertrend_optimizer.io.excel_tester import (  # noqa: E402
 from supertrend_optimizer.core.zigzag_st_filter import build_zigzag_global_stats  # noqa: E402
 from supertrend_optimizer.testing.runner import run_all_periods, run_equal_blocks  # noqa: E402
 from supertrend_optimizer.testing.signal_events import build_signal_events  # noqa: E402
+from supertrend_optimizer.utils.config import load_config  # noqa: E402
 from supertrend_optimizer.utils.enums import ExecutionModel, MarketType  # noqa: E402
 from supertrend_optimizer.utils.exceptions import ConfigError, DataValidationError  # noqa: E402
 from supertrend_optimizer.utils.warmup import calculate_warmup_tester  # noqa: E402
@@ -139,7 +140,8 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        cfg = load_tester_config(args.config)
+        config_yaml_snapshot = load_config(args.config)
+        cfg = load_tester_config(args.config, loaded_raw=config_yaml_snapshot)
     except (ConfigError, yaml.YAMLError, FileNotFoundError, UnicodeDecodeError) as e:
         print(f"Config error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -242,6 +244,18 @@ def main() -> None:
         print(f"  trade_filter: disabled")
     print("=" * 48)
 
+    run_metadata_base = {
+        "config_path": str(Path(args.config).resolve()),
+        "csv_path": str(Path(args.csv).resolve()),
+        "resolved_periods_per_year": periods_per_year,
+        "annualization_factor_config": base_params["annualization_factor"],
+        "warmup_period_resolved": warmup_period,
+        "warmup_period_auto": base_params["warmup_period_auto"],
+        "execution_model": execution_model.value,
+        "market": base_params["market"],
+        "annualization_basis": base_params["annualization_basis"],
+    }
+
     saved_files: list[str] = []
 
     for run_idx, (seg_mode, out_basename) in enumerate(RUNS, start=1):
@@ -274,7 +288,20 @@ def main() -> None:
                         f"Sum PnL: {m.get('sum_pnl_pct', 0):.2f}%"
                     )
                 out_path = str(output_dir / out_basename)
-                actual_output = export_equal_blocks_results(segment_results, out_path)
+                run_metadata = {
+                    **run_metadata_base,
+                    "output_path_requested": out_path,
+                    "segmentation": {"mode": seg_mode, "n_parts": n_parts},
+                    "warmup_period_effective": (
+                        segment_results[0].ext_slice_effective_warmup
+                    ),
+                }
+                actual_output = export_equal_blocks_results(
+                    segment_results,
+                    out_path,
+                    config_yaml_snapshot=config_yaml_snapshot,
+                    run_metadata=run_metadata,
+                )
 
             else:
                 # Phase 2 (WP-T4): pass pre-materialised stats (plan §7.1).
@@ -309,7 +336,12 @@ def main() -> None:
                     filter_diagnostics=results[0].filter_diagnostics,
                 )
                 out_path = str(output_dir / out_basename)
-                # WP-T7: pass trade_filter_config and df for conditional filter sheets/columns
+                run_metadata = {
+                    **run_metadata_base,
+                    "output_path_requested": out_path,
+                    "segmentation": {"mode": seg_mode, "n_parts": n_parts},
+                    "warmup_period_effective": results[0].effective_warmup,
+                }
                 actual_output = export_tester_results(
                     results,
                     out_path,
@@ -317,6 +349,8 @@ def main() -> None:
                     false_start_max_bars=base_params["false_start_max_bars"],
                     trade_filter_config=tf_cfg,
                     df=df,
+                    config_yaml_snapshot=config_yaml_snapshot,
+                    run_metadata=run_metadata,
                 )
 
         except (ConfigError, DataValidationError) as e:

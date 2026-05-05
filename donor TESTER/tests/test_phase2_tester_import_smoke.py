@@ -61,6 +61,11 @@ class TestFilterWiredModulesImport:
         sig = inspect.signature(export_tester_results)
         assert "trade_filter_config" in sig.parameters
         assert "df" in sig.parameters
+        assert "config_yaml_snapshot" in sig.parameters
+        assert "run_metadata" in sig.parameters
+        sig_eq = inspect.signature(export_equal_blocks_results)
+        assert "config_yaml_snapshot" in sig_eq.parameters
+        assert "run_metadata" in sig_eq.parameters
 
     def test_build_zigzag_global_stats_importable(self) -> None:
         from supertrend_optimizer.core.zigzag_st_filter import build_zigzag_global_stats

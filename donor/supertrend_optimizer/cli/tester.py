@@ -228,7 +228,11 @@ def validate_paths(csv_path: str, output_path: str) -> None:
         raise ValueError(f"Output directory does not exist: {output_dir}")
 
 
-def load_tester_config(config_path: Optional[str]) -> Dict[str, Any]:
+def load_tester_config(
+    config_path: Optional[str],
+    *,
+    loaded_raw: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """
     Load and parse tester configuration.
 
@@ -251,6 +255,8 @@ def load_tester_config(config_path: Optional[str]) -> Dict[str, Any]:
 
     Args:
         config_path: Path to YAML config file (optional)
+        loaded_raw: If given with ``config_path``, use this dict instead of
+            calling ``load_config`` again (same object the snapshot was built from).
 
     Returns:
         Dictionary with configuration values (with defaults when no path given).
@@ -287,11 +293,7 @@ def load_tester_config(config_path: Optional[str]) -> Dict[str, Any]:
     if not config_path:
         return config
 
-    loaded_config = load_config(config_path)
-    if loaded_config is None:
-        raise ConfigError(
-            f"Config file is empty or invalid (expected a YAML mapping): {config_path}"
-        )
+    loaded_config = load_config(config_path) if loaded_raw is None else loaded_raw
     if not isinstance(loaded_config, dict):
         raise ConfigError(
             f"Config root must be a YAML mapping, got {type(loaded_config).__name__}: "
@@ -542,9 +544,14 @@ def run_backtest(args: argparse.Namespace) -> str:
     # Validate paths
     validate_paths(args.csv, args.out)
     
-    # Load config
-    config = load_tester_config(args.config)
-    
+    # Load config (single read of YAML when a file is given — snapshot + normalize)
+    config_yaml_snapshot: Optional[Dict[str, Any]] = None
+    if args.config:
+        config_yaml_snapshot = load_config(args.config)
+        config = load_tester_config(args.config, loaded_raw=config_yaml_snapshot)
+    else:
+        config = load_tester_config(None)
+
     # Merge CLI and config
     params = merge_cli_and_config(args, config)
     
@@ -593,6 +600,22 @@ def run_backtest(args: argparse.Namespace) -> str:
     
     seg_mode = params["segmentation"]["mode"]
     n_parts = params["segmentation"]["n_parts"]
+    run_metadata_common: Dict[str, Any] = {
+        "config_path": str(Path(args.config).resolve()) if args.config else "",
+        "csv_path": str(Path(args.csv).resolve()),
+        "output_path_requested": str(Path(args.out)),
+        "segmentation": {
+            "mode": seg_mode,
+            "n_parts": n_parts,
+        },
+        "resolved_periods_per_year": periods_per_year,
+        "annualization_factor_config": params["annualization_factor"],
+        "warmup_period_resolved": warmup_period,
+        "warmup_period_auto": params["warmup_period_auto"],
+        "execution_model": execution_model.value,
+        "market": params["market"],
+        "annualization_basis": params["annualization_basis"],
+    }
 
     print(f"\nRunning backtest...")
     print(f"  CSV: {args.csv}")
@@ -632,7 +655,16 @@ def run_backtest(args: argparse.Namespace) -> str:
             )
 
         print(f"\nExporting to Excel: {args.out}")
-        actual_output = export_equal_blocks_results(segment_results, args.out)
+        run_metadata_export = dict(run_metadata_common)
+        run_metadata_export["warmup_period_effective"] = (
+            segment_results[0].ext_slice_effective_warmup
+        )
+        actual_output = export_equal_blocks_results(
+            segment_results,
+            args.out,
+            config_yaml_snapshot=config_yaml_snapshot,
+            run_metadata=run_metadata_export,
+        )
 
     else:
         # Legacy mode: 5 tail slices.
@@ -693,6 +725,8 @@ def run_backtest(args: argparse.Namespace) -> str:
         )
 
         print(f"\nExporting to Excel: {args.out}")
+        run_metadata_export = dict(run_metadata_common)
+        run_metadata_export["warmup_period_effective"] = results[0].effective_warmup
         # WP-T7: pass trade_filter_config and df for conditional filter sheets/columns
         actual_output = export_tester_results(
             results,
@@ -701,6 +735,8 @@ def run_backtest(args: argparse.Namespace) -> str:
             false_start_max_bars=params["false_start_max_bars"],
             trade_filter_config=tf_cfg,
             df=df,
+            config_yaml_snapshot=config_yaml_snapshot,
+            run_metadata=run_metadata_export,
         )
 
     print(f"\n[SUCCESS] Results exported to: {actual_output}")

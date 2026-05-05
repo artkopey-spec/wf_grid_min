@@ -711,6 +711,9 @@ class SegmentResult:
     # Dates for Summary sheet (None when index is not DatetimeIndex)
     start_date: Optional[pd.Timestamp]
     end_date: Optional[pd.Timestamp]
+    # effective_warmup from the underlying extended-slice BacktestResult (ratio metrics;
+    # may be below requested warmup when the safety-cap triggers on that slice).
+    ext_slice_effective_warmup: int = 0
 
 
 def build_equal_block_slices(
@@ -1062,6 +1065,7 @@ def run_equal_blocks(
             segment_trades_df=segment_trades,
             start_date=start_date,
             end_date=end_date,
+            ext_slice_effective_warmup=int(ext_result.effective_warmup),
         ))
 
     return segments

@@ -8,7 +8,7 @@ Summary filter block — all gated on trade_filter_config.enabled and
 diagnostics flags.  Disabled path is bit-identical to the pre-Phase-2 baseline.
 """
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 from datetime import datetime
 from pathlib import Path
 import numpy as np
@@ -1479,6 +1479,112 @@ def _format_trades_datetime(
 # Main export functions
 # ---------------------------------------------------------------------------
 
+TESTER_CONFIG_SHEET_NAME = "Tester_Config"
+
+
+def _format_tester_config_value(value: Any) -> str:
+    """Render YAML/run metadata scalar to a stable Excel-friendly string."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, datetime):
+        dt = value.replace(tzinfo=None) if value.tzinfo is not None else value
+        return dt.isoformat(sep=" ", timespec="seconds")
+    if isinstance(value, pd.Timestamp):
+        ts = value.tz_localize(None) if value.tzinfo is not None else value
+        return ts.isoformat()
+    if isinstance(value, (np.integer, np.floating)):
+        return str(value.item())
+    return str(value)
+
+
+def _flatten_mapping_rows(
+    payload: Any,
+    *,
+    section: str,
+    prefix: str = "",
+) -> List[Dict[str, str]]:
+    """
+    Flatten mapping/list payload into Section/Parameter/Value rows.
+
+    Parameter path format:
+      - mapping nesting: ``a.b.c``
+      - list nesting: ``a.items[0]``
+    """
+    rows: List[Dict[str, str]] = []
+    if isinstance(payload, Mapping):
+        for key in payload:
+            key_str = str(key)
+            nested_prefix = f"{prefix}.{key_str}" if prefix else key_str
+            rows.extend(
+                _flatten_mapping_rows(payload[key], section=section, prefix=nested_prefix)
+            )
+        return rows
+
+    if isinstance(payload, list):
+        for idx, item in enumerate(payload):
+            nested_prefix = f"{prefix}[{idx}]" if prefix else f"[{idx}]"
+            rows.extend(
+                _flatten_mapping_rows(item, section=section, prefix=nested_prefix)
+            )
+        if not payload and prefix:
+            rows.append({
+                "Section": section,
+                "Parameter": prefix,
+                "Value": "[]",
+            })
+        return rows
+
+    rows.append({
+        "Section": section,
+        "Parameter": prefix or "_root",
+        "Value": _format_tester_config_value(payload),
+    })
+    return rows
+
+
+def _write_tester_config_sheet(
+    writer: pd.ExcelWriter,
+    config_yaml_snapshot: Optional[Dict[str, Any]] = None,
+    run_metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Write first workbook sheet with config snapshot + run metadata."""
+    from openpyxl.utils import get_column_letter
+
+    rows: List[Dict[str, str]] = []
+    if config_yaml_snapshot is not None:
+        if len(config_yaml_snapshot) == 0:
+            rows.append({
+                "Section": "config_file",
+                "Parameter": "note",
+                "Value": "YAML root mapping is empty (no keys)",
+            })
+        else:
+            rows.extend(
+                _flatten_mapping_rows(config_yaml_snapshot, section="config_file")
+            )
+    else:
+        rows.append({
+            "Section": "config_file",
+            "Parameter": "note",
+            "Value": "config file was not provided; built-in defaults were used",
+        })
+
+    if run_metadata:
+        rows.extend(_flatten_mapping_rows(run_metadata, section="run"))
+
+    cfg_df = pd.DataFrame(rows, columns=["Section", "Parameter", "Value"])
+    if not cfg_df.empty:
+        cfg_df = cfg_df.sort_values(["Section", "Parameter"], kind="mergesort")
+    cfg_df.to_excel(writer, sheet_name=TESTER_CONFIG_SHEET_NAME, index=False)
+
+    ws = writer.sheets[TESTER_CONFIG_SHEET_NAME]
+    n_cols = len(cfg_df.columns)
+    if n_cols > 0:
+        ws.auto_filter.ref = f"A1:{get_column_letter(n_cols)}1"
+
+
 def export_tester_results(
     period_results: List[PeriodResult],
     output_path: str,
@@ -1488,6 +1594,10 @@ def export_tester_results(
     trade_filter_config: Any = None,
     # WP-T7: optional original df for Trigger Time column in ZigZag_Trigger_Events
     df: Optional[pd.DataFrame] = None,
+    # YAML snapshot as loaded from file before normalization (flattened to Tester_Config)
+    config_yaml_snapshot: Optional[Dict[str, Any]] = None,
+    # Extra runtime metadata (resolved values, paths, effective warmup, etc.)
+    run_metadata: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Export tester results to Excel file.
@@ -1512,11 +1622,16 @@ def export_tester_results(
         false_start_max_bars: False-start threshold (bars_held < N).
         trade_filter_config: Optional TradeFilterConfig. None → disabled path.
         df: Optional original OHLC DataFrame for Trigger Time in ZigZag_Trigger_Events.
+        config_yaml_snapshot: Raw mapping from ``load_config`` (sheet ``Tester_Config`` / ``config_file``).
+        run_metadata: Runtime fields (paths, ``resolved_periods_per_year``,
+            ``warmup_period_resolved``, ``warmup_period_effective``, …). The exporter appends ``output_path_actual``.
 
     Returns:
         Actual output path used (with TEST timestamp).
     """
     output_path = add_test_timestamp_to_filename(output_path)
+    run_metadata_payload: Dict[str, Any] = dict(run_metadata or {})
+    run_metadata_payload["output_path_actual"] = output_path
 
     # Determine filter mode (plan §9.1)
     filter_enabled = (trade_filter_config is not None and trade_filter_config.enabled)
@@ -1532,6 +1647,13 @@ def export_tester_results(
     )
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        # ── Tester_Config (always first) ──
+        _write_tester_config_sheet(
+            writer,
+            config_yaml_snapshot=config_yaml_snapshot,
+            run_metadata=run_metadata_payload,
+        )
+
         # ── Summary sheet ──
         summary_data = []
         for pr in period_results:
@@ -1682,16 +1804,28 @@ def _write_trades_sheet(
 def export_equal_blocks_results(
     segment_results: List[SegmentResult],
     output_path: str,
+    config_yaml_snapshot: Optional[Dict[str, Any]] = None,
+    run_metadata: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Export equal_blocks segmentation results to Excel.
 
     Phase 2: filter is not supported in equal_blocks (rejected upstream by
-    run_equal_blocks / config gate). This function is unchanged.
+    run_equal_blocks / config gate). Sheet ``Tester_Config`` (first) carries
+    the raw YAML snapshot and ``run_metadata`` when provided.
     """
     output_path = _add_eqblk_timestamp_to_filename(output_path)
+    run_metadata_payload: Dict[str, Any] = dict(run_metadata or {})
+    run_metadata_payload["output_path_actual"] = output_path
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        # ── Tester_Config (always first) ──
+        _write_tester_config_sheet(
+            writer,
+            config_yaml_snapshot=config_yaml_snapshot,
+            run_metadata=run_metadata_payload,
+        )
+
         # ── Summary Table 1: per-segment rows ──
         summary_rows = []
         for seg in segment_results:

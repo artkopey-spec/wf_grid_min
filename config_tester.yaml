@@ -2,8 +2,8 @@
 # SUPER TREND PARAMETERS
 # =========================
 supertrend:
-  atr_period:        56     # длина ATR; больше = плавнее, меньше = чувствительнее
-  multiplier:        8.8    # ширина каналов; меньше = агрессивнее сигналы
+  atr_period:        50     # длина ATR; больше = плавнее, меньше = чувствительнее
+  multiplier:        7.8    # ширина каналов; меньше = агрессивнее сигналы
 
 
 # =========================
@@ -87,7 +87,7 @@ trade_filter:
     local_window: 5                        # rolling N for local_median_N
 
     daily_reset: true                      # reset ZigZag/FSM on calendar day boundary
-    mode: "C"                                # v3 mode: A | B | C | A+B | C+B
+    mode: "A"                                # v3 mode: A | B | C | A+B | C+B
     candidate_duration_gate:
       enabled: false
       #max_bars: 24
@@ -96,7 +96,8 @@ trade_filter:
     freeze_confirmed_legs: 5               # # confirmed legs after lifecycle start
     stop_check: confirm_bar_only           # only literal supported in v1
     stopping_exit: opposite_st_flip        # only literal supported in v1
-    exit_off_mode: "exit A"                # "exit B" requires exit_off_zz_leg_count (int >= 1); omit count for exit A
+    exit_off_mode: "exit B"              # «exit B» + exit_off_zz_leg_count (int >= 1); при «exit A» count не указывать
+    exit_off_zz_leg_count: 5             # подтверждённых ZZ-ног до ST_STOPPING (exit B)
 
   diagnostics:
     export_state_columns: true

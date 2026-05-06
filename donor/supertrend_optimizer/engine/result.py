@@ -197,13 +197,14 @@ class BacktestResult:
                     )
             # §12.6 strict dtype contract for new exit-off arrays (when present).
             # This catches silent dtype drift early at result construction time.
-            _expected_dtypes = {
+            # Pre-existing exit-off keys keep ValueError for backward compat.
+            _expected_dtypes_v_err = {
                 "exit_off_mode": object,
                 "exit_off_zz_leg_count": np.int64,
                 "zz_legs_since_lifecycle_start": np.int64,
                 "zz_leg_stop_triggered": np.int8,
             }
-            for _k, _dt in _expected_dtypes.items():
+            for _k, _dt in _expected_dtypes_v_err.items():
                 if _k not in self.filter_diagnostics:
                     continue
                 _arr = np.asarray(self.filter_diagnostics[_k])
@@ -212,4 +213,28 @@ class BacktestResult:
                         f"BacktestResult dtype contract violated: "
                         f"filter_diagnostics[{_k!r}] dtype {_arr.dtype} != expected {_dt}."
                     )
+
+            # Plan v3 §7: exit_b_immediate_off arrays — strict int8 → ConfigError
+            # (per plan: "Несоответствие dtype → ConfigError на этапе
+            # конструкции BacktestResult"). Imported lazily to avoid a hard
+            # dependency at module import time.
+            _expected_dtypes_cfg_err = {
+                "exit_b_immediate_off_triggered": np.int8,
+                "exit_b_immediate_off_config": np.int8,
+            }
+            _imm_violations = [
+                (_k, np.asarray(self.filter_diagnostics[_k]).dtype, _dt)
+                for _k, _dt in _expected_dtypes_cfg_err.items()
+                if _k in self.filter_diagnostics
+                and np.asarray(self.filter_diagnostics[_k]).dtype != _dt
+            ]
+            if _imm_violations:
+                from supertrend_optimizer.utils.exceptions import ConfigError
+                _msg = "; ".join(
+                    f"filter_diagnostics[{_k!r}] dtype {_obs} != expected {_dt}"
+                    for _k, _obs, _dt in _imm_violations
+                )
+                raise ConfigError(
+                    f"BacktestResult dtype contract violated (Plan v3 §7): {_msg}"
+                )
 

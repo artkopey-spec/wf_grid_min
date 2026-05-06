@@ -95,6 +95,9 @@ segmentation:
 #     freeze_confirmed_legs: 5               # # confirmed legs after lifecycle start
 #     stop_check: confirm_bar_only           # only literal supported in v1
 #     stopping_exit: opposite_st_flip        # only literal supported in v1
+#     exit_off_mode: "exit B"
+#     exit_off_zz_leg_count: 5
+#     exit_b_immediate_off: false            # только при exit B; немедленный OFF на пороге exit B
 #
 #   diagnostics:
 #     export_state_columns: true

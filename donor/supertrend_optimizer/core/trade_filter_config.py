@@ -51,6 +51,10 @@ _V3_INIT_FAILURE_KEYS = frozenset({
     "exit_off_zz_leg_count_invalid_type",
     "exit_off_zz_leg_count_below_one",
     "exit_off_zz_leg_count_present_when_exit_a",
+    # exit_b_immediate_off (docs/Plan exit_b_immediate_off v3.txt §3.3)
+    "exit_b_immediate_off_present_when_not_exit_b",
+    "exit_b_immediate_off_invalid_type",
+    "exit_b_immediate_off_present_when_filter_disabled",
 })
 
 # WP-T3 step 6 — caller_pipeline whitelist for type=zigzag_st_mode.
@@ -138,6 +142,9 @@ class TradeFilterLifecycleConfig:
     # so YAML type mismatches surface in validate_trade_filter.
     exit_off_mode: object = "exit A"
     exit_off_zz_leg_count: object = None                # int >= 1 when exit_off_mode == "exit B"
+    # exit_b_immediate_off: immediate OFF on exit B threshold (§3.4).
+    # Type object (not bool) — same pattern as exit_off_mode; validator enforces bool.
+    exit_b_immediate_off: object = False
 
 
 @dataclass
@@ -206,6 +213,7 @@ TRADE_FILTER_ALLOWED_KEYS: dict[str, frozenset[str]] = {
     "trade_filter.lifecycle": frozenset({
         "freeze_confirmed_legs", "stop_check", "stopping_exit",
         "exit_off_mode", "exit_off_zz_leg_count",
+        "exit_b_immediate_off",
     }),
     "trade_filter.diagnostics": frozenset({
         "export_state_columns", "export_trigger_columns",
@@ -324,6 +332,7 @@ def build_trade_filter_config_from_raw(tf_raw: dict) -> TradeFilterConfig:
         stopping_exit=lc_raw.get("stopping_exit", "opposite_st_flip"),
         exit_off_mode=lc_raw.get("exit_off_mode", "exit A"),
         exit_off_zz_leg_count=lc_raw.get("exit_off_zz_leg_count", None),
+        exit_b_immediate_off=lc_raw.get("exit_b_immediate_off", False),
     )
 
     diag_raw: dict = tf_raw.get("diagnostics") or {}
@@ -459,6 +468,18 @@ def validate_trade_filter(
             errors.append(
                 f"trade_filter.type {tf.type!r} is not supported for disabled filter; "
                 f"use zigzag_st_mode or omit type"
+            )
+        # БЛОК А: проверяем присутствие imm-ключа до раннего return (§3.4)
+        imm_present_disabled = (
+            ("trade_filter", "lifecycle", "exit_b_immediate_off") in raw_user_keys
+        )
+        if imm_present_disabled:
+            _append_validation_error(
+                errors,
+                "trade_filter.lifecycle.exit_b_immediate_off must be absent when "
+                "trade_filter.enabled is false",
+                error_keys,
+                "exit_b_immediate_off_present_when_filter_disabled",
             )
         # disabled filter: skip all further validation (§11.1)
         return
@@ -763,6 +784,29 @@ def validate_trade_filter(
     else:
         _effective_exit_off = "exit A"
 
+    # БЛОК Б: валидация exit_b_immediate_off (§3.4)
+    imm_present = (
+        ("trade_filter", "lifecycle", "exit_b_immediate_off") in raw_user_keys
+    )
+    if imm_present and _effective_exit_off != "exit B":
+        _append_validation_error(
+            errors,
+            "trade_filter.lifecycle.exit_b_immediate_off must be absent when "
+            "exit_off_mode is not 'exit B'",
+            error_keys,
+            "exit_b_immediate_off_present_when_not_exit_b",
+        )
+    elif imm_present and _effective_exit_off == "exit B":
+        if not isinstance(lc.exit_b_immediate_off, bool):
+            _append_validation_error(
+                errors,
+                "trade_filter.lifecycle.exit_b_immediate_off must be bool "
+                f"(true/false), got {type(lc.exit_b_immediate_off).__name__!r} "
+                f"({lc.exit_b_immediate_off!r})",
+                error_keys,
+                "exit_b_immediate_off_invalid_type",
+            )
+
     if exit_count_key_present and _effective_exit_off != "exit B":
         _append_validation_error(
             errors,
@@ -966,6 +1010,26 @@ def resolve_exit_off_mode_in_place(
         trade_filter_config.lifecycle.exit_off_mode = "exit A"
 
 
+def resolve_exit_b_immediate_off_in_place(
+    trade_filter_config: Optional[TradeFilterConfig],
+    raw_user_keys: frozenset[tuple[str, ...]],
+) -> None:
+    """Materialize default exit_b_immediate_off when the YAML key is absent.
+
+    When ``trade_filter.lifecycle.exit_b_immediate_off`` is not present in the
+    parsed YAML, set it to ``False``. If the key is present, leave it unchanged
+    (the validator already confirmed it is bool).
+
+    Must be called strictly after ``validate_trade_filter`` and after
+    ``resolve_exit_off_mode_in_place`` (§3.4).
+    """
+    if trade_filter_config is None or not trade_filter_config.enabled:
+        return
+    imm_key = ("trade_filter", "lifecycle", "exit_b_immediate_off")
+    if imm_key not in raw_user_keys:
+        trade_filter_config.lifecycle.exit_b_immediate_off = False
+
+
 __all__ = [
     "TradeFilterConfig",
     "TradeFilterZigZagConfig",
@@ -982,6 +1046,7 @@ __all__ = [
     "resolve_zigzag_mode",
     "resolve_trade_filter_mode_in_place",
     "resolve_exit_off_mode_in_place",
+    "resolve_exit_b_immediate_off_in_place",
     # Constant whitelists exported for tests / CLI gate logic
     "_LIFECYCLE_STOP_CHECK_VALUES",
     "_LIFECYCLE_STOPPING_EXIT_VALUES",

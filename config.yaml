@@ -28,8 +28,8 @@ validation:                            # Блок валидации и walk-for
     step_size: "30d"                   # Минутки: сдвиг на одно OOS-окно
     scheme: "rolling"                  # Скользящее окно: train и test двигаются вместе
     anchor: "start"                    # Привязка окон: "start" (от начала) или "end" (от конца ряда)
-    min_train_bars: 500               # ослаблено: минимум баров train (схема >= 1)
-    min_test_bars: 100                # ослаблено: минимум баров test (схема >= 1)
+    min_train_bars: 50                # daily data: 90d window ≈ 63 bars
+    min_test_bars: 15                 # daily data: 30d window ≈ 21 bars
     
 gates:                                 # Блок фильтров/гейтов
   step:                                # Фильтры на уровне каждого WF-шага
@@ -75,7 +75,7 @@ execution:                             # WP-PAR: parallelization controls (plan 
   fallback_to_sequential: false        # On infra failure do NOT silently retry sequential
 
 trade_filter:                          # Блок WP2: фильтр сделок ZigZag + SuperTrend
-  enabled: true                       # Safe rollout default (WP11 rollback contract)
+  enabled: false                      # Safe rollout default (WP11 rollback contract)
   type: "zigzag_st_mode"
 
   zigzag:
@@ -97,6 +97,7 @@ trade_filter:                          # Блок WP2: фильтр сделок
     stopping_exit: "opposite_st_flip"    # В v1 только этот литерал
     exit_off_mode: "exit B"              # «exit B» + exit_off_zz_leg_count (int >= 1); при «exit A» count не указывать
     exit_off_zz_leg_count: 3             # подтверждённых ZZ-ног до ST_STOPPING (exit B)
+    # exit_b_immediate_off: при enabled: false ключ в YAML недопустим (validate). При включении фильтра и exit B: false|true
 
   diagnostics:
     export_state_columns: true

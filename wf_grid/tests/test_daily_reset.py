@@ -918,6 +918,9 @@ class TestDailyResetDiagnostics:
             "exit_off_zz_leg_count",
             "zz_legs_since_lifecycle_start",
             "zz_leg_stop_triggered",
+            # exit_b_immediate_off (Plan exit_b_immediate_off v3 §4.7)
+            "exit_b_immediate_off_triggered",
+            "exit_b_immediate_off_config",
         }
 
     def test_daily_reset_arrays_dtype_int8(self):

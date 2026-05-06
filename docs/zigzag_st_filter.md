@@ -68,6 +68,9 @@ trade_filter:
     freeze_confirmed_legs: 5
     stop_check: confirm_bar_only
     stopping_exit: opposite_st_flip
+    # exit_off_mode: "exit B"          # раскомментировать для exit B
+    # exit_off_zz_leg_count: 3         # обязателен при exit B
+    # exit_b_immediate_off: false      # true — немедленное OFF без ST_STOPPING
 
   diagnostics:
     export_state_columns: true
@@ -158,12 +161,150 @@ Bar-level `filter_block_reason` использует стабильный whitel
 - `stopping_mode_no_new_entries` - FSM в `ST_STOPPING`, новые входы запрещены.
 - `insufficient_global_stats` - глобальной ZigZag статистики недостаточно.
 
-Trade-level `exit_reason` добавляет:
+Trade-level `exit_reason` добавляет (приоритет сверху вниз):
 
-- `st_flip` - обычный SuperTrend exit/reversal.
-- `filter_stopping_opposite_flip` - выход из позиции в `ST_STOPPING` по
-  ближайшему противоположному ST flip.
-- `pending_open_trade_at_end` - открытая сделка помечена на последнем баре.
+1. `filter_daily_reset` — bar-level `daily_reset_event == 1`.
+2. `pending_open_trade_at_end` — позиция ещё открыта на последнем баре отрезка.
+3. `filter_exit_b_immediate_off` — lifecycle завершился через immediate-off path
+   (`exit_b_immediate_off_triggered[exit_signal_idx] == 1`).
+4. `filter_stopping_opposite_flip` — выход из позиции в `ST_STOPPING` по
+   ближайшему противоположному ST flip (legacy path).
+5. `st_flip` — обычный SuperTrend exit/reversal.
+
+Приоритет #2 выше #3: если immediate-off сработал на последнем или
+предпоследнем баре отрезка (t == n-1 или t == n-2 при `exit_index == n-1`),
+`exit_reason` будет `pending_open_trade_at_end`. Факт срабатывания
+immediate-off подтверждается через `exit_b_immediate_off_triggered[t] == 1`
+в diagnostics-массиве.
+
+## exit_b_immediate_off
+
+Опциональный режим для `exit_off_mode: "exit B"`. При
+`exit_b_immediate_off: true` lifecycle завершается **немедленно как `OFF`**
+на том же баре `t`, где `zz_legs_since_lifecycle_start` достигает
+`exit_off_zz_leg_count`. Фаза `ST_STOPPING` для этого события не
+используется.
+
+### Применимость
+
+`exit_b_immediate_off` допустим **только** при `exit_off_mode: "exit B"` и
+`trade_filter.enabled: true`. Присутствие ключа в YAML при других условиях
+отклоняется валидатором с соответствующим `error_key`.
+
+### Поведение на пороговом баре t
+
+| Что | Значение |
+|-----|----------|
+| `state_arr[t]` | `"OFF"` |
+| `positions[t]` | текущая позиция (не look-ahead) |
+| `positions[t+1]` | `0` — закрытие на `open(t+1)` по контракту open-to-open |
+| `zz_leg_stop_triggered[t]` | `1` (legacy-инвариант, срабатывает в **обоих** режимах) |
+| `exit_b_immediate_off_triggered[t]` | `1` |
+| `exit_b_immediate_off_config[:]` | `1` broadcast по всему отрезку |
+| `confirmed_legs_since_start[t]` | `-1` (OFF sentinel) |
+| `zz_legs_since_lifecycle_start[t]` | `-1` (OFF sentinel) |
+
+Отличие от legacy path: в legacy `state_arr[t] == "ST_STOPPING"`, что
+позволяет ещё одному ST flip завершить позицию; в immediate-off lifecycle
+уже `OFF` на том же баре.
+
+### filter_block_reason на пороговом баре
+
+`filter_block_reason` не имеет специальной ветки для immediate-off и
+следует стандартным правилам:
+
+| Условие на баре t | `filter_block_reason[t]` |
+|---|---|
+| `daily_reset_event[t] == 1` | `"daily_reset"` |
+| `flip_dir == 0` (нет ST flip) | `"none"` |
+| `flip_dir != 0` (state уже OFF) | `"filter_off"` |
+
+> **Предупреждение**: значение `"filter_off"` на immediate-off баре с
+> `flip_dir != 0` означает **не** «lifecycle был OFF до этого flip», а
+> «lifecycle завершился immediate-off в рамках той же итерации, и flip
+> пришёл уже после». Различить эти случаи можно только через
+> `exit_b_immediate_off_triggered[t] == 1`. Аналитический код,
+> агрегирующий `"filter_off"` без учёта этого флага, будет некорректно
+> включать immediate-off бары в категорию «lifecycle was idle».
+
+### Приоритет relative to daily_reset
+
+`daily_reset` имеет приоритет над immediate-off: если `daily_reset_event[t] == 1`,
+wipe выполняется до проверки порога exit B, поэтому ни
+`exit_b_immediate_off_triggered[t]`, ни `zz_leg_stop_triggered[t]` не
+выставляются в `1` на reset-баре.
+
+### Новые per-bar diagnostics (always-present)
+
+Оба ключа присутствуют в `filter_diagnostics` **всегда** — и при
+`exit_b_immediate_off: true`, и при `false` (в режиме `false` заполнены
+нулями):
+
+| Ключ | dtype | Семантика |
+|------|-------|-----------|
+| `exit_b_immediate_off_triggered` | `np.int8` | `1` только на баре `t` immediate-off; иначе `0` |
+| `exit_b_immediate_off_config` | `np.int8` | Broadcast: `1` если флаг включён, `0` если нет |
+
+### Excel export
+
+В листе `FilterDiagnostics_100`:
+
+- `"Exit-B Immediate OFF Triggered"` — колонка `exit_b_immediate_off_triggered`
+- `"Exit-B Immediate OFF Config"` — колонка `exit_b_immediate_off_config`
+
+В листе `filters_summary.params` строка:
+
+- `"Exit-B Immediate OFF"` — значение `True` или `False` (всегда присутствует,
+  не «—»).
+
+### YAML-пример
+
+```yaml
+trade_filter:
+  enabled: true
+  type: zigzag_st_mode
+
+  zigzag:
+    global_stats_source: full_dataset
+    leg_height_mode: pct
+    reversal_threshold: 0.005
+    candidate_trigger_threshold: auto
+    candidate_trigger_quantile: 0.80
+    global_median: auto
+    local_window: 5
+
+  triggers:
+    candidate_threshold:
+      enabled: true
+    confirmed_median:
+      enabled: false   # в exit B режиме median-stop не задействован
+
+  lifecycle:
+    freeze_confirmed_legs: 0          # exit B: счёт ног начинается сразу
+    stop_check: confirm_bar_only
+    stopping_exit: opposite_st_flip
+    exit_off_mode: "exit B"
+    exit_off_zz_leg_count: 3          # после 3 подтверждённых ног → OFF
+    exit_b_immediate_off: true        # немедленное OFF без фазы ST_STOPPING
+
+  diagnostics:
+    export_state_columns: true
+    export_trigger_columns: true
+```
+
+Вариант с `exit_b_immediate_off: false` (поведение по умолчанию — legacy path
+через `ST_STOPPING`):
+
+```yaml
+  lifecycle:
+    freeze_confirmed_legs: 0
+    stop_check: confirm_bar_only
+    stopping_exit: opposite_st_flip
+    exit_off_mode: "exit B"
+    exit_off_zz_leg_count: 3
+    # exit_b_immediate_off отсутствует или:
+    # exit_b_immediate_off: false    # явный false, равнозначен отсутствию ключа
+```
 
 ## Calibration
 

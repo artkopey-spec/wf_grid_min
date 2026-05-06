@@ -178,6 +178,17 @@ def _compute_filter_diagnostics_summary(
         _z = np.asarray(eoz_arr)
         summary["exit_off_zz_leg_count"] = int(_z[0]) if len(_z) > 0 else -1
 
+    # Plan v3 §8: echo exit_b_immediate_off flag + per-period count
+    imm_cfg_arr = filter_diagnostics.get("exit_b_immediate_off_config")
+    if imm_cfg_arr is not None:
+        _ic = np.asarray(imm_cfg_arr)
+        summary["exit_b_immediate_off"] = bool(_ic[0]) if len(_ic) > 0 else False
+    imm_trig_arr = filter_diagnostics.get("exit_b_immediate_off_triggered")
+    if imm_trig_arr is not None:
+        summary["exit_b_immediate_off_count"] = int(
+            np.sum(np.asarray(imm_trig_arr) == 1)
+        )
+
     # ------------------------------------------------------------------
     # Additional informational fields (not required by §10.6.4)
     # ------------------------------------------------------------------

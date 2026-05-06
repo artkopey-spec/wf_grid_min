@@ -1001,3 +1001,99 @@ class TestCliWiringStaticCheck:
             "The 'simplified implementation' placeholder comment must be removed after "
             "implementing the full two-step linker (plan §9.5.1)"
         )
+
+
+# ===========================================================================
+# Plan v3 §6.1/§6.2: exit_b_immediate_off in excel display map + params row
+# ===========================================================================
+
+class TestImmediateOffExcelDisplayContract:
+    """§10.5 (tester-side): FILTER_DIAGNOSTICS_100_DISPLAY_NAMES and
+    _build_filters_summary_df include the new Plan v3 §6 entries.
+
+    These are static contract tests — no full Excel export needed.
+    """
+
+    def test_display_map_triggered_key(self):
+        """§6.1: exit_b_immediate_off_triggered → 'Exit-B Immediate OFF Triggered'."""
+        from supertrend_optimizer.io.excel_tester import FILTER_DIAGNOSTICS_100_DISPLAY_NAMES
+        assert "exit_b_immediate_off_triggered" in FILTER_DIAGNOSTICS_100_DISPLAY_NAMES
+        assert (
+            FILTER_DIAGNOSTICS_100_DISPLAY_NAMES["exit_b_immediate_off_triggered"]
+            == "Exit-B Immediate OFF Triggered"
+        )
+
+    def test_display_map_config_key(self):
+        """§6.1: exit_b_immediate_off_config → 'Exit-B Immediate OFF Config'."""
+        from supertrend_optimizer.io.excel_tester import FILTER_DIAGNOSTICS_100_DISPLAY_NAMES
+        assert "exit_b_immediate_off_config" in FILTER_DIAGNOSTICS_100_DISPLAY_NAMES
+        assert (
+            FILTER_DIAGNOSTICS_100_DISPLAY_NAMES["exit_b_immediate_off_config"]
+            == "Exit-B Immediate OFF Config"
+        )
+
+    def _make_mock_pr(self, exit_b_immediate_off: bool):
+        """Minimal duck-typed PeriodResult for _build_filters_summary_df."""
+        import numpy as np
+
+        class _BR:
+            positions = np.zeros(5, dtype=np.int8)
+            trades_df = None
+
+        class _PR:
+            period_label = "100%"
+            result = _BR()
+            filter_diagnostics = {}
+            filter_diagnostics_summary = {
+                "exit_off_mode": "exit B",
+                "exit_off_zz_leg_count": 2,
+                "exit_b_immediate_off": exit_b_immediate_off,
+                "lifecycle_starts_count": 1,
+                "median_stop_triggered_count": 0,
+                "zz_leg_stop_triggered_count": 1,
+                "thresholds": {
+                    "reversal_threshold": 0.02,
+                    "candidate_trigger_threshold": 0.05,
+                    "candidate_trigger_quantile": None,
+                    "candidate_trigger_source": "explicit",
+                    "global_median": 0.04,
+                    "local_window": 5,
+                    "freeze_confirmed_legs": 0,
+                    "exit_off_mode": "exit B",
+                    "exit_off_zz_leg_count": 2,
+                    "exit_b_immediate_off": exit_b_immediate_off,
+                    "zigzag_mode": "A",
+                    "candidate_duration_gate_enabled": False,
+                    "candidate_duration_max_bars": -1,
+                },
+                "counters": {"zz_leg_stop_triggered": 1, "median_stop_triggered": 0},
+                "bars_in_state": {"OFF": 5},
+            }
+
+        return _PR()
+
+    def _get_params_df(self, exit_b_immediate_off: bool):
+        from supertrend_optimizer.io.excel_tester import _build_filters_summary_df
+        pr = self._make_mock_pr(exit_b_immediate_off)
+        result = _build_filters_summary_df([pr])
+        assert result is not None
+        params_df, _ = result
+        return params_df
+
+    def test_params_row_flag_true(self):
+        """§6.2: 'Exit-B Immediate OFF' row present with value True."""
+        params_df = self._get_params_df(exit_b_immediate_off=True)
+        row = params_df[params_df["Parameter"] == "Exit-B Immediate OFF"]
+        assert not row.empty, (
+            f"'Exit-B Immediate OFF' row missing. Labels: {sorted(params_df['Parameter'].tolist())}"
+        )
+        assert row.iloc[0]["Value"] is True
+
+    def test_params_row_flag_false(self):
+        """§6.2: row present with value False (always-present, never '—')."""
+        params_df = self._get_params_df(exit_b_immediate_off=False)
+        row = params_df[params_df["Parameter"] == "Exit-B Immediate OFF"]
+        assert not row.empty, (
+            "'Exit-B Immediate OFF' must be present even when False (§6.2 always-present)."
+        )
+        assert row.iloc[0]["Value"] is False

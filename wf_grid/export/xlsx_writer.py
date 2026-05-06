@@ -527,6 +527,9 @@ def _write_step_sheet(
         "zz_leg_stop_triggered_count",
         "exit_off_mode",
         "exit_off_zz_leg_count",
+        # Plan v3 §8 / §6: immediate-off summary columns
+        "exit_b_immediate_off",
+        "exit_b_immediate_off_count",
         "filter_diagnostics_available",
         "trigger_count_candidate_threshold",
         "trigger_count_confirmed_median",

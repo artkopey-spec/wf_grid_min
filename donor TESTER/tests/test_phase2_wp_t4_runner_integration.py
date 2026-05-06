@@ -725,3 +725,105 @@ class TestDisabledBaselineNotBroken:
         # Pin from WP-T1 EXPECTED_100PCT constant in test_wp_t1_baseline_capture.py
         assert result_100.metrics["num_trades"] == 4636
         assert result_100.metrics["sum_pnl_pct"] == pytest.approx(-312.253933, rel=1e-4)
+
+
+# ===========================================================================
+# §10.6 / Plan v3 §8 smoke: runner echoes exit_b_immediate_off in summary
+# ===========================================================================
+
+class TestRunnerEchoesImmediateOffFlag:
+    """§10.6 smoke: _echo_thresholds and _build_filter_diagnostics_summary
+    correctly propagate exit_b_immediate_off from the config.
+    """
+
+    def _make_enabled_cfg(self, exit_b_immediate_off: bool):
+        from supertrend_optimizer.core.trade_filter_config import (
+            TradeFilterConfig, TradeFilterZigZagConfig, TradeFilterTriggersConfig,
+            TradeFilterLifecycleConfig, TradeFilterDiagnosticsConfig,
+            TradeFilterTriggerToggleConfig,
+        )
+        return TradeFilterConfig(
+            enabled=True, type="zigzag_st_mode",
+            zigzag=TradeFilterZigZagConfig(
+                reversal_threshold=0.03, local_window=20,
+                candidate_trigger_threshold=0.4,
+            ),
+            triggers=TradeFilterTriggersConfig(
+                candidate_threshold=TradeFilterTriggerToggleConfig(enabled=True),
+                confirmed_median=TradeFilterTriggerToggleConfig(enabled=True),
+            ),
+            lifecycle=TradeFilterLifecycleConfig(
+                freeze_confirmed_legs=3, stop_check="confirm_bar_only",
+                stopping_exit="opposite_st_flip",
+                exit_off_mode="exit B",
+                exit_off_zz_leg_count=2,
+                exit_b_immediate_off=exit_b_immediate_off,
+            ),
+            diagnostics=TradeFilterDiagnosticsConfig(
+                export_state_columns=True, export_trigger_columns=True,
+            ),
+        )
+
+    def _make_stats(self, tf_cfg, df):
+        from supertrend_optimizer.core.zigzag_st_filter import build_zigzag_global_stats
+        return build_zigzag_global_stats(df["close"].values, tf_cfg)
+
+    def _make_df(self, n=200):
+        rng = np.random.default_rng(77)
+        close = 100.0 * np.exp(np.cumsum(rng.normal(0.0003, 0.012, n)))
+        noise = rng.uniform(0.001, 0.004, n)
+        idx = pd.date_range("2021-01-01", periods=n, freq="D")
+        return pd.DataFrame({
+            "open": close * (1 - noise / 2),
+            "high": close * (1 + noise),
+            "low": close * (1 - noise),
+            "close": close,
+        }, index=idx)
+
+    def test_echo_thresholds_flag_true(self):
+        from supertrend_optimizer.testing.runner import _echo_thresholds
+        tf_cfg = self._make_enabled_cfg(True)
+        df = self._make_df()
+        stats = self._make_stats(tf_cfg, df)
+        thr = _echo_thresholds(tf_cfg, stats)
+        assert thr.get("exit_b_immediate_off") is True
+
+    def test_echo_thresholds_flag_false(self):
+        from supertrend_optimizer.testing.runner import _echo_thresholds
+        tf_cfg = self._make_enabled_cfg(False)
+        df = self._make_df()
+        stats = self._make_stats(tf_cfg, df)
+        thr = _echo_thresholds(tf_cfg, stats)
+        assert thr.get("exit_b_immediate_off") is False
+
+    def test_summary_top_level_flag_true(self):
+        """filter_diagnostics_summary top-level has exit_b_immediate_off==True."""
+        from supertrend_optimizer.testing.runner import run_period
+        from supertrend_optimizer.utils.enums import ExecutionModel
+        tf_cfg = self._make_enabled_cfg(True)
+        df = self._make_df()
+        stats = self._make_stats(tf_cfg, df)
+        pr = run_period(
+            df=df, atr_period=14, multiplier=3.0, trade_mode="revers",
+            commission=0.001, execution_model=ExecutionModel.OPEN_TO_OPEN,
+            min_trades_required=1, trade_filter_config=tf_cfg,
+            zigzag_global_stats=stats, global_offset=0,
+        )
+        assert pr.filter_diagnostics_summary is not None
+        assert pr.filter_diagnostics_summary.get("exit_b_immediate_off") is True
+
+    def test_summary_top_level_flag_false(self):
+        """filter_diagnostics_summary top-level has exit_b_immediate_off==False."""
+        from supertrend_optimizer.testing.runner import run_period
+        from supertrend_optimizer.utils.enums import ExecutionModel
+        tf_cfg = self._make_enabled_cfg(False)
+        df = self._make_df()
+        stats = self._make_stats(tf_cfg, df)
+        pr = run_period(
+            df=df, atr_period=14, multiplier=3.0, trade_mode="revers",
+            commission=0.001, execution_model=ExecutionModel.OPEN_TO_OPEN,
+            min_trades_required=1, trade_filter_config=tf_cfg,
+            zigzag_global_stats=stats, global_offset=0,
+        )
+        assert pr.filter_diagnostics_summary is not None
+        assert pr.filter_diagnostics_summary.get("exit_b_immediate_off") is False

@@ -165,6 +165,8 @@ def _echo_thresholds(
             and not isinstance(getattr(lc, "exit_off_zz_leg_count", None), bool)
             else -1
         ),
+        # Plan v3 §8 / §2.1: echo exit_b_immediate_off flag for Excel + parity
+        "exit_b_immediate_off": bool(getattr(lc, "exit_b_immediate_off", False)),
         "zigzag_mode": getattr(zigzag_global_stats, "zigzag_mode", ""),
         "candidate_duration_gate_enabled": bool(
             getattr(zigzag_global_stats, "candidate_duration_gate_enabled", False)
@@ -379,6 +381,8 @@ def _build_filter_diagnostics_summary(
         # so WF Grid and Tester summary shapes are equivalent (not just in thresholds).
         "exit_off_mode": thresholds.get("exit_off_mode", "exit A"),
         "exit_off_zz_leg_count": thresholds.get("exit_off_zz_leg_count", -1),
+        # Plan v3 §8 / §2.1: echo immediate-off flag at top level (mirrors wf_grid)
+        "exit_b_immediate_off": thresholds.get("exit_b_immediate_off", False),
         "thresholds": thresholds,
         "global_offset": global_offset,
         "counters": counters,

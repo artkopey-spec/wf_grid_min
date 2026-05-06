@@ -99,6 +99,9 @@ _SUMMARY_COLS = [
     "zz_leg_stop_triggered_count",
     "exit_off_mode",
     "exit_off_zz_leg_count",
+    # Plan v3 §8: new summary keys
+    "exit_b_immediate_off",
+    "exit_b_immediate_off_count",
 ]
 
 

@@ -734,3 +734,59 @@ class TestResolvedPeriodsPerYearGuard:
             data.index, cfg, prepend,
         )
         assert result.effective_oos_bars > 0
+
+
+# ===========================================================================
+# §10.6  Summary keys: exit_b_immediate_off echo + count (Plan v3 §8)
+# ===========================================================================
+
+class TestFilterSummaryImmediateOffKeys:
+    """§10.6 smoke: _compute_filter_diagnostics_summary correctly echoes
+    exit_b_immediate_off (from config_arr[0]) and computes
+    exit_b_immediate_off_count (sum of triggered_arr == 1).
+    """
+
+    def _call(self, filter_diagnostics: dict) -> dict:
+        from wf_grid.wf.step_executor import _compute_filter_diagnostics_summary
+        return _compute_filter_diagnostics_summary(filter_diagnostics)
+
+    def test_flag_true_echoed_in_summary(self):
+        n = 8
+        fd = {
+            "exit_b_immediate_off_config": np.ones(n, dtype=np.int8),
+            "exit_b_immediate_off_triggered": np.zeros(n, dtype=np.int8),
+        }
+        summary = self._call(fd)
+        assert summary.get("exit_b_immediate_off") is True
+
+    def test_flag_false_echoed_in_summary(self):
+        n = 8
+        fd = {
+            "exit_b_immediate_off_config": np.zeros(n, dtype=np.int8),
+            "exit_b_immediate_off_triggered": np.zeros(n, dtype=np.int8),
+        }
+        summary = self._call(fd)
+        assert summary.get("exit_b_immediate_off") is False
+
+    def test_count_equals_sum_of_triggered(self):
+        n = 10
+        triggered = np.zeros(n, dtype=np.int8)
+        triggered[3] = 1
+        triggered[7] = 1
+        fd = {
+            "exit_b_immediate_off_config": np.ones(n, dtype=np.int8),
+            "exit_b_immediate_off_triggered": triggered,
+        }
+        summary = self._call(fd)
+        assert summary.get("exit_b_immediate_off_count") == 2
+
+    def test_absent_arrays_produce_no_keys(self):
+        summary = self._call({})
+        assert "exit_b_immediate_off" not in summary
+        assert "exit_b_immediate_off_count" not in summary
+
+    def test_summary_cols_snapshot_includes_new_keys(self):
+        """Contract snapshot: _FILTER_SUMMARY_COLUMNS must contain new keys (Plan v3 §8)."""
+        from wf_grid.collect.step_collector import _FILTER_SUMMARY_COLUMNS
+        assert "exit_b_immediate_off" in _FILTER_SUMMARY_COLUMNS
+        assert "exit_b_immediate_off_count" in _FILTER_SUMMARY_COLUMNS

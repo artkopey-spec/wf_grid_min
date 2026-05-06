@@ -131,6 +131,9 @@ _FILTER_SUMMARY_COLUMNS: List[str] = [
     "zz_leg_stop_triggered_count",
     "exit_off_mode",
     "exit_off_zz_leg_count",
+    # Plan v3: exit_b_immediate_off echo + per-period fired count
+    "exit_b_immediate_off",
+    "exit_b_immediate_off_count",
     # additional informational
     "filter_diagnostics_available",
     "trigger_count_candidate_threshold",
@@ -174,6 +177,8 @@ def _unpack_filter_summary(summary: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "zz_leg_stop_triggered_count": "zz_leg_stop_triggered_count",
         "exit_off_mode": "exit_off_mode",
         "exit_off_zz_leg_count": "exit_off_zz_leg_count",
+        "exit_b_immediate_off": "exit_b_immediate_off",
+        "exit_b_immediate_off_count": "exit_b_immediate_off_count",
         "diagnostics_available": "filter_diagnostics_available",
         "trigger_count_candidate_threshold": "trigger_count_candidate_threshold",
         "trigger_count_confirmed_median": "trigger_count_confirmed_median",

@@ -46,6 +46,8 @@ EXPECTED_KEYSET = frozenset({
     "confirmed_median_ok",
     "daily_reset_enabled",
     "daily_reset_event",
+    "exit_b_immediate_off_config",
+    "exit_b_immediate_off_triggered",
     "exit_off_mode",
     "exit_off_zz_leg_count",
     "filter_allowed_entry",

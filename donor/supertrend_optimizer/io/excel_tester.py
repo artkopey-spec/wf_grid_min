@@ -135,6 +135,9 @@ FILTER_DIAGNOSTICS_100_DISPLAY_NAMES: Dict[str, str] = {
     "exit_off_zz_leg_count":        "Exit-OFF ZZ Leg Count",
     "zz_legs_since_lifecycle_start": "ZZ Legs Since Start",
     "zz_leg_stop_triggered":        "ZZ Leg Stop Triggered",
+    # Plan v3 §6.1: new per-bar columns
+    "exit_b_immediate_off_triggered": "Exit-B Immediate OFF Triggered",
+    "exit_b_immediate_off_config":    "Exit-B Immediate OFF Config",
     "filter_allowed_entry":         "Filter Allowed Entry",
     "filter_block_reason":          "Filter Block Reason",
     "trade_filter_state_code":      "Filter State Code",
@@ -1227,6 +1230,8 @@ def _build_filters_summary_df(period_results: List[PeriodResult]) -> Optional[pd
         # exit-off modes (plan_exit_off_modes_v2.txt §8.2)
         {"Parameter": "Exit-OFF Mode",         "Value": thr.get("exit_off_mode", s0.get("exit_off_mode", ""))},
         {"Parameter": "Exit-OFF ZZ Leg Count", "Value": thr.get("exit_off_zz_leg_count", s0.get("exit_off_zz_leg_count", -1))},
+        # Plan v3 §6.2: always-present (True/False, never "—")
+        {"Parameter": "Exit-B Immediate OFF",  "Value": thr.get("exit_b_immediate_off", s0.get("exit_b_immediate_off", False))},
     ]
     params_df = pd.DataFrame(params_rows)
 
@@ -1631,7 +1636,9 @@ def export_tester_results(
     """
     output_path = add_test_timestamp_to_filename(output_path)
     run_metadata_payload: Dict[str, Any] = dict(run_metadata or {})
-    run_metadata_payload["output_path_actual"] = output_path
+    # output_path_actual is NOT auto-injected here; callers that need it (e.g.
+    # the CLI) should pass it explicitly in run_metadata so that two independent
+    # exports of the same data remain cell-identical in Tester_Config.
 
     # Determine filter mode (plan §9.1)
     filter_enabled = (trade_filter_config is not None and trade_filter_config.enabled)
@@ -1816,7 +1823,7 @@ def export_equal_blocks_results(
     """
     output_path = _add_eqblk_timestamp_to_filename(output_path)
     run_metadata_payload: Dict[str, Any] = dict(run_metadata or {})
-    run_metadata_payload["output_path_actual"] = output_path
+    # output_path_actual is NOT auto-injected; set it in run_metadata from the caller.
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         # ── Tester_Config (always first) ──

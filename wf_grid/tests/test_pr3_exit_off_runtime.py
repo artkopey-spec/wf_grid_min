@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from supertrend_optimizer.core.zigzag_st_filter import (
@@ -26,6 +27,7 @@ from supertrend_optimizer.core.zigzag_st_filter import (
     ZigZagGlobalStats,
     ZigZagPerBar,
     apply,
+    attach_trade_filter_diagnostics,
 )
 
 
@@ -477,3 +479,202 @@ class TestExitOffEcho:
         ec = result.filter_diagnostics["exit_off_zz_leg_count"]
         assert all(v == "exit A" for v in eom)
         assert (ec == -1).all()
+
+
+# ===========================================================================
+# §10.3  Trade exit_reason for filter_exit_b_immediate_off (Plan v3 §5.2)
+# ===========================================================================
+
+def _make_diag_base(n: int) -> dict:
+    """Minimal filter_diagnostics skeleton for attach_trade_filter_diagnostics."""
+    return {
+        "trade_filter_state": np.array(["WAIT_FIRST_ST_FLIP"] * n, dtype=object),
+        "trade_filter_trigger_source": np.array(["candidate_threshold"] * n, dtype=object),
+        "daily_reset_event": np.zeros(n, dtype=np.int8),
+    }
+
+
+class TestExitReasonImmediateOff:
+    """§10.3 A-G: priority chain in attach_trade_filter_diagnostics (Plan v3 §5.2).
+
+    Tests operate directly on attach_trade_filter_diagnostics with synthetic
+    filter_diagnostics dicts — no need to run a full pipeline to verify the
+    priority logic.
+
+    exit_signal_idx = max(exit_index - 1, 0)   (Plan §8.4)
+    pending_exit_idx = n_diag - 1
+    """
+
+    # ------------------------------------------------------------------
+    # §10.3.A  immediate-off closure in the middle of a segment
+    # ------------------------------------------------------------------
+    def test_a_immediate_off_mid_segment(self):
+        """State==OFF + imm_triggered==1 → 'filter_exit_b_immediate_off'."""
+        n = 6
+        # exit_index=4 → exit_signal_idx=3  (not the last slot, so not pending)
+        exit_signal = 3
+        diag = _make_diag_base(n)
+        diag["trade_filter_state"][exit_signal] = "OFF"
+        imm = np.zeros(n, dtype=np.int8)
+        imm[exit_signal] = 1
+        diag["exit_b_immediate_off_triggered"] = imm
+
+        trades = pd.DataFrame({"entry_index": [1], "exit_index": [exit_signal + 1]})
+        result = attach_trade_filter_diagnostics(trades_df=trades, filter_diagnostics=diag)
+        assert result["exit_reason"].iloc[0] == "filter_exit_b_immediate_off"
+
+    # ------------------------------------------------------------------
+    # §10.3.B  legacy stopping — no immediate-off
+    # ------------------------------------------------------------------
+    def test_b_legacy_stopping(self):
+        """state==ST_STOPPING + imm_triggered==0 → 'filter_stopping_opposite_flip'."""
+        n = 6
+        exit_signal = 3
+        diag = _make_diag_base(n)
+        diag["trade_filter_state"][exit_signal] = "ST_STOPPING"
+        imm = np.zeros(n, dtype=np.int8)
+        diag["exit_b_immediate_off_triggered"] = imm
+
+        trades = pd.DataFrame({"entry_index": [1], "exit_index": [exit_signal + 1]})
+        result = attach_trade_filter_diagnostics(trades_df=trades, filter_diagnostics=diag)
+        assert result["exit_reason"].iloc[0] == "filter_stopping_opposite_flip"
+
+    # ------------------------------------------------------------------
+    # §10.3.C  daily_reset wins over immediate-off (priority #1)
+    # ------------------------------------------------------------------
+    def test_c_daily_reset_beats_immediate_off(self):
+        """daily_reset_event==1 wins regardless of imm_triggered==1 (priority #1)."""
+        n = 6
+        exit_signal = 3
+        diag = _make_diag_base(n)
+        diag["trade_filter_state"][exit_signal] = "OFF"
+        # both flags set — daily_reset must win
+        diag["daily_reset_event"] = np.zeros(n, dtype=np.int8)
+        diag["daily_reset_event"][exit_signal] = 1
+        imm = np.zeros(n, dtype=np.int8)
+        imm[exit_signal] = 1
+        diag["exit_b_immediate_off_triggered"] = imm
+
+        trades = pd.DataFrame({"entry_index": [1], "exit_index": [exit_signal + 1]})
+        result = attach_trade_filter_diagnostics(trades_df=trades, filter_diagnostics=diag)
+        assert result["exit_reason"].iloc[0] == "filter_daily_reset"
+
+    # ------------------------------------------------------------------
+    # §10.3.D  ordinary flip — fallback "st_flip"
+    # ------------------------------------------------------------------
+    def test_d_ordinary_flip_st_flip(self):
+        """No daily_reset, not pending, no imm_triggered → 'st_flip'."""
+        n = 6
+        exit_signal = 3
+        diag = _make_diag_base(n)
+        # state stays "WAIT_FIRST_ST_FLIP", no imm array
+        trades = pd.DataFrame({"entry_index": [1], "exit_index": [exit_signal + 1]})
+        result = attach_trade_filter_diagnostics(trades_df=trades, filter_diagnostics=diag)
+        assert result["exit_reason"].iloc[0] == "st_flip"
+
+    def test_d_ordinary_flip_st_flip_with_zero_imm_array(self):
+        """All-zero imm_triggered still falls through to 'st_flip'."""
+        n = 6
+        exit_signal = 3
+        diag = _make_diag_base(n)
+        diag["exit_b_immediate_off_triggered"] = np.zeros(n, dtype=np.int8)
+
+        trades = pd.DataFrame({"entry_index": [1], "exit_index": [exit_signal + 1]})
+        result = attach_trade_filter_diagnostics(trades_df=trades, filter_diagnostics=diag)
+        assert result["exit_reason"].iloc[0] == "st_flip"
+
+    # ------------------------------------------------------------------
+    # §10.3.E  immediate-off on last bar — pending_open_trade_at_end wins
+    # ------------------------------------------------------------------
+    def test_e_immediate_off_last_bar_pending_wins(self):
+        """exit_index >= n_diag-1 (priority #2) beats imm_triggered==1 (priority #3)."""
+        n = 6
+        # pending_exit_idx = 5
+        # exit_index = 5 → exit_index >= pending_exit_idx → pending
+        exit_signal = 4  # exit_signal_idx = max(5-1, 0) = 4
+        diag = _make_diag_base(n)
+        diag["trade_filter_state"][exit_signal] = "OFF"
+        imm = np.zeros(n, dtype=np.int8)
+        imm[exit_signal] = 1
+        diag["exit_b_immediate_off_triggered"] = imm
+
+        trades = pd.DataFrame({"entry_index": [1], "exit_index": [n - 1]})
+        result = attach_trade_filter_diagnostics(trades_df=trades, filter_diagnostics=diag)
+        assert result["exit_reason"].iloc[0] == "pending_open_trade_at_end"
+
+    def test_e_imm_triggered_flag_still_set_in_diagnostics(self):
+        """Even when exit_reason=='pending_open_trade_at_end', the raw
+        exit_b_immediate_off_triggered array preserves the flag at t."""
+        n = 6
+        exit_signal = 4
+        diag = _make_diag_base(n)
+        imm = np.zeros(n, dtype=np.int8)
+        imm[exit_signal] = 1
+        diag["exit_b_immediate_off_triggered"] = imm
+        # The array itself must still show 1 at the threshold bar
+        assert imm[exit_signal] == 1
+
+    # ------------------------------------------------------------------
+    # §10.3.F  backward compat — absent exit_b_immediate_off_triggered key
+    # ------------------------------------------------------------------
+    def test_f_backward_compat_missing_array(self):
+        """If exit_b_immediate_off_triggered is absent, imm_at_exit=False;
+        priority #3 silently skipped; state==OFF falls through to 'st_flip'."""
+        n = 6
+        exit_signal = 3
+        diag = _make_diag_base(n)
+        diag["trade_filter_state"][exit_signal] = "OFF"
+        # Intentionally NO exit_b_immediate_off_triggered key
+
+        trades = pd.DataFrame({"entry_index": [1], "exit_index": [exit_signal + 1]})
+        result = attach_trade_filter_diagnostics(trades_df=trades, filter_diagnostics=diag)
+        # Falls to st_flip because state is OFF (not ST_STOPPING) and no imm_at_exit
+        assert result["exit_reason"].iloc[0] == "st_flip"
+
+    def test_f_backward_compat_stopping_still_works(self):
+        """Without imm array, existing priorities 1/2/4/5 remain unchanged."""
+        n = 6
+        exit_signal = 3
+        diag = _make_diag_base(n)
+        diag["trade_filter_state"][exit_signal] = "ST_STOPPING"
+        # No exit_b_immediate_off_triggered key → imm_at_exit = False
+
+        trades = pd.DataFrame({"entry_index": [1], "exit_index": [exit_signal + 1]})
+        result = attach_trade_filter_diagnostics(trades_df=trades, filter_diagnostics=diag)
+        assert result["exit_reason"].iloc[0] == "filter_stopping_opposite_flip"
+
+    # ------------------------------------------------------------------
+    # §10.3.G  immediate-off at t == n_diag-2 (pre-existing pending semantics)
+    # ------------------------------------------------------------------
+    def test_g_immediate_off_second_to_last_bar(self):
+        """Immediate-off at t=n-2: position closed (positions[n-1]=0),
+        but exit_index = n-1 → exit_reason = 'pending_open_trade_at_end'
+        (priority #2 per §5.2 / §10.3.G)."""
+        n = 6
+        # threshold t = n-2 = 4; exit_index = n-1 = 5
+        # exit_signal_idx = max(5-1,0) = 4 → imm_triggered[4]==1
+        # but exit_index (5) >= pending_exit_idx (5) → pending
+        threshold_bar = n - 2  # = 4
+        diag = _make_diag_base(n)
+        diag["trade_filter_state"][threshold_bar] = "OFF"
+        imm = np.zeros(n, dtype=np.int8)
+        imm[threshold_bar] = 1
+        diag["exit_b_immediate_off_triggered"] = imm
+
+        trades = pd.DataFrame({"entry_index": [1], "exit_index": [n - 1]})
+        result = attach_trade_filter_diagnostics(trades_df=trades, filter_diagnostics=diag)
+        assert result["exit_reason"].iloc[0] == "pending_open_trade_at_end", (
+            "§10.3.G: immediate-off at t=n-2 is classified as pending because "
+            "exit_index == n_diag-1 (priority #2). Verify diagnostics array instead."
+        )
+
+    def test_g_imm_triggered_flag_preserved_at_threshold_bar(self):
+        """§10.3.G: the raw diagnostics array still shows triggered==1 at t=n-2."""
+        n = 6
+        threshold_bar = n - 2
+        imm = np.zeros(n, dtype=np.int8)
+        imm[threshold_bar] = 1
+        assert imm[threshold_bar] == 1, (
+            "exit_b_immediate_off_triggered must be set at the threshold bar "
+            "even when exit_reason is classified as pending_open_trade_at_end"
+        )

@@ -586,3 +586,389 @@ class TestEqualBlocksEnabledRejection:
         cfg = load_tester_config(str(cfg_path))
         assert cfg["segmentation"]["mode"] == "equal_blocks"
         assert cfg["trade_filter"] is None
+
+
+# ---------------------------------------------------------------------------
+# Group 11 — exit_b_immediate_off validation matrix (§10.1)
+# (Plan exit_b_immediate_off v3 §10.1 / §3.2 / §3.3)
+# ---------------------------------------------------------------------------
+
+from supertrend_optimizer.core.trade_filter_config import (
+    _V3_INIT_FAILURE_KEYS as _IMM_FAILURE_KEYS,
+)
+
+
+def _exit_b_block(extra_lifecycle: str = "") -> str:
+    """YAML fragment: enabled=true, exit_off_mode='exit B', count=3."""
+    return dedent(f"""
+        trade_filter:
+          enabled: true
+          type: zigzag_st_mode
+          zigzag:
+            reversal_threshold: 0.005
+            candidate_trigger_threshold: 0.012
+            local_window: 5
+          lifecycle:
+            freeze_confirmed_legs: 3
+            stop_check: confirm_bar_only
+            stopping_exit: opposite_st_flip
+            exit_off_mode: "exit B"
+            exit_off_zz_leg_count: 3
+        {extra_lifecycle}
+    """).strip()
+
+
+def _exit_a_block(extra_lifecycle: str = "") -> str:
+    """YAML fragment: enabled=true, exit_off_mode='exit A' (explicit)."""
+    return dedent(f"""
+        trade_filter:
+          enabled: true
+          type: zigzag_st_mode
+          zigzag:
+            reversal_threshold: 0.005
+            candidate_trigger_threshold: 0.012
+            local_window: 5
+          lifecycle:
+            freeze_confirmed_legs: 3
+            stop_check: confirm_bar_only
+            stopping_exit: opposite_st_flip
+            exit_off_mode: "exit A"
+        {extra_lifecycle}
+    """).strip()
+
+
+def _disabled_block(extra_lifecycle: str = "") -> str:
+    """YAML fragment: enabled=false."""
+    return dedent(f"""
+        trade_filter:
+          enabled: false
+          type: zigzag_st_mode
+          lifecycle:
+            freeze_confirmed_legs: 3
+        {extra_lifecycle}
+    """).strip()
+
+
+class TestExitBImmediateOffValidConfigsTester:
+    """§10.1 valid cases for load_tester_config (#0a, #0b, #1, #2, #3)."""
+
+    def test_0a_mode_absent_imm_absent_ok(self, tmp_path: Path) -> None:
+        """#0a: exit_off_mode absent; imm absent -> OK; imm==False."""
+        block = _enabled_minimal_block()
+        cfg = load_tester_config(str(_write_config(tmp_path, block)))
+        tf = cfg["trade_filter"]
+        assert tf.lifecycle.exit_b_immediate_off is False
+
+    def test_0b_exit_a_explicit_imm_absent_ok(self, tmp_path: Path) -> None:
+        """#0b: exit_off_mode='exit A'; imm absent -> OK; imm==False."""
+        cfg = load_tester_config(str(_write_config(tmp_path, _exit_a_block())))
+        tf = cfg["trade_filter"]
+        assert tf.lifecycle.exit_b_immediate_off is False
+
+    def test_1_exit_b_imm_absent_resolves_false(self, tmp_path: Path) -> None:
+        """#1: exit B + count; imm absent -> OK; imm resolves to False."""
+        cfg = load_tester_config(str(_write_config(tmp_path, _exit_b_block())))
+        tf = cfg["trade_filter"]
+        assert tf.lifecycle.exit_b_immediate_off is False
+
+    def test_2_exit_b_imm_true_ok(self, tmp_path: Path) -> None:
+        """#2: exit B + count + imm:true -> OK."""
+        block = dedent("""
+            trade_filter:
+              enabled: true
+              type: zigzag_st_mode
+              zigzag:
+                reversal_threshold: 0.005
+                candidate_trigger_threshold: 0.012
+                local_window: 5
+              lifecycle:
+                freeze_confirmed_legs: 3
+                stop_check: confirm_bar_only
+                stopping_exit: opposite_st_flip
+                exit_off_mode: "exit B"
+                exit_off_zz_leg_count: 3
+                exit_b_immediate_off: true
+        """).strip()
+        cfg = load_tester_config(str(_write_config(tmp_path, block)))
+        tf = cfg["trade_filter"]
+        assert tf.lifecycle.exit_b_immediate_off is True
+
+    def test_3_exit_b_imm_false_ok(self, tmp_path: Path) -> None:
+        """#3: exit B + count + imm:false -> OK."""
+        block = dedent("""
+            trade_filter:
+              enabled: true
+              type: zigzag_st_mode
+              zigzag:
+                reversal_threshold: 0.005
+                candidate_trigger_threshold: 0.012
+                local_window: 5
+              lifecycle:
+                freeze_confirmed_legs: 3
+                stop_check: confirm_bar_only
+                stopping_exit: opposite_st_flip
+                exit_off_mode: "exit B"
+                exit_off_zz_leg_count: 3
+                exit_b_immediate_off: false
+        """).strip()
+        cfg = load_tester_config(str(_write_config(tmp_path, block)))
+        tf = cfg["trade_filter"]
+        assert tf.lifecycle.exit_b_immediate_off is False
+
+
+class TestExitBImmediateOffInvalidConfigsTester:
+    """§10.1 invalid cases for load_tester_config (#4–#11)."""
+
+    def _assert_rejects(self, tmp_path: Path, block: str, match: str) -> None:
+        with pytest.raises(ConfigError, match=match):
+            load_tester_config(str(_write_config(tmp_path, block)))
+
+    def test_4_exit_a_imm_true_reject(self, tmp_path: Path) -> None:
+        """#4: exit_off_mode='exit A'; imm:true -> reject."""
+        block = dedent("""
+            trade_filter:
+              enabled: true
+              type: zigzag_st_mode
+              zigzag:
+                reversal_threshold: 0.005
+                candidate_trigger_threshold: 0.012
+                local_window: 5
+              lifecycle:
+                freeze_confirmed_legs: 3
+                stop_check: confirm_bar_only
+                stopping_exit: opposite_st_flip
+                exit_off_mode: "exit A"
+                exit_b_immediate_off: true
+        """).strip()
+        self._assert_rejects(tmp_path, block, "exit_b_immediate_off must be absent")
+
+    def test_5_exit_a_imm_false_reject(self, tmp_path: Path) -> None:
+        """#5: exit_off_mode='exit A'; imm:false -> reject (key present)."""
+        block = dedent("""
+            trade_filter:
+              enabled: true
+              type: zigzag_st_mode
+              zigzag:
+                reversal_threshold: 0.005
+                candidate_trigger_threshold: 0.012
+                local_window: 5
+              lifecycle:
+                freeze_confirmed_legs: 3
+                stop_check: confirm_bar_only
+                stopping_exit: opposite_st_flip
+                exit_off_mode: "exit A"
+                exit_b_immediate_off: false
+        """).strip()
+        self._assert_rejects(tmp_path, block, "exit_b_immediate_off must be absent")
+
+    def test_6_mode_absent_imm_true_reject(self, tmp_path: Path) -> None:
+        """#6: exit_off_mode absent; imm:true -> reject."""
+        block = dedent("""
+            trade_filter:
+              enabled: true
+              type: zigzag_st_mode
+              zigzag:
+                reversal_threshold: 0.005
+                candidate_trigger_threshold: 0.012
+                local_window: 5
+              lifecycle:
+                freeze_confirmed_legs: 3
+                stop_check: confirm_bar_only
+                stopping_exit: opposite_st_flip
+                exit_b_immediate_off: true
+        """).strip()
+        self._assert_rejects(tmp_path, block, "exit_b_immediate_off must be absent")
+
+    def test_6b_mode_absent_imm_false_reject(self, tmp_path: Path) -> None:
+        """#6b: exit_off_mode absent; imm:false -> reject (key present, §3.2 rule #3)."""
+        block = dedent("""
+            trade_filter:
+              enabled: true
+              type: zigzag_st_mode
+              zigzag:
+                reversal_threshold: 0.005
+                candidate_trigger_threshold: 0.012
+                local_window: 5
+              lifecycle:
+                freeze_confirmed_legs: 3
+                stop_check: confirm_bar_only
+                stopping_exit: opposite_st_flip
+                exit_b_immediate_off: false
+        """).strip()
+        self._assert_rejects(tmp_path, block, "exit_b_immediate_off must be absent")
+
+    def test_7_exit_b_imm_string_reject(self, tmp_path: Path) -> None:
+        """#7: exit B + imm:'yes' -> reject invalid_type."""
+        block = dedent("""
+            trade_filter:
+              enabled: true
+              type: zigzag_st_mode
+              zigzag:
+                reversal_threshold: 0.005
+                candidate_trigger_threshold: 0.012
+                local_window: 5
+              lifecycle:
+                freeze_confirmed_legs: 3
+                stop_check: confirm_bar_only
+                stopping_exit: opposite_st_flip
+                exit_off_mode: "exit B"
+                exit_off_zz_leg_count: 3
+                exit_b_immediate_off: "yes"
+        """).strip()
+        self._assert_rejects(tmp_path, block, "exit_b_immediate_off must be bool")
+
+    def test_8_exit_b_imm_int_reject(self, tmp_path: Path) -> None:
+        """#8: exit B + imm:1 (int) -> reject invalid_type."""
+        block = dedent("""
+            trade_filter:
+              enabled: true
+              type: zigzag_st_mode
+              zigzag:
+                reversal_threshold: 0.005
+                candidate_trigger_threshold: 0.012
+                local_window: 5
+              lifecycle:
+                freeze_confirmed_legs: 3
+                stop_check: confirm_bar_only
+                stopping_exit: opposite_st_flip
+                exit_off_mode: "exit B"
+                exit_off_zz_leg_count: 3
+                exit_b_immediate_off: 1
+        """).strip()
+        self._assert_rejects(tmp_path, block, "exit_b_immediate_off must be bool")
+
+    def test_9_exit_b_imm_null_reject(self, tmp_path: Path) -> None:
+        """#9: exit B + imm:null -> reject invalid_type."""
+        block = dedent("""
+            trade_filter:
+              enabled: true
+              type: zigzag_st_mode
+              zigzag:
+                reversal_threshold: 0.005
+                candidate_trigger_threshold: 0.012
+                local_window: 5
+              lifecycle:
+                freeze_confirmed_legs: 3
+                stop_check: confirm_bar_only
+                stopping_exit: opposite_st_flip
+                exit_off_mode: "exit B"
+                exit_off_zz_leg_count: 3
+                exit_b_immediate_off: null
+        """).strip()
+        self._assert_rejects(tmp_path, block, "exit_b_immediate_off must be bool")
+
+    def test_10_disabled_imm_true_reject(self, tmp_path: Path) -> None:
+        """#10: enabled=false; imm:true -> reject present_when_filter_disabled."""
+        block = dedent("""
+            trade_filter:
+              enabled: false
+              type: zigzag_st_mode
+              lifecycle:
+                freeze_confirmed_legs: 3
+                exit_b_immediate_off: true
+        """).strip()
+        self._assert_rejects(tmp_path, block, "exit_b_immediate_off must be absent")
+
+    def test_11_disabled_imm_false_reject(self, tmp_path: Path) -> None:
+        """#11: enabled=false; imm:false -> reject present_when_filter_disabled."""
+        block = dedent("""
+            trade_filter:
+              enabled: false
+              type: zigzag_st_mode
+              lifecycle:
+                freeze_confirmed_legs: 3
+                exit_b_immediate_off: false
+        """).strip()
+        self._assert_rejects(tmp_path, block, "exit_b_immediate_off must be absent")
+
+
+class TestExitBImmediateOffTesterResolverAndParity:
+    """§3.6: after load_tester_config, resolver chain applied correctly."""
+
+    def test_exit_b_imm_true_chain_resolved(self, tmp_path: Path) -> None:
+        """Full chain: validate → resolve_mode → resolve_exit_off → resolve_imm."""
+        block = dedent("""
+            trade_filter:
+              enabled: true
+              type: zigzag_st_mode
+              zigzag:
+                reversal_threshold: 0.005
+                candidate_trigger_threshold: 0.012
+                local_window: 5
+              lifecycle:
+                freeze_confirmed_legs: 3
+                stop_check: confirm_bar_only
+                stopping_exit: opposite_st_flip
+                exit_off_mode: "exit B"
+                exit_off_zz_leg_count: 3
+                exit_b_immediate_off: true
+        """).strip()
+        cfg = load_tester_config(str(_write_config(tmp_path, block)))
+        tf = cfg["trade_filter"]
+        assert tf.lifecycle.exit_off_mode == "exit B"
+        assert tf.lifecycle.exit_b_immediate_off is True
+
+    def test_exit_b_imm_absent_resolves_false(self, tmp_path: Path) -> None:
+        """Absent imm key → resolved to False (not left as dataclass default object)."""
+        block = dedent("""
+            trade_filter:
+              enabled: true
+              type: zigzag_st_mode
+              zigzag:
+                reversal_threshold: 0.005
+                candidate_trigger_threshold: 0.012
+                local_window: 5
+              lifecycle:
+                freeze_confirmed_legs: 3
+                stop_check: confirm_bar_only
+                stopping_exit: opposite_st_flip
+                exit_off_mode: "exit B"
+                exit_off_zz_leg_count: 3
+        """).strip()
+        cfg = load_tester_config(str(_write_config(tmp_path, block)))
+        tf = cfg["trade_filter"]
+        assert tf.lifecycle.exit_b_immediate_off is False
+
+
+class TestExitBImmediateOffFailureKeysRegistryTester:
+    """§10.1.X snapshot: _V3_INIT_FAILURE_KEYS (tester side)."""
+
+    _NEW_IMM_KEYS = frozenset({
+        "exit_b_immediate_off_present_when_not_exit_b",
+        "exit_b_immediate_off_invalid_type",
+        "exit_b_immediate_off_present_when_filter_disabled",
+    })
+
+    _FULL_EXPECTED_SNAPSHOT = frozenset({
+        "candidate_entry_deprecated",
+        "duration_gate_enabled_invalid_type",
+        "duration_gate_max_bars_below_one",
+        "duration_gate_max_bars_invalid_type",
+        "duration_gate_max_bars_missing",
+        "duration_gate_max_bars_present_when_disabled",
+        "exit_b_immediate_off_invalid_type",
+        "exit_b_immediate_off_present_when_filter_disabled",
+        "exit_b_immediate_off_present_when_not_exit_b",
+        "exit_off_mode_invalid_literal",
+        "exit_off_mode_invalid_type",
+        "exit_off_zz_leg_count_below_one",
+        "exit_off_zz_leg_count_invalid_type",
+        "exit_off_zz_leg_count_missing",
+        "exit_off_zz_leg_count_present_when_exit_a",
+        "mode_conflicts_with_legacy_triggers",
+        "mode_invalid_literal",
+    })
+
+    def test_three_new_keys_in_registry(self) -> None:
+        missing = self._NEW_IMM_KEYS - _IMM_FAILURE_KEYS
+        assert not missing, (
+            f"New imm keys missing from _V3_INIT_FAILURE_KEYS: {sorted(missing)}"
+        )
+
+    def test_failure_keys_snapshot(self) -> None:
+        """§10.1.X: full snapshot of _V3_INIT_FAILURE_KEYS (sorted)."""
+        assert _IMM_FAILURE_KEYS == self._FULL_EXPECTED_SNAPSHOT, (
+            f"_V3_INIT_FAILURE_KEYS snapshot mismatch.\n"
+            f"  expected: {sorted(self._FULL_EXPECTED_SNAPSHOT)}\n"
+            f"  observed: {sorted(_IMM_FAILURE_KEYS)}"
+        )

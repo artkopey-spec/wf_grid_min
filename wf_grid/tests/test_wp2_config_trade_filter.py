@@ -1461,3 +1461,296 @@ class TestExitOffFailureKeysRegistry:
                 f"Error key {expected_key!r} not emitted by validator "
                 f"for overrides={overrides!r}. Got: {ekeys}"
             )
+
+
+# ===========================================================================
+# §10.1 + §10.1.X: exit_b_immediate_off validation matrix
+# (Plan exit_b_immediate_off v3 §10.1 / §3.2 / §3.3)
+# ===========================================================================
+
+import copy as _copy2
+
+from supertrend_optimizer.core.trade_filter_config import (
+    resolve_exit_b_immediate_off_in_place as _resolve_imm,
+)
+
+# Base with exit B + count=3 for enabled tests that need exit B
+_VALID_EXIT_B_RAW: dict = {
+    "enabled": True,
+    "type": "zigzag_st_mode",
+    "zigzag": {
+        "mode": "A",
+        "reversal_threshold": 0.005,
+        "candidate_trigger_threshold": 0.012,
+        "local_window": 5,
+    },
+    "lifecycle": {
+        "freeze_confirmed_legs": 3,
+        "stop_check": "confirm_bar_only",
+        "stopping_exit": "opposite_st_flip",
+        "exit_off_mode": "exit B",
+        "exit_off_zz_leg_count": 3,
+    },
+}
+
+_VALID_DISABLED_RAW: dict = {
+    "enabled": False,
+    "type": "zigzag_st_mode",
+}
+
+
+def _run_imm(
+    lc_overrides: dict | None = None,
+    base: dict | None = None,
+    caller: str = "wf_grid",
+) -> tuple[list[str], list[str]]:
+    """Run validate_trade_filter with lifecycle overrides (default base = exit B)."""
+    raw = {"trade_filter": _copy2.deepcopy(base if base is not None else _VALID_EXIT_B_RAW)}
+    if lc_overrides:
+        raw["trade_filter"].setdefault("lifecycle", {})
+        raw["trade_filter"]["lifecycle"].update(lc_overrides)
+    tf = _build_tf(raw["trade_filter"])
+    ruk = _collect_ruk(raw)
+    errors: list[str] = []
+    ekeys: list[str] = []
+    _shared_validate(tf, errors, ruk, caller_pipeline=caller, error_keys=ekeys)
+    return errors, ekeys
+
+
+def _run_imm_disabled(imm_value: object) -> tuple[list[str], list[str]]:
+    """Run validate_trade_filter with disabled filter + lifecycle.exit_b_immediate_off."""
+    raw = {
+        "trade_filter": {
+            **_copy2.deepcopy(_VALID_DISABLED_RAW),
+            "lifecycle": {"exit_b_immediate_off": imm_value},
+        }
+    }
+    tf = _build_tf(raw["trade_filter"])
+    ruk = _collect_ruk(raw)
+    errors: list[str] = []
+    ekeys: list[str] = []
+    _shared_validate(tf, errors, ruk, caller_pipeline="wf_grid", error_keys=ekeys)
+    return errors, ekeys
+
+
+class TestExitBImmediateOffValidConfigs:
+    """§10.1 valid cases (#0a, #0b, #1, #2, #3)."""
+
+    def test_0a_exit_off_mode_absent_imm_absent_ok(self):
+        """#0a: enabled=true; exit_off_mode absent; imm absent -> OK; imm==False."""
+        base = _copy2.deepcopy(_VALID_ENABLED_RAW)
+        raw = {"trade_filter": base}
+        tf = _build_tf(raw["trade_filter"])
+        ruk = _collect_ruk(raw)
+        errors: list[str] = []
+        ekeys: list[str] = []
+        _shared_validate(tf, errors, ruk, caller_pipeline="wf_grid", error_keys=ekeys)
+        imm_keys = {k for k in ekeys if "immediate_off" in k}
+        assert not imm_keys, f"Unexpected imm errors: {imm_keys}"
+        _resolve_imm(tf, ruk)
+        assert tf.lifecycle.exit_b_immediate_off is False
+
+    def test_0b_exit_a_explicit_imm_absent_ok(self):
+        """#0b: enabled=true; exit_off_mode='exit A'; imm absent -> OK; imm==False."""
+        _, ekeys = _run_imm(
+            lc_overrides={"exit_off_mode": "exit A"},
+            base=_copy2.deepcopy(_VALID_ENABLED_RAW),
+        )
+        imm_keys = {k for k in ekeys if "immediate_off" in k}
+        assert not imm_keys, f"Unexpected imm errors: {imm_keys}"
+
+    def test_1_exit_b_imm_absent_ok(self):
+        """#1: enabled=true; exit B + count; imm absent -> OK; imm resolves to False."""
+        _, ekeys = _run_imm()
+        imm_keys = {k for k in ekeys if "immediate_off" in k}
+        assert not imm_keys, f"Unexpected imm errors: {imm_keys}"
+        raw = {"trade_filter": _copy2.deepcopy(_VALID_EXIT_B_RAW)}
+        tf = _build_tf(raw["trade_filter"])
+        ruk = _collect_ruk(raw)
+        _resolve_imm(tf, ruk)
+        assert tf.lifecycle.exit_b_immediate_off is False
+
+    def test_2_exit_b_imm_true_ok(self):
+        """#2: exit B + count + imm:true -> OK."""
+        _, ekeys = _run_imm({"exit_b_immediate_off": True})
+        imm_keys = {k for k in ekeys if "immediate_off" in k}
+        assert not imm_keys, f"Unexpected imm errors: {imm_keys}"
+
+    def test_3_exit_b_imm_false_ok(self):
+        """#3: exit B + count + imm:false -> OK."""
+        _, ekeys = _run_imm({"exit_b_immediate_off": False})
+        imm_keys = {k for k in ekeys if "immediate_off" in k}
+        assert not imm_keys, f"Unexpected imm errors: {imm_keys}"
+
+
+class TestExitBImmediateOffInvalidConfigs:
+    """§10.1 invalid cases (#4–#11)."""
+
+    def test_4_exit_a_imm_true_reject(self):
+        """#4: exit_off_mode='exit A'; imm:true -> reject present_when_not_exit_b."""
+        _, ekeys = _run_imm(
+            {"exit_off_mode": "exit A", "exit_b_immediate_off": True},
+            base=_copy2.deepcopy(_VALID_ENABLED_RAW),
+        )
+        _superset_assert(ekeys, {"exit_b_immediate_off_present_when_not_exit_b"})
+
+    def test_5_exit_a_imm_false_reject(self):
+        """#5: exit_off_mode='exit A'; imm:false -> reject present_when_not_exit_b."""
+        _, ekeys = _run_imm(
+            {"exit_off_mode": "exit A", "exit_b_immediate_off": False},
+            base=_copy2.deepcopy(_VALID_ENABLED_RAW),
+        )
+        _superset_assert(ekeys, {"exit_b_immediate_off_present_when_not_exit_b"})
+
+    def test_6_exit_off_mode_absent_imm_true_reject(self):
+        """#6: exit_off_mode absent; imm:true -> reject present_when_not_exit_b."""
+        base = _copy2.deepcopy(_VALID_ENABLED_RAW)
+        base["lifecycle"]["exit_b_immediate_off"] = True
+        raw = {"trade_filter": base}
+        tf = _build_tf(raw["trade_filter"])
+        ruk = _collect_ruk(raw)
+        errors: list[str] = []
+        ekeys: list[str] = []
+        _shared_validate(tf, errors, ruk, caller_pipeline="wf_grid", error_keys=ekeys)
+        _superset_assert(ekeys, {"exit_b_immediate_off_present_when_not_exit_b"})
+
+    def test_6b_exit_off_mode_absent_imm_false_reject(self):
+        """#6b: exit_off_mode absent; imm:false -> reject present_when_not_exit_b.
+        Key is PRESENT with value False — must still reject (§3.2 rule #3)."""
+        base = _copy2.deepcopy(_VALID_ENABLED_RAW)
+        base["lifecycle"]["exit_b_immediate_off"] = False
+        raw = {"trade_filter": base}
+        tf = _build_tf(raw["trade_filter"])
+        ruk = _collect_ruk(raw)
+        errors: list[str] = []
+        ekeys: list[str] = []
+        _shared_validate(tf, errors, ruk, caller_pipeline="wf_grid", error_keys=ekeys)
+        _superset_assert(ekeys, {"exit_b_immediate_off_present_when_not_exit_b"})
+
+    def test_7_exit_b_imm_string_reject(self):
+        """#7: exit B + imm:'yes' -> reject invalid_type."""
+        _, ekeys = _run_imm({"exit_b_immediate_off": "yes"})
+        _superset_assert(
+            ekeys,
+            {"exit_b_immediate_off_invalid_type"},
+            forbidden={"exit_b_immediate_off_present_when_not_exit_b"},
+        )
+
+    def test_8_exit_b_imm_int_reject(self):
+        """#8: exit B + imm:1 (int, not bool) -> reject invalid_type."""
+        _, ekeys = _run_imm({"exit_b_immediate_off": 1})
+        _superset_assert(
+            ekeys,
+            {"exit_b_immediate_off_invalid_type"},
+            forbidden={"exit_b_immediate_off_present_when_not_exit_b"},
+        )
+
+    def test_9_exit_b_imm_null_reject(self):
+        """#9: exit B + imm:null -> reject invalid_type."""
+        _, ekeys = _run_imm({"exit_b_immediate_off": None})
+        _superset_assert(
+            ekeys,
+            {"exit_b_immediate_off_invalid_type"},
+            forbidden={"exit_b_immediate_off_present_when_not_exit_b"},
+        )
+
+    def test_10_disabled_imm_true_reject(self):
+        """#10: enabled=false; imm:true -> reject present_when_filter_disabled."""
+        _, ekeys = _run_imm_disabled(True)
+        _superset_assert(ekeys, {"exit_b_immediate_off_present_when_filter_disabled"})
+
+    def test_11_disabled_imm_false_reject(self):
+        """#11: enabled=false; imm:false -> reject present_when_filter_disabled.
+        Key is PRESENT with value False — must still reject (§3.2 rule #5)."""
+        _, ekeys = _run_imm_disabled(False)
+        _superset_assert(ekeys, {"exit_b_immediate_off_present_when_filter_disabled"})
+
+
+class TestExitBImmediateOffInt0IdentityCheck:
+    """§10.2.E prerequisite: int 0 is NOT False by identity (§3.4 / §4.1).
+
+    This tests the validator rule directly: exit_b_immediate_off=0 (int)
+    must be rejected as invalid_type, because isinstance(0, bool) is False."""
+
+    def test_int_zero_rejected_as_invalid_type(self):
+        """exit B + imm:0 (int, not bool False) -> invalid_type."""
+        _, ekeys = _run_imm({"exit_b_immediate_off": 0})
+        _superset_assert(ekeys, {"exit_b_immediate_off_invalid_type"})
+
+
+class TestExitBImmediateOffResolverDefault:
+    """resolve_exit_b_immediate_off_in_place defaults to False when key absent."""
+
+    def test_absent_key_resolves_to_false(self):
+        raw = {"trade_filter": _copy2.deepcopy(_VALID_EXIT_B_RAW)}
+        tf = _build_tf(raw["trade_filter"])
+        ruk = _collect_ruk(raw)
+        assert ("trade_filter", "lifecycle", "exit_b_immediate_off") not in ruk
+        _resolve_imm(tf, ruk)
+        assert tf.lifecycle.exit_b_immediate_off is False
+
+    def test_present_true_not_overwritten(self):
+        base = _copy2.deepcopy(_VALID_EXIT_B_RAW)
+        base["lifecycle"]["exit_b_immediate_off"] = True
+        raw = {"trade_filter": base}
+        tf = _build_tf(raw["trade_filter"])
+        ruk = _collect_ruk(raw)
+        _resolve_imm(tf, ruk)
+        assert tf.lifecycle.exit_b_immediate_off is True
+
+    def test_disabled_filter_noop(self):
+        """Resolver is no-op for disabled filter."""
+        raw = {"trade_filter": _copy2.deepcopy(_VALID_DISABLED_RAW)}
+        tf = _build_tf(raw["trade_filter"])
+        ruk = _collect_ruk(raw)
+        _resolve_imm(tf, ruk)
+        assert tf.lifecycle.exit_b_immediate_off is False  # dataclass default unchanged
+
+    def test_none_config_noop(self):
+        """Resolver is no-op for None config."""
+        _resolve_imm(None, frozenset())
+
+
+class TestExitBImmediateOffFailureKeysRegistry:
+    """§10.1.X: snapshot of _V3_INIT_FAILURE_KEYS must contain the 3 new keys."""
+
+    _NEW_IMM_KEYS = frozenset({
+        "exit_b_immediate_off_present_when_not_exit_b",
+        "exit_b_immediate_off_invalid_type",
+        "exit_b_immediate_off_present_when_filter_disabled",
+    })
+
+    _FULL_EXPECTED_SNAPSHOT = frozenset({
+        "candidate_entry_deprecated",
+        "duration_gate_enabled_invalid_type",
+        "duration_gate_max_bars_below_one",
+        "duration_gate_max_bars_invalid_type",
+        "duration_gate_max_bars_missing",
+        "duration_gate_max_bars_present_when_disabled",
+        "exit_b_immediate_off_invalid_type",
+        "exit_b_immediate_off_present_when_filter_disabled",
+        "exit_b_immediate_off_present_when_not_exit_b",
+        "exit_off_mode_invalid_literal",
+        "exit_off_mode_invalid_type",
+        "exit_off_zz_leg_count_below_one",
+        "exit_off_zz_leg_count_invalid_type",
+        "exit_off_zz_leg_count_missing",
+        "exit_off_zz_leg_count_present_when_exit_a",
+        "mode_conflicts_with_legacy_triggers",
+        "mode_invalid_literal",
+    })
+
+    def test_three_new_keys_in_failure_registry(self):
+        """Three new error keys must be present in _V3_INIT_FAILURE_KEYS."""
+        missing = self._NEW_IMM_KEYS - _SHARED_FAILURE_KEYS
+        assert not missing, (
+            f"New imm keys missing from _V3_INIT_FAILURE_KEYS: {sorted(missing)}"
+        )
+
+    def test_failure_keys_snapshot(self):
+        """§10.1.X: full snapshot of _V3_INIT_FAILURE_KEYS (sorted)."""
+        assert _SHARED_FAILURE_KEYS == self._FULL_EXPECTED_SNAPSHOT, (
+            f"_V3_INIT_FAILURE_KEYS snapshot mismatch.\n"
+            f"  expected: {sorted(self._FULL_EXPECTED_SNAPSHOT)}\n"
+            f"  observed: {sorted(_SHARED_FAILURE_KEYS)}"
+        )

@@ -48,6 +48,8 @@ _PER_BAR_KEYSET_SNAPSHOT: frozenset = frozenset({
     "confirmed_median_ok",
     "daily_reset_enabled",
     "daily_reset_event",
+    "exit_b_immediate_off_config",
+    "exit_b_immediate_off_triggered",
     "exit_off_mode",
     "exit_off_zz_leg_count",
     "filter_allowed_entry",
@@ -86,6 +88,8 @@ _SUMMARY_KEYSET_SNAPSHOT: frozenset = frozenset({
     "candidate_duration_max_bars",
     "daily_reset_count",
     "diagnostics_available",
+    "exit_b_immediate_off",        # Plan v3 §8
+    "exit_b_immediate_off_count",  # Plan v3 §8
     "exit_off_mode",
     "exit_off_zz_leg_count",
     "filter_states_visited",
@@ -123,6 +127,8 @@ _EXCEL_PER_BAR_HEADERS_SNAPSHOT: dict = {
     "candidate_trigger_threshold":              "Candidate Trigger Threshold",
     "confirmed_legs_since_start":               "Confirmed Legs Since Start",
     "confirmed_median_ok":                      "Confirmed Median OK",
+    "exit_b_immediate_off_config":              "Exit-B Immediate OFF Config",   # Plan v3 §6.1
+    "exit_b_immediate_off_triggered":           "Exit-B Immediate OFF Triggered", # Plan v3 §6.1
     "exit_off_mode":                            "Exit-OFF Mode",
     "exit_off_zz_leg_count":                    "Exit-OFF ZZ Leg Count",
     "filter_allowed_entry":                     "Filter Allowed Entry",
@@ -163,6 +169,7 @@ _EXCEL_SUMMARY_PARAMS_LABELS_SNAPSHOT: list = [
     "Candidate Duration Max Bars",
     "Exit-OFF Mode",
     "Exit-OFF ZZ Leg Count",
+    "Exit-B Immediate OFF",  # Plan v3 §6.2
 ]
 
 _EXCEL_SUMMARY_PERIOD_COLS_SNAPSHOT: list = [
@@ -199,6 +206,8 @@ _STEP_LONG_FILTER_COLUMNS_SNAPSHOT = [
     "zz_leg_stop_triggered_count",
     "exit_off_mode",
     "exit_off_zz_leg_count",
+    "exit_b_immediate_off",        # Plan v3 §8
+    "exit_b_immediate_off_count",  # Plan v3 §8
     "filter_diagnostics_available",
     "trigger_count_candidate_threshold",
     "trigger_count_confirmed_median",

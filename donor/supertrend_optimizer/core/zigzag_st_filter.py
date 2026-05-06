@@ -1558,6 +1558,24 @@ def apply(
             "Ensure trade filter config is validated before calling apply()."
         )
 
+    # exit_b_immediate_off: runtime fail-fast (Plan v3 §4.1).
+    # Use `is not False` (identity, not equality) so int 0 is rejected:
+    # 0 == False is True in Python, but 0 is not False is True.
+    _imm_raw = getattr(_lc_apply, "exit_b_immediate_off", False) if _lc_apply is not None else False
+    if is_exit_b and not isinstance(_imm_raw, bool):
+        raise ConfigError(
+            "apply(): exit_b_immediate_off must be bool when exit_off_mode='exit B'; "
+            f"got {type(_imm_raw).__name__!r} ({_imm_raw!r}). "
+            "Ensure trade filter config is validated before calling apply()."
+        )
+    if (not is_exit_b) and _imm_raw is not False:
+        raise ConfigError(
+            "apply(): exit_b_immediate_off must be False when exit_off_mode != 'exit B'; "
+            f"got {_imm_raw!r}. "
+            "Ensure trade filter config is validated before calling apply()."
+        )
+    exit_b_immediate_off_flag: bool = bool(_imm_raw) if is_exit_b else False
+
     candidate_trigger_threshold = float(zigzag_global_stats.candidate_trigger_threshold)
     global_median = float(zigzag_global_stats.global_median)
     if not math.isfinite(candidate_trigger_threshold) or not math.isfinite(global_median):
@@ -1615,6 +1633,13 @@ def apply(
     )
     zz_legs_since_lifecycle_start_arr = np.full(n, -1, dtype=np.int64)
     zz_leg_stop_triggered_arr = np.zeros(n, dtype=np.int8)
+
+    # Plan v3 §4.2: exit_b_immediate_off diagnostics — ALWAYS allocated
+    # (filled with zeros when exit_b_immediate_off_flag is False).
+    exit_b_immediate_off_triggered_arr = np.zeros(n, dtype=np.int8)
+    exit_b_immediate_off_config_arr = np.full(
+        n, np.int8(1 if exit_b_immediate_off_flag else 0), dtype=np.int8
+    )
 
     # ------------------------------------------------------------------
     # WP-V3-4: Runtime primitives & snapshots (ТЗ v3 §7, §10.2, §10.3).
@@ -2021,9 +2046,22 @@ def apply(
             and exit_off_zz_target >= 1
             and zz_legs_since_lifecycle_start >= exit_off_zz_target
         ):
-            state = ZigZagFSMState.ST_STOPPING
+            # Plan v3 §4.3: zz_leg_stop_triggered fires in BOTH modes
+            # (legacy and immediate-off) — invariant for backward compat.
             zz_leg_stop_triggered_arr[t] = np.int8(1)
-            just_reached_exit_b_threshold = True
+            if exit_b_immediate_off_flag:
+                # Immediate OFF: lifecycle terminates as OFF on bar t.
+                # OFF-invariants (same sentinel values as standard OFF init).
+                exit_b_immediate_off_triggered_arr[t] = np.int8(1)
+                state = ZigZagFSMState.OFF
+                confirmed_legs_since_start = -1
+                zz_legs_since_lifecycle_start = -1
+                held_pos = 0
+                # just_reached_exit_b_threshold stays False — only used by
+                # legacy ST_STOPPING path (§4.3 — guard against same-bar close).
+            else:
+                state = ZigZagFSMState.ST_STOPPING
+                just_reached_exit_b_threshold = True
 
         # 6) Update held_pos for ST flips while in active states.
         #    Only applies when the state was ALREADY active at bar_start
@@ -2185,6 +2223,9 @@ def apply(
         "exit_off_zz_leg_count": exit_off_zz_leg_count_arr,
         "zz_legs_since_lifecycle_start": zz_legs_since_lifecycle_start_arr,
         "zz_leg_stop_triggered": zz_leg_stop_triggered_arr,
+        # Plan v3 §4.7: always-present (zeros when flag is False).
+        "exit_b_immediate_off_triggered": exit_b_immediate_off_triggered_arr,
+        "exit_b_immediate_off_config": exit_b_immediate_off_config_arr,
         "daily_reset_enabled": np.full(n, int(daily_reset_enabled), dtype=np.int8),
         "daily_reset_event": np.asarray(daily_reset_event, dtype=np.int8),
         # --- v3 WP-V3-4: runtime primitives + bar-start snapshots ---
@@ -2251,12 +2292,18 @@ def attach_trade_filter_diagnostics(
     entry_trigger_source : str
         ``trade_filter_trigger_source`` on the close-decision bar for entry.
     exit_reason : str
-        ``"filter_daily_reset"`` when the exit decision bar is a daily reset;
-        ``"filter_stopping_opposite_flip"`` when the FSM was in
-        ``ST_STOPPING`` on the exit decision bar;
-        ``"pending_open_trade_at_end"`` for trades still open at the
-        last bar of the slice;
-        ``"st_flip"`` otherwise.
+        Priority order (highest → lowest, §5.2 Plan v3):
+
+        1. ``"filter_daily_reset"``          — daily_reset_event[exit_signal_idx]==1
+        2. ``"pending_open_trade_at_end"``   — exit_index >= n_diag - 1
+        3. ``"filter_exit_b_immediate_off"`` — exit_b_immediate_off_triggered
+                                               [exit_signal_idx]==1 (new, Plan v3)
+        4. ``"filter_stopping_opposite_flip"`` — FSM was in ST_STOPPING (legacy)
+        5. ``"st_flip"``                     — fallback
+
+        Backward compat: if ``exit_b_immediate_off_triggered`` is absent from
+        ``filter_diagnostics``, priority #3 is silently skipped (imm_at_exit=False
+        for all trades); priorities 1/2/4/5 remain unchanged (§5.3 / §10.3.F).
 
     Parameters
     ----------
@@ -2283,6 +2330,8 @@ def attach_trade_filter_diagnostics(
     state_arr = filter_diagnostics.get("trade_filter_state")
     trigger_arr = filter_diagnostics.get("trade_filter_trigger_source")
     daily_reset_arr = filter_diagnostics.get("daily_reset_event")
+    # Plan v3 §5.1: backward compat — absent key → imm_at_exit always False
+    imm_triggered_arr = filter_diagnostics.get("exit_b_immediate_off_triggered")
     if state_arr is None:
         raise ConfigError(
             "attach_trade_filter_diagnostics: 'trade_filter_state' key "
@@ -2325,11 +2374,24 @@ def attach_trade_filter_diagnostics(
             and exit_signal_idx < len(daily_reset_arr)
             and int(daily_reset_arr[exit_signal_idx]) == 1
         )
+        # Plan v3 §5.1: only True when array present AND bar flag==1
+        imm_at_exit = (
+            imm_triggered_arr is not None
+            and exit_signal_idx < len(imm_triggered_arr)
+            and int(imm_triggered_arr[exit_signal_idx]) == 1
+        )
 
+        # Priority chain (§5.2 Plan v3):
         if reset_at_exit:
             exit_reasons.append("filter_daily_reset")
         elif exit_index >= pending_exit_idx:
+            # Priority #2 wins over immediate-off: if the exit execution bar
+            # is the last position slot, the trade is classified as pending
+            # regardless of whether immediate-off was triggered (§5.2 rationale
+            # and §10.3.E / §10.3.G).
             exit_reasons.append("pending_open_trade_at_end")
+        elif imm_at_exit:
+            exit_reasons.append("filter_exit_b_immediate_off")
         elif fsm_at_exit == "ST_STOPPING":
             exit_reasons.append("filter_stopping_opposite_flip")
         else:

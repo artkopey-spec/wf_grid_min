@@ -96,6 +96,7 @@ trade_filter:                          # Блок WP2: фильтр сделок
     freeze_confirmed_legs: 5             # подтверждённых ног после старта lifecycle
     stop_check: "confirm_bar_only"       # в v1 только этот литерал
     stopping_exit: "opposite_st_flip"    # в v1 только этот литерал
+    # При exit_off_mode: "exit B": задайте exit_off_zz_leg_count и при необходимости exit_b_immediate_off: false|true
 
   diagnostics:
     export_state_columns: true

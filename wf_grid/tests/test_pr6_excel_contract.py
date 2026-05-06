@@ -29,10 +29,13 @@ _EXIT_OFF_PER_BAR_DISPLAY_NAMES = {
     "exit_off_zz_leg_count":         "Exit-OFF ZZ Leg Count",
     "zz_legs_since_lifecycle_start": "ZZ Legs Since Start",
     "zz_leg_stop_triggered":         "ZZ Leg Stop Triggered",
+    # Plan v3 §6.1: new per-bar columns
+    "exit_b_immediate_off_triggered": "Exit-B Immediate OFF Triggered",
+    "exit_b_immediate_off_config":    "Exit-B Immediate OFF Config",
 }
 
-# Expected params labels in _build_filters_summary_df (§8.2)
-_EXIT_OFF_PARAMS_LABELS = ("Exit-OFF Mode", "Exit-OFF ZZ Leg Count")
+# Expected params labels in _build_filters_summary_df (§8.2 + Plan v3 §6.2)
+_EXIT_OFF_PARAMS_LABELS = ("Exit-OFF Mode", "Exit-OFF ZZ Leg Count", "Exit-B Immediate OFF")
 
 # Expected period row labels (§8.3)
 _EXIT_OFF_PERIOD_LABELS = ("ZZ Leg Stop Events",)  # "ZZ Leg Stops" is in the second df block
@@ -75,6 +78,7 @@ def _make_period_result_double(
     exit_off_zz_leg_count: int = 3,
     zz_leg_stop_triggered_count: int = 2,
     n_bars_in_counting_zz_legs: int = 15,
+    exit_b_immediate_off: bool = False,
 ):
     """Build a minimal duck-typed PeriodResult for _build_filters_summary_df."""
 
@@ -92,6 +96,7 @@ def _make_period_result_double(
             "candidate_duration_max_bars": -1,
             "exit_off_mode": exit_off_mode,
             "exit_off_zz_leg_count": exit_off_zz_leg_count,
+            "exit_b_immediate_off": exit_b_immediate_off,
             "lifecycle_starts_count": 1,
             "median_stop_triggered_count": 0,
             "zz_leg_stop_triggered_count": zz_leg_stop_triggered_count,
@@ -106,6 +111,7 @@ def _make_period_result_double(
                 "freeze_confirmed_legs": 0,
                 "exit_off_mode": exit_off_mode,
                 "exit_off_zz_leg_count": exit_off_zz_leg_count,
+                "exit_b_immediate_off": exit_b_immediate_off,
                 "zigzag_mode": "A",
                 "candidate_duration_gate_enabled": False,
                 "candidate_duration_max_bars": -1,
@@ -282,3 +288,60 @@ class TestExitOffExcelCrossLayer:
                 f"is not produced by apply(). Typo in display map?\n"
                 f"Observed keys: {sorted(observed_keys)}"
             )
+
+
+# ===========================================================================
+# Plan v3 §6.1/§6.2: exit_b_immediate_off display names + params row
+# ===========================================================================
+
+class TestImmediateOffExcelContract:
+    """§10.5: display names and filters_summary params row for Plan v3 §6.
+
+    §6.1: two new per-bar columns present in FILTER_DIAGNOSTICS_100_DISPLAY_NAMES.
+    §6.2: 'Exit-B Immediate OFF' params row always-present (True/False, never '—').
+    """
+
+    def test_display_name_triggered_present(self):
+        """§6.1: exit_b_immediate_off_triggered in display map."""
+        from supertrend_optimizer.io.excel_tester import FILTER_DIAGNOSTICS_100_DISPLAY_NAMES
+        assert "exit_b_immediate_off_triggered" in FILTER_DIAGNOSTICS_100_DISPLAY_NAMES
+        assert (
+            FILTER_DIAGNOSTICS_100_DISPLAY_NAMES["exit_b_immediate_off_triggered"]
+            == "Exit-B Immediate OFF Triggered"
+        )
+
+    def test_display_name_config_present(self):
+        """§6.1: exit_b_immediate_off_config in display map."""
+        from supertrend_optimizer.io.excel_tester import FILTER_DIAGNOSTICS_100_DISPLAY_NAMES
+        assert "exit_b_immediate_off_config" in FILTER_DIAGNOSTICS_100_DISPLAY_NAMES
+        assert (
+            FILTER_DIAGNOSTICS_100_DISPLAY_NAMES["exit_b_immediate_off_config"]
+            == "Exit-B Immediate OFF Config"
+        )
+
+    def _get_params_df(self, exit_b_immediate_off: bool):
+        from supertrend_optimizer.io.excel_tester import _build_filters_summary_df
+        pr = _make_period_result_double(exit_b_immediate_off=exit_b_immediate_off)
+        result = _build_filters_summary_df([pr])
+        assert result is not None
+        params_df, _ = result
+        return params_df
+
+    def test_params_row_present_flag_true(self):
+        """§6.2: 'Exit-B Immediate OFF' row present with value True."""
+        params_df = self._get_params_df(exit_b_immediate_off=True)
+        row = params_df[params_df["Parameter"] == "Exit-B Immediate OFF"]
+        assert not row.empty, (
+            f"'Exit-B Immediate OFF' row missing from params_df.\n"
+            f"Labels: {sorted(params_df['Parameter'].tolist())}"
+        )
+        assert row.iloc[0]["Value"] is True
+
+    def test_params_row_present_flag_false(self):
+        """§6.2: 'Exit-B Immediate OFF' row present with value False (always-present)."""
+        params_df = self._get_params_df(exit_b_immediate_off=False)
+        row = params_df[params_df["Parameter"] == "Exit-B Immediate OFF"]
+        assert not row.empty, (
+            "'Exit-B Immediate OFF' row must be present even when flag==False (§6.2)."
+        )
+        assert row.iloc[0]["Value"] is False

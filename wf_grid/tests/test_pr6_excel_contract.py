@@ -345,3 +345,59 @@ class TestImmediateOffExcelContract:
             "'Exit-B Immediate OFF' row must be present even when flag==False (§6.2)."
         )
         assert row.iloc[0]["Value"] is False
+
+
+# ===========================================================================
+# docs/time_filter_plan_v1_final.txt ?7.2 ? time_filter Excel contract
+# ===========================================================================
+
+class TestTimeFilterExcelContract:
+    """?7.2: three new time_filter keys in FILTER_DIAGNOSTICS_100_DISPLAY_NAMES
+    and 'Time Filter Enabled' row in filters_summary params."""
+
+    _TF_DISPLAY_NAMES = {
+        "time_filter_enabled":     "Time Filter Enabled",
+        "time_filter_in_window":   "Time Filter In Window",
+        "time_filter_reset_event": "Time Filter Reset Event",
+    }
+
+    def test_three_keys_present_in_display_map(self):
+        """Three new time_filter per-bar keys present in FILTER_DIAGNOSTICS_100_DISPLAY_NAMES."""
+        from supertrend_optimizer.io.excel_tester import FILTER_DIAGNOSTICS_100_DISPLAY_NAMES
+        missing = set(self._TF_DISPLAY_NAMES) - set(FILTER_DIAGNOSTICS_100_DISPLAY_NAMES)
+        assert not missing, (
+            f"Missing time_filter keys in FILTER_DIAGNOSTICS_100_DISPLAY_NAMES: {sorted(missing)}"
+        )
+
+    def test_display_names_exact_match(self):
+        """Display name strings match the canonical values from ?6.4."""
+        from supertrend_optimizer.io.excel_tester import FILTER_DIAGNOSTICS_100_DISPLAY_NAMES
+        for key, expected_label in self._TF_DISPLAY_NAMES.items():
+            actual = FILTER_DIAGNOSTICS_100_DISPLAY_NAMES.get(key)
+            assert actual == expected_label, (
+                f"Display name mismatch for {key!r}: expected {expected_label!r}, got {actual!r}"
+            )
+
+    def test_time_filter_enabled_params_row_present(self):
+        """'Time Filter Enabled' row present in filters_summary params_df."""
+        from supertrend_optimizer.io.excel_tester import _build_filters_summary_df
+        pr = _make_period_result_double()
+        result = _build_filters_summary_df([pr])
+        assert result is not None
+        params_df, _ = result
+        labels = set(params_df["Parameter"].tolist())
+        assert "Time Filter Enabled" in labels, (
+            f"'Time Filter Enabled' missing from params_df. Labels: {sorted(labels)}"
+        )
+
+    def test_time_filter_period_cols_present(self):
+        """Three time_filter period columns present in filters_summary period_df."""
+        from supertrend_optimizer.io.excel_tester import _build_filters_summary_df
+        pr = _make_period_result_double()
+        result = _build_filters_summary_df([pr])
+        assert result is not None
+        _, period_df = result
+        for col in ("Time Filter Reset Count", "Time Filter Bars In Window", "Time Filter Bars Out Window"):
+            assert col in period_df.columns, (
+                f"Column {col!r} missing from period_df. Columns: {list(period_df.columns)}"
+            )

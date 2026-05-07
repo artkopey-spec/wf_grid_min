@@ -192,6 +192,7 @@ from supertrend_optimizer.core.trade_filter_config import (  # noqa: E402,F401
     TradeFilterTriggerToggleConfig,
     TradeFilterLifecycleConfig,
     TradeFilterDiagnosticsConfig,
+    TradeFilterTimeFilterConfig,
     resolve_zigzag_mode,
 )
 

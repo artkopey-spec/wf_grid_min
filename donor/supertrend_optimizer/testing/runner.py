@@ -273,6 +273,28 @@ def _compute_summary_counters(
         if daily_reset_event is not None else 0
     )
 
+    # docs/time_filter_plan_v1_final.txt §6.2
+    time_filter_reset_event = filter_diagnostics.get("time_filter_reset_event")
+    time_filter_reset_count = (
+        int(np.sum(time_filter_reset_event == 1))
+        if time_filter_reset_event is not None else 0
+    )
+    time_filter_in_window = filter_diagnostics.get("time_filter_in_window")
+    time_filter_bars_in_window = (
+        int(np.sum(time_filter_in_window == 1))
+        if time_filter_in_window is not None else 0
+    )
+    time_filter_bars_out_window = (
+        int(np.sum(time_filter_in_window == 0))
+        if time_filter_in_window is not None else 0
+    )
+    time_filter_enabled_arr = filter_diagnostics.get("time_filter_enabled")
+    time_filter_enabled = (
+        bool(int(time_filter_enabled_arr[0]))
+        if time_filter_enabled_arr is not None and len(time_filter_enabled_arr) > 0
+        else False
+    )
+
     # exits_opposite_flip: from trade-level diagnostics
     exits_opposite_flip = 0
     if trades_df is not None and not trades_df.empty:
@@ -315,6 +337,11 @@ def _compute_summary_counters(
         "exits_opposite_flip": exits_opposite_flip,
         "immediate_entries_count": immediate_entries_count,
         "immediate_entries_blocked_count": immediate_entries_blocked_count,
+        # docs/time_filter_plan_v1_final.txt §6.2
+        "time_filter_enabled": time_filter_enabled,
+        "time_filter_reset_count": time_filter_reset_count,
+        "time_filter_bars_in_window": time_filter_bars_in_window,
+        "time_filter_bars_out_window": time_filter_bars_out_window,
     }
 
 

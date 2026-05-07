@@ -40,6 +40,7 @@ from supertrend_optimizer.core.trade_filter_config import (
     resolve_trade_filter_mode_in_place,
     resolve_exit_off_mode_in_place,
     resolve_exit_b_immediate_off_in_place,
+    resolve_time_filter_in_place,
     validate_trade_filter,
 )
 
@@ -395,6 +396,7 @@ def load_tester_config(
         resolve_trade_filter_mode_in_place(tf_cfg, raw_user_keys)
         resolve_exit_off_mode_in_place(tf_cfg, raw_user_keys)
         resolve_exit_b_immediate_off_in_place(tf_cfg, raw_user_keys)
+        resolve_time_filter_in_place(tf_cfg, raw_user_keys)
         config["trade_filter"] = tf_cfg
 
         # Phase 2 (WP-T2 + WP-T5 advanced into WP-T2 fail-fast slot, plan §5.5):

@@ -344,6 +344,9 @@ class TestFilterDiagnosticsSummaryStructure:
             "blocked_filter_off", "blocked_waiting_first", "blocked_trade_mode",
             "blocked_local_median", "blocked_invalid_stats", "blocked_stopping",
             "lifecycle_starts", "median_stop_triggered", "exits_opposite_flip",
+            # docs/time_filter_plan_v1_final.txt §7.6
+            "time_filter_enabled", "time_filter_reset_count",
+            "time_filter_bars_in_window", "time_filter_bars_out_window",
         }
         assert required.issubset(set(c.keys()))
 

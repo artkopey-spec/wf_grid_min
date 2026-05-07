@@ -921,6 +921,10 @@ class TestDailyResetDiagnostics:
             # exit_b_immediate_off (Plan exit_b_immediate_off v3 §4.7)
             "exit_b_immediate_off_triggered",
             "exit_b_immediate_off_config",
+            # time_filter (docs/time_filter_plan_v1_final.txt §4.8)
+            "time_filter_enabled",
+            "time_filter_in_window",
+            "time_filter_reset_event",
         }
 
     def test_daily_reset_arrays_dtype_int8(self):

@@ -2,8 +2,8 @@
 # SUPER TREND PARAMETERS
 # =========================
 supertrend:
-  atr_period:        50     # длина ATR; больше = плавнее, меньше = чувствительнее
-  multiplier:        7.8    # ширина каналов; меньше = агрессивнее сигналы
+  atr_period:        20     # длина ATR; больше = плавнее, меньше = чувствительнее
+  multiplier:        3.0    # ширина каналов; меньше = агрессивнее сигналы
 
 
 # =========================
@@ -98,8 +98,12 @@ trade_filter:
     stopping_exit: opposite_st_flip        # only literal supported in v1
     exit_off_mode: "exit B"              # «exit B» + exit_off_zz_leg_count (int >= 1); при «exit A» count не указывать
     exit_off_zz_leg_count: 5             # подтверждённых ZZ-ног до ST_STOPPING (exit B)
-    exit_b_immediate_off: false          # при достижении порога exit B: немедленный OFF без ST_STOPPING (только exit B)
+    exit_b_immediate_off: true          # при достижении порога exit B: немедленный OFF без ST_STOPPING (только exit B)
 
   diagnostics:
     export_state_columns: true
     export_trigger_columns: true
+
+  time_filter:
+    enabled: false
+    window: "09:00-19:00"

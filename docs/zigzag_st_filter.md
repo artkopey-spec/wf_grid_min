@@ -160,16 +160,19 @@ Bar-level `filter_block_reason` использует стабильный whitel
 - `invalid_stats` - runtime stats невалидны.
 - `stopping_mode_no_new_entries` - FSM в `ST_STOPPING`, новые входы запрещены.
 - `insufficient_global_stats` - глобальной ZigZag статистики недостаточно.
+- `daily_reset` - бар совпадает с событием ежедневного сброса (`daily_reset_event == 1`).
+- `time_filter_reset` - бар является первым баром вне торгового окна `time_filter` (приоритет ниже `daily_reset`).
 
 Trade-level `exit_reason` добавляет (приоритет сверху вниз):
 
 1. `filter_daily_reset` — bar-level `daily_reset_event == 1`.
-2. `pending_open_trade_at_end` — позиция ещё открыта на последнем баре отрезка.
-3. `filter_exit_b_immediate_off` — lifecycle завершился через immediate-off path
+2. `filter_time_reset` — bar-level `time_filter_reset_event == 1` (при `time_filter.enabled=true`); только если `daily_reset_event == 0`.
+3. `pending_open_trade_at_end` — позиция ещё открыта на последнем баре отрезка.
+4. `filter_exit_b_immediate_off` — lifecycle завершился через immediate-off path
    (`exit_b_immediate_off_triggered[exit_signal_idx] == 1`).
-4. `filter_stopping_opposite_flip` — выход из позиции в `ST_STOPPING` по
+5. `filter_stopping_opposite_flip` — выход из позиции в `ST_STOPPING` по
    ближайшему противоположному ST flip (legacy path).
-5. `st_flip` — обычный SuperTrend exit/reversal.
+6. `st_flip` — обычный SuperTrend exit/reversal.
 
 Приоритет #2 выше #3: если immediate-off сработал на последнем или
 предпоследнем баре отрезка (t == n-1 или t == n-2 при `exit_index == n-1`),
@@ -216,6 +219,7 @@ immediate-off подтверждается через `exit_b_immediate_off_trig
 | Условие на баре t | `filter_block_reason[t]` |
 |---|---|
 | `daily_reset_event[t] == 1` | `"daily_reset"` |
+| `time_filter_reset_event[t] == 1` (и `daily_reset == 0`) | `"time_filter_reset"` |
 | `flip_dir == 0` (нет ST flip) | `"none"` |
 | `flip_dir != 0` (state уже OFF) | `"filter_off"` |
 

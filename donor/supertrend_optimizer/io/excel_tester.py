@@ -142,6 +142,10 @@ FILTER_DIAGNOSTICS_100_DISPLAY_NAMES: Dict[str, str] = {
     "filter_block_reason":          "Filter Block Reason",
     "trade_filter_state_code":      "Filter State Code",
     "st_flip_dir":                  "ST Flip Direction",
+    # docs/time_filter_plan_v1_final.txt §6.4 per-bar columns
+    "time_filter_enabled":          "Time Filter Enabled",
+    "time_filter_in_window":        "Time Filter In Window",
+    "time_filter_reset_event":      "Time Filter Reset Event",
 }
 
 # ZigZag_Trigger_Events sheet column order (plan §9.2, extended by WP-V3-8 §11.2)
@@ -470,6 +474,9 @@ def _build_cycle_sheet_df(
     trigger_source_arr = arrays["trade_filter_trigger_source"][:n]
     candidate_dir_arr = arrays["candidate_leg_direction"][:n]
     daily_reset_arr = arrays["daily_reset_event"][:n]
+    # docs/time_filter_plan_v1_final.txt §6.4: backward-compat, may be absent
+    _tf_reset_raw = filter_diagnostics.get("time_filter_reset_event")
+    time_filter_reset_arr = np.asarray(_tf_reset_raw)[:n] if _tf_reset_raw is not None else None
 
     candidate_threshold = _materialize_cycle_candidate_threshold(
         arrays["candidate_trigger_threshold"], n
@@ -557,11 +564,17 @@ def _build_cycle_sheet_df(
             max_drawdown_pct = float("nan")
 
         off_bar = end_bar + 1
-        end_reason = (
-            "daily_reset"
-            if off_bar < n and int(daily_reset_arr[off_bar]) == 1
-            else "FSM_OFF"
-        )
+        # docs/time_filter_plan_v1_final.txt §6.4: priority daily_reset > time_filter_reset
+        if off_bar < n and int(daily_reset_arr[off_bar]) == 1:
+            end_reason = "daily_reset"
+        elif (
+            off_bar < n
+            and time_filter_reset_arr is not None
+            and int(time_filter_reset_arr[off_bar]) == 1
+        ):
+            end_reason = "time_filter_reset"
+        else:
+            end_reason = "FSM_OFF"
         cycle_trades = _cycle_trades_for_segment(trades_df, start_bar, end_bar)
 
         rows.append({
@@ -1232,6 +1245,8 @@ def _build_filters_summary_df(period_results: List[PeriodResult]) -> Optional[pd
         {"Parameter": "Exit-OFF ZZ Leg Count", "Value": thr.get("exit_off_zz_leg_count", s0.get("exit_off_zz_leg_count", -1))},
         # Plan v3 §6.2: always-present (True/False, never "—")
         {"Parameter": "Exit-B Immediate OFF",  "Value": thr.get("exit_b_immediate_off", s0.get("exit_b_immediate_off", False))},
+        # docs/time_filter_plan_v1_final.txt §6.4: time_filter params
+        {"Parameter": "Time Filter Enabled",   "Value": s0.get("time_filter_enabled", False)},
     ]
     params_df = pd.DataFrame(params_rows)
 
@@ -1269,6 +1284,10 @@ def _build_filters_summary_df(period_results: List[PeriodResult]) -> Optional[pd
             # WP-V3-8: immediate entries (§11.3)
             "Immediate Entries Count":         s.get("immediate_entries_count", ctr.get("immediate_entries_count", 0)),
             "Immediate Entries Blocked Count": s.get("immediate_entries_blocked_count", ctr.get("immediate_entries_blocked_count", 0)),
+            # docs/time_filter_plan_v1_final.txt §6.4
+            "Time Filter Reset Count":         s.get("time_filter_reset_count", ctr.get("time_filter_reset_count", 0)),
+            "Time Filter Bars In Window":      s.get("time_filter_bars_in_window", ctr.get("time_filter_bars_in_window", 0)),
+            "Time Filter Bars Out Window":     s.get("time_filter_bars_out_window", ctr.get("time_filter_bars_out_window", 0)),
         })
     period_df = pd.DataFrame(period_rows)
     return (params_df, period_df)  # type: ignore[return-value]

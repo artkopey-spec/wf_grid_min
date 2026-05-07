@@ -48,6 +48,10 @@ _PER_BAR_KEYSET_SNAPSHOT: frozenset = frozenset({
     "confirmed_median_ok",
     "daily_reset_enabled",
     "daily_reset_event",
+    # time_filter (docs/time_filter_plan_v1_final.txt §4.8)
+    "time_filter_enabled",
+    "time_filter_in_window",
+    "time_filter_reset_event",
     "exit_b_immediate_off_config",
     "exit_b_immediate_off_triggered",
     "exit_off_mode",
@@ -88,6 +92,11 @@ _SUMMARY_KEYSET_SNAPSHOT: frozenset = frozenset({
     "candidate_duration_max_bars",
     "daily_reset_count",
     "diagnostics_available",
+    # time_filter aggregations (docs/time_filter_plan_v1_final.txt §6.1 / §7.1)
+    "time_filter_enabled",
+    "time_filter_reset_count",
+    "time_filter_bars_in_window",
+    "time_filter_bars_out_window",
     "exit_b_immediate_off",        # Plan v3 §8
     "exit_b_immediate_off_count",  # Plan v3 §8
     "exit_off_mode",
@@ -153,6 +162,10 @@ _EXCEL_PER_BAR_HEADERS_SNAPSHOT: dict = {
     "zigzag_reversal_threshold":                "Reversal Threshold",
     "zz_leg_stop_triggered":                    "ZZ Leg Stop Triggered",
     "zz_legs_since_lifecycle_start":            "ZZ Legs Since Start",
+    # docs/time_filter_plan_v1_final.txt §6.4 / §7.1
+    "time_filter_enabled":                      "Time Filter Enabled",
+    "time_filter_in_window":                    "Time Filter In Window",
+    "time_filter_reset_event":                  "Time Filter Reset Event",
 }
 
 # EXCEL_SUMMARY_LABELS: ordered params labels and period column set (§14.5 / §8.2).
@@ -170,6 +183,8 @@ _EXCEL_SUMMARY_PARAMS_LABELS_SNAPSHOT: list = [
     "Exit-OFF Mode",
     "Exit-OFF ZZ Leg Count",
     "Exit-B Immediate OFF",  # Plan v3 §6.2
+    # docs/time_filter_plan_v1_final.txt §6.4 / §7.1
+    "Time Filter Enabled",
 ]
 
 _EXCEL_SUMMARY_PERIOD_COLS_SNAPSHOT: list = [
@@ -180,6 +195,8 @@ _EXCEL_SUMMARY_PERIOD_COLS_SNAPSHOT: list = [
     "Bars OFF", "Bars WAIT", "Bars FREEZE", "Bars MONITORING",
     "Bars COUNTING ZZ", "Bars STOPPING",
     "Immediate Entries Count", "Immediate Entries Blocked Count",
+    # docs/time_filter_plan_v1_final.txt §6.4 / §7.1
+    "Time Filter Reset Count", "Time Filter Bars In Window", "Time Filter Bars Out Window",
 ]
 
 # Mandatory exit-off columns in _FILTER_SUMMARY_COLUMNS (§14.6).

@@ -957,6 +957,14 @@ class TestExitBImmediateOffFailureKeysRegistryTester:
         "exit_off_zz_leg_count_present_when_exit_a",
         "mode_conflicts_with_legacy_triggers",
         "mode_invalid_literal",
+        # docs/time_filter_plan_v1_final.txt §2
+        "time_filter_enabled_invalid_type",
+        "time_filter_window_missing",
+        "time_filter_window_invalid_format",
+        "time_filter_window_invalid_hours",
+        "time_filter_window_invalid_minutes",
+        "time_filter_window_zero_length",
+        "time_filter_window_cross_midnight",
     })
 
     def test_three_new_keys_in_registry(self) -> None:

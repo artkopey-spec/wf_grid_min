@@ -301,6 +301,87 @@ def _infer_daily_reset_event(
     return event
 
 
+def _infer_time_filter_events(
+    index: "Optional[pd.Index]",
+    n: int,
+    *,
+    enabled: bool,
+    start_h: int,
+    start_m: int,
+    end_h: int,
+    end_m: int,
+) -> "tuple[np.ndarray, np.ndarray]":
+    """Time-of-day window event masks (in_window: bool[n], reset_event: bool[n]).
+
+    docs/time_filter_plan_v1_final.txt §3.
+
+    ``in_window[t] == True``  ⟺  bar t falls within the half-open window
+    ``[start, end)``, evaluated by (hour * 60 + minute) of the bar timestamp.
+    Seconds and sub-second components of the timestamp are ignored.
+
+    ``reset_event[t] == True`` ⟺  bar t is the first bar *outside* the window
+    after at least one bar inside it (transition True → False).
+    ``reset_event[0]`` is always False — there is no previous bar.
+
+    enabled=False (short-circuit — ДО любых проверок индекса):
+        in_window  = np.ones(n, bool)
+        reset_event = np.zeros(n, bool)
+
+    enabled=True gates:
+        1. DatetimeIndex required (type-gate) → ConfigError
+        2. len(index) == n required (length-gate) → ConfigError
+        3. is_monotonic_increasing required (monotonic-gate) → ConfigError
+    """
+    # §3.2: short-circuit ДО любых проверок индекса
+    if not enabled:
+        return np.ones(n, dtype=bool), np.zeros(n, dtype=bool)
+
+    # §3.2 п.1: type-gate
+    if not isinstance(index, pd.DatetimeIndex):
+        raise ConfigError(
+            "trade_filter.time_filter.enabled=true requires DatetimeIndex; "
+            f"got {type(index).__name__}"
+        )
+    # §3.2 п.2: length-gate
+    if len(index) != n:
+        raise ConfigError(
+            f"time_filter: index length {len(index)} != n={n}"
+        )
+    # §3.2 п.3: monotonic-gate (защита от ложных границ при неупорядоченном индексе)
+    if not index.is_monotonic_increasing:
+        raise ConfigError(
+            "trade_filter.time_filter.enabled=true requires "
+            "monotonic-increasing DatetimeIndex; got non-monotonic"
+        )
+
+    # §3.2 п.4: нормализация timezone.
+    # CRITICAL: tz_localize(None), не tz_convert — иначе MSK 09:00 сместится
+    # в UTC и граница сессии сломается (зеркально daily_reset §0.3 #3).
+    if index.tz is not None:
+        idx_naive = index.tz_localize(None)
+    else:
+        idx_naive = index
+
+    # §3.2 п.5: minutes_of_day — секунды/наносекунды игнорируются (§0.3 #4)
+    minutes_of_day = idx_naive.hour * 60 + idx_naive.minute  # pandas IntegerArray-like
+
+    # §3.2 п.6-7: полуоткрытый контракт [start, end)
+    start_total = start_h * 60 + start_m
+    end_total = end_h * 60 + end_m
+    in_window = np.asarray(
+        (minutes_of_day >= start_total) & (minutes_of_day < end_total),
+        dtype=bool,
+    )
+
+    # §3.2 п.8: reset_event на баре перехода True → False
+    reset_event = np.zeros(n, dtype=bool)
+    if n >= 2:
+        reset_event[1:] = in_window[:-1] & ~in_window[1:]
+    # reset_event[0] всегда False — нет «предыдущего» бара
+
+    return in_window, reset_event
+
+
 def _run_close_only_zigzag_pass(
     close: np.ndarray,
     reversal_threshold: float,
@@ -1362,6 +1443,10 @@ def apply(
     index: "Optional[pd.Index]" = None,
     # NEW (daily_reset): test-override for injecting reset event array directly.
     daily_reset_event: "Optional[np.ndarray]" = None,
+    # NEW (time_filter): test-override — inject (in_window, reset_event) arrays.
+    # When None, resolved from trade_filter_config.time_filter via
+    # _infer_time_filter_events (docs/time_filter_plan_v1_final.txt §4.1).
+    time_filter_events: "Optional[tuple[np.ndarray, np.ndarray]]" = None,
 ) -> "ZigZagSTFilterResult":
     """Run the ZigZag ST FSM and build ``filtered_positions``.
 
@@ -1460,6 +1545,55 @@ def apply(
                 f"{daily_reset_event.shape[0]} != n={n_pre}"
             )
 
+    # ------------------------------------------------------------------
+    # 3b) Resolve time_filter events (docs/time_filter_plan_v1_final.txt §4.1).
+    # ------------------------------------------------------------------
+    _tfl_cfg = getattr(trade_filter_config, "time_filter", None)
+    _tfl_enabled = bool(getattr(_tfl_cfg, "enabled", False)) if _tfl_cfg is not None else False
+
+    if time_filter_events is None:
+        # Production path: infer from config resolver fields.
+        _tfl_sh = getattr(_tfl_cfg, "_start_hour", None) if _tfl_cfg is not None else None
+        _tfl_sm = getattr(_tfl_cfg, "_start_minute", None) if _tfl_cfg is not None else None
+        _tfl_eh = getattr(_tfl_cfg, "_end_hour", None) if _tfl_cfg is not None else None
+        _tfl_em = getattr(_tfl_cfg, "_end_minute", None) if _tfl_cfg is not None else None
+        if _tfl_enabled and any(x is None for x in (_tfl_sh, _tfl_sm, _tfl_eh, _tfl_em)):
+            raise ConfigError(
+                "apply(): time_filter.enabled=True but resolver fields are None; "
+                "ensure resolve_time_filter_in_place() is called before apply()"
+            )
+        time_filter_in_window, time_filter_reset_event = _infer_time_filter_events(
+            index, n_pre,
+            enabled=_tfl_enabled,
+            start_h=int(_tfl_sh) if _tfl_sh is not None else 0,
+            start_m=int(_tfl_sm) if _tfl_sm is not None else 0,
+            end_h=int(_tfl_eh) if _tfl_eh is not None else 0,
+            end_m=int(_tfl_em) if _tfl_em is not None else 0,
+        )
+    else:
+        # Test-override path: normalize both arrays.
+        _raw_in_w, _raw_reset = time_filter_events
+        time_filter_in_window = np.asarray(_raw_in_w, dtype=bool)
+        time_filter_reset_event = np.asarray(_raw_reset, dtype=bool)
+        if time_filter_in_window.ndim != 1 or time_filter_in_window.shape[0] != n_pre:
+            raise ConfigError(
+                f"apply() time_filter_events[0] (in_window) must be 1-D bool "
+                f"of length n={n_pre}"
+            )
+        if time_filter_reset_event.ndim != 1 or time_filter_reset_event.shape[0] != n_pre:
+            raise ConfigError(
+                f"apply() time_filter_events[1] (reset_event) must be 1-D bool "
+                f"of length n={n_pre}"
+            )
+
+    # ------------------------------------------------------------------
+    # 3c) Combined reset mask (docs/time_filter_plan_v1_final.txt §4.2).
+    # Priority: daily_reset > time_filter_reset > all others.
+    # ZigZag passes receive combined_reset_event so candidate-state is
+    # correctly wiped on both reset sources (§4.3 — critical correctness fix).
+    # ------------------------------------------------------------------
+    combined_reset_event: np.ndarray = daily_reset_event | time_filter_reset_event
+
     if per_bar is None:
         trend_probe = np.asarray(trend)
         if trend_probe.ndim == 1 and int(trend_probe.shape[0]) != n_pre:
@@ -1510,7 +1644,9 @@ def apply(
             close=np.asarray(close, dtype=np.float64),
             reversal_threshold=reversal_threshold,
             local_window=int(local_window),
-            daily_reset_event=daily_reset_event,   # NEW (plan v3 §6.1)
+            # §4.3: combined_reset_event (not bare daily_reset_event) so
+            # ZigZag candidate-state is wiped on both reset sources.
+            daily_reset_event=combined_reset_event,
         )
 
     # ------------------------------------------------------------------
@@ -1739,8 +1875,10 @@ def apply(
         held_pos_at_bar_start_arr[t] = np.int8(held_pos_at_bar_start)
         confirmed_legs_at_bar_start_arr[t] = confirmed_legs_at_bar_start
 
-        # ----- §9 step 1: daily-reset wipe (after snapshots) -------------
-        if daily_reset_event[t]:
+        # ----- §9 step 1: combined-reset wipe (after snapshots) ----------
+        # combined_reset_event covers both daily_reset and time_filter_reset
+        # (docs/time_filter_plan_v1_final.txt §4.4).
+        if combined_reset_event[t]:
             state = ZigZagFSMState.OFF
             confirmed_legs_since_start = -1
             zz_legs_since_lifecycle_start = -1
@@ -1767,7 +1905,8 @@ def apply(
         # existing FSM until Mode dispatcher lands in WP-V3-5).  Reset bar
         # forces every primitive false (§7.7).
         # ------------------------------------------------------------------
-        is_reset = bool(daily_reset_event[t])
+        # §4.5: is_reset driven by combined_reset_event (daily OR time_filter).
+        is_reset = bool(combined_reset_event[t])
 
         # §7.1 candidate_threshold_ok
         candidate_threshold_ok = (
@@ -1841,7 +1980,10 @@ def apply(
         # bar.
         # ------------------------------------------------------------------
         immediate_used_this_bar = False
-        if state_at_bar_start == ZigZagFSMState.OFF and not is_reset:
+        # §4.6: entry allowed only when FSM is OFF, not on reset bar, AND
+        # inside the time_filter window. When time_filter is disabled,
+        # in_window is all-ones (short-circuit), so no behaviour change.
+        if state_at_bar_start == ZigZagFSMState.OFF and not is_reset and bool(time_filter_in_window[t]):
             if resolved_mode == "A":
                 # §8.1: candidate_component_ok -> WAIT, source=candidate_threshold.
                 if candidate_component_ok:
@@ -2158,12 +2300,23 @@ def apply(
         #    blockages; covered by per-bar NaN diagnostics.
         #  - "insufficient_global_stats": ConfigError at init (§12.3).
 
+        # Priority chain (docs/time_filter_plan_v1_final.txt §4.7):
+        # 0: daily_reset
+        # 1: time_filter_reset  ← only when daily_reset == 0
+        # 2: local_median_unavailable
+        # 3: stopping_mode_no_new_entries
+        # 4: filter_off
+        # 5: trade_mode_disallowed_flip
+
         # Priority 0: daily_reset (highest).
         if daily_reset_event[t]:
             filter_block_reason_arr[t] = "daily_reset"
 
-        # Priority 1: local_median_unavailable (set before flip checks so
-        # flip checks cannot overwrite it).
+        # Priority 1: time_filter_reset (only when daily_reset == 0).
+        elif time_filter_reset_event[t]:
+            filter_block_reason_arr[t] = "time_filter_reset"
+
+        # Priority 2: local_median_unavailable.
         elif (
             state_at_bar_start == ZigZagFSMState.ST_ACTIVE_MONITORING
             and confirmed
@@ -2171,7 +2324,7 @@ def apply(
         ):
             filter_block_reason_arr[t] = "local_median_unavailable"
 
-        # Priority 2-4: flip-based reasons (only when not already set
+        # Priority 3-5: flip-based reasons (only when not already set
         # above and a flip event occurred on this bar).
         elif flip_dir != 0:
             if state == ZigZagFSMState.ST_STOPPING:
@@ -2228,6 +2381,12 @@ def apply(
         "exit_b_immediate_off_config": exit_b_immediate_off_config_arr,
         "daily_reset_enabled": np.full(n, int(daily_reset_enabled), dtype=np.int8),
         "daily_reset_event": np.asarray(daily_reset_event, dtype=np.int8),
+        # --- time_filter diagnostics (docs/time_filter_plan_v1_final.txt §4.8) ---
+        # Always-present when trade_filter.enabled=true.
+        # When time_filter.enabled=false: enabled=0, in_window=all-ones, reset=all-zeros.
+        "time_filter_enabled": np.full(n, np.int8(1 if _tfl_enabled else 0), dtype=np.int8),
+        "time_filter_in_window": np.asarray(time_filter_in_window, dtype=np.int8),
+        "time_filter_reset_event": np.asarray(time_filter_reset_event, dtype=np.int8),
         # --- v3 WP-V3-4: runtime primitives + bar-start snapshots ---
         # ТЗ v3 §10.2 / §10.3.  Existing key ``candidate_height_pct`` is
         # already exported above (WP9); the threshold-derived primitive is
@@ -2292,18 +2451,21 @@ def attach_trade_filter_diagnostics(
     entry_trigger_source : str
         ``trade_filter_trigger_source`` on the close-decision bar for entry.
     exit_reason : str
-        Priority order (highest → lowest, §5.2 Plan v3):
+        Priority order (highest → lowest,
+        docs/time_filter_plan_v1_final.txt §4.9 / §5.2 Plan v3):
 
         1. ``"filter_daily_reset"``          — daily_reset_event[exit_signal_idx]==1
-        2. ``"pending_open_trade_at_end"``   — exit_index >= n_diag - 1
-        3. ``"filter_exit_b_immediate_off"`` — exit_b_immediate_off_triggered
+        2. ``"filter_time_reset"``           — time_filter_reset_event[exit_signal_idx]==1
+                                               (new, time_filter_plan §4.9)
+        3. ``"pending_open_trade_at_end"``   — exit_index >= n_diag - 1
+        4. ``"filter_exit_b_immediate_off"`` — exit_b_immediate_off_triggered
                                                [exit_signal_idx]==1 (new, Plan v3)
-        4. ``"filter_stopping_opposite_flip"`` — FSM was in ST_STOPPING (legacy)
-        5. ``"st_flip"``                     — fallback
+        5. ``"filter_stopping_opposite_flip"`` — FSM was in ST_STOPPING (legacy)
+        6. ``"st_flip"``                     — fallback
 
-        Backward compat: if ``exit_b_immediate_off_triggered`` is absent from
-        ``filter_diagnostics``, priority #3 is silently skipped (imm_at_exit=False
-        for all trades); priorities 1/2/4/5 remain unchanged (§5.3 / §10.3.F).
+        Backward compat: absent keys in ``filter_diagnostics`` are silently
+        treated as all-zeros (imm_at_exit=False, tf_reset_at_exit=False);
+        priorities for remaining reasons are unchanged (§5.3 / §10.3.F).
 
     Parameters
     ----------
@@ -2332,6 +2494,8 @@ def attach_trade_filter_diagnostics(
     daily_reset_arr = filter_diagnostics.get("daily_reset_event")
     # Plan v3 §5.1: backward compat — absent key → imm_at_exit always False
     imm_triggered_arr = filter_diagnostics.get("exit_b_immediate_off_triggered")
+    # docs/time_filter_plan_v1_final.txt §4.9: backward compat — absent key → False
+    tf_reset_arr = filter_diagnostics.get("time_filter_reset_event")
     if state_arr is None:
         raise ConfigError(
             "attach_trade_filter_diagnostics: 'trade_filter_state' key "
@@ -2374,6 +2538,12 @@ def attach_trade_filter_diagnostics(
             and exit_signal_idx < len(daily_reset_arr)
             and int(daily_reset_arr[exit_signal_idx]) == 1
         )
+        # docs/time_filter_plan_v1_final.txt §4.9: backward compat
+        tf_reset_at_exit = (
+            tf_reset_arr is not None
+            and exit_signal_idx < len(tf_reset_arr)
+            and int(tf_reset_arr[exit_signal_idx]) == 1
+        )
         # Plan v3 §5.1: only True when array present AND bar flag==1
         imm_at_exit = (
             imm_triggered_arr is not None
@@ -2381,9 +2551,17 @@ def attach_trade_filter_diagnostics(
             and int(imm_triggered_arr[exit_signal_idx]) == 1
         )
 
-        # Priority chain (§5.2 Plan v3):
+        # Priority chain (docs/time_filter_plan_v1_final.txt §4.9):
+        # 1. filter_daily_reset
+        # 2. filter_time_reset  ← new
+        # 3. pending_open_trade_at_end
+        # 4. filter_exit_b_immediate_off
+        # 5. filter_stopping_opposite_flip
+        # 6. st_flip
         if reset_at_exit:
             exit_reasons.append("filter_daily_reset")
+        elif tf_reset_at_exit:
+            exit_reasons.append("filter_time_reset")
         elif exit_index >= pending_exit_idx:
             # Priority #2 wins over immediate-off: if the exit execution bar
             # is the last position slot, the trade is classified as pending

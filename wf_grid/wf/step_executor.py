@@ -214,6 +214,20 @@ def _compute_filter_diagnostics_summary(
             np.sum(np.asarray(daily_reset_arr) == 1)
         )
 
+    # docs/time_filter_plan_v1_final.txt §6.1
+    tf_enabled_arr = filter_diagnostics.get("time_filter_enabled")
+    if tf_enabled_arr is not None:
+        _tfe = np.asarray(tf_enabled_arr)
+        summary["time_filter_enabled"] = bool(int(_tfe[0])) if len(_tfe) > 0 else False
+    tf_reset_arr = filter_diagnostics.get("time_filter_reset_event")
+    if tf_reset_arr is not None:
+        summary["time_filter_reset_count"] = int(np.sum(np.asarray(tf_reset_arr) == 1))
+    tf_in_w_arr = filter_diagnostics.get("time_filter_in_window")
+    if tf_in_w_arr is not None:
+        _tf_w = np.asarray(tf_in_w_arr)
+        summary["time_filter_bars_in_window"] = int(np.sum(_tf_w == 1))
+        summary["time_filter_bars_out_window"] = int(np.sum(_tf_w == 0))
+
     # ------------------------------------------------------------------
     # WP-V3-8: immediate entries counts (§11.3)
     # ------------------------------------------------------------------

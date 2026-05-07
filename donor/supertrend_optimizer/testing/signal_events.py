@@ -38,6 +38,8 @@ _BLOCK_REASON_TO_DECISION: Dict[str, str] = {
     "invalid_stats":                "entry_blocked_invalid_stats",
     "insufficient_global_stats":    "entry_blocked_invalid_stats",
     "stopping_mode_no_new_entries": "entry_blocked_stopping",
+    # docs/time_filter_plan_v1_final.txt §6.3
+    "time_filter_reset":            "entry_blocked_time_filter_reset",
 }
 
 

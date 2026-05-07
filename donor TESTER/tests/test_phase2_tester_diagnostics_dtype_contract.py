@@ -46,6 +46,10 @@ EXPECTED_KEYSET = frozenset({
     "confirmed_median_ok",
     "daily_reset_enabled",
     "daily_reset_event",
+    # docs/time_filter_plan_v1_final.txt §7.4
+    "time_filter_enabled",
+    "time_filter_in_window",
+    "time_filter_reset_event",
     "exit_b_immediate_off_config",
     "exit_b_immediate_off_triggered",
     "exit_off_mode",
@@ -89,6 +93,8 @@ _VALID_BLOCK_REASONS = {
     "filter_off", "waiting_first_st_flip", "trade_mode_mismatch",
     "local_median_unavailable", "invalid_stats", "stopping_state",
     "daily_reset",
+    # docs/time_filter_plan_v1_final.txt §7.4
+    "time_filter_reset",
     "none",  # allowed (no block = entry passed; engine sentinel for "not blocked")
     "",      # also allowed (empty string variant)
 }

@@ -7,7 +7,7 @@ data:                                  # Блок данных и парамет
 
 optimization:                          # Блок параметров перебора сетки
   atr_period_range: [50, 60]           # Диапазон ATR period: от 20 до 40 включительно
-  multiplier_range: [5.0, 10.0]         # Диапазон множителя SuperTrend: от 1.5 до 4.0
+  multiplier_range: [6.0, 9.0]         # Диапазон множителя SuperTrend: от 1.5 до 4.0
   multiplier_step: 0.2                 # Шаг перебора multiplier
   trade_mode: "revers"                 # Реверсивный режим торговли
 
@@ -75,7 +75,7 @@ execution:                             # WP-PAR: parallelization controls (plan 
   fallback_to_sequential: false        # On infra failure do NOT silently retry sequential
 
 trade_filter:                          # Блок WP2: фильтр сделок ZigZag + SuperTrend
-  enabled: false                      # Safe rollout default (WP11 rollback contract)
+  enabled: true                      # Safe rollout default (WP11 rollback contract)
   type: "zigzag_st_mode"
 
   zigzag:
@@ -87,7 +87,7 @@ trade_filter:                          # Блок WP2: фильтр сделок
     global_median: "auto"
     local_window: 5                      # rolling N для local_median_N
     daily_reset: true                    # Календарный reset ZigZag/FSM при смене даты
-    mode: "B"
+    mode: "A"
     candidate_duration_gate:
       enabled: false
 
@@ -96,10 +96,15 @@ trade_filter:                          # Блок WP2: фильтр сделок
     stop_check: "confirm_bar_only"       # В v1 только этот литерал
     stopping_exit: "opposite_st_flip"    # В v1 только этот литерал
     exit_off_mode: "exit B"              # «exit B» + exit_off_zz_leg_count (int >= 1); при «exit A» count не указывать
-    exit_off_zz_leg_count: 3             # подтверждённых ZZ-ног до ST_STOPPING (exit B)
-    # exit_b_immediate_off: при enabled: false ключ в YAML недопустим (validate). При включении фильтра и exit B: false|true
+    exit_off_zz_leg_count: 5             # подтверждённых ZZ-ног до ST_STOPPING (exit B)
+    # при trade_filter.enabled: false ключ недопустим (validate). При exit B: true|false
+    exit_b_immediate_off: true
 
   diagnostics:
     export_state_columns: true
     export_trigger_columns: true
+
+  time_filter:
+    enabled: false
+    window: "09:00-19:00"
 

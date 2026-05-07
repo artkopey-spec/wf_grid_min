@@ -20,6 +20,7 @@ v3 spec reference: ТЗ v3 §3, §4, WP-V3-1
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field
 from typing import Optional, Union
 
@@ -55,6 +56,14 @@ _V3_INIT_FAILURE_KEYS = frozenset({
     "exit_b_immediate_off_present_when_not_exit_b",
     "exit_b_immediate_off_invalid_type",
     "exit_b_immediate_off_present_when_filter_disabled",
+    # time_filter (docs/time_filter_plan_v1_final.txt §1.2)
+    "time_filter_enabled_invalid_type",
+    "time_filter_window_missing",
+    "time_filter_window_invalid_format",
+    "time_filter_window_invalid_hours",
+    "time_filter_window_invalid_minutes",
+    "time_filter_window_zero_length",
+    "time_filter_window_cross_midnight",
 })
 
 # WP-T3 step 6 — caller_pipeline whitelist for type=zigzag_st_mode.
@@ -89,6 +98,36 @@ class TradeFilterCandidateDurationGateConfig:
     """
     enabled: object = False   # expected bool; validation enforces type
     max_bars: object = None   # expected int >= 1 when enabled; must be absent when disabled
+
+
+@dataclass
+class TradeFilterTimeFilterConfig:
+    """Optional time-of-day trading window filter (docs/time_filter_plan_v1_final.txt).
+
+    ARCHITECTURE NOTE: This block is placed at the root of ``trade_filter``
+    (not inside ``zigzag``) because the time window applies to the entire
+    trade lifecycle — entries, FSM wipe, ZigZag candidate-state reset — not
+    just the ZigZag detection logic. Placing it at the zigzag level would
+    create a misleading nesting that suggests ZigZag-only scope.
+
+    When ``enabled=True``, the filter restricts new entries to a half-open
+    ``[start, end)`` window defined by ``window`` (format ``HH:MM-HH:MM``).
+    On exit from the window a full reset equivalent to ``daily_reset`` is
+    performed (FSM wipe, lifecycle reset, ZigZag candidate-state reset).
+    Wrap-around windows (``start >= end``) are forbidden in v1.
+
+    ``enabled`` is stored as ``object`` (not coerced from YAML) so that
+    non-bool values are detected by ``validate_trade_filter`` — same pattern
+    as ``exit_b_immediate_off``.
+    """
+    enabled: object = False     # expected bool; validation enforces type
+    window: Optional[str] = None
+    # Populated by resolve_time_filter_in_place after validation.
+    # Named with leading underscore to signal "internal / resolver-owned".
+    _start_hour: Optional[int] = field(default=None, repr=False)
+    _start_minute: Optional[int] = field(default=None, repr=False)
+    _end_hour: Optional[int] = field(default=None, repr=False)
+    _end_minute: Optional[int] = field(default=None, repr=False)
 
 
 @dataclass
@@ -178,6 +217,12 @@ class TradeFilterConfig:
     diagnostics: TradeFilterDiagnosticsConfig = field(
         default_factory=TradeFilterDiagnosticsConfig
     )
+    # time_filter block (docs/time_filter_plan_v1_final.txt §1.2).
+    # Placed at the root of trade_filter — not inside zigzag — because the
+    # window applies to the full trade lifecycle (FSM, ZigZag, entries).
+    time_filter: TradeFilterTimeFilterConfig = field(
+        default_factory=TradeFilterTimeFilterConfig
+    )
     # Raw YAML presence marker.  ``None`` means "unknown / hand-built config",
     # so runtime consumers fall back to the historical duck-typed behaviour.
     _raw_triggers_present: Optional[bool] = field(default=None, repr=False)
@@ -192,7 +237,9 @@ class TradeFilterConfig:
 TRADE_FILTER_ALLOWED_KEYS: dict[str, frozenset[str]] = {
     "trade_filter": frozenset({
         "enabled", "type", "zigzag", "triggers", "lifecycle", "diagnostics",
+        "time_filter",
     }),
+    "trade_filter.time_filter": frozenset({"enabled", "window"}),
     "trade_filter.zigzag": frozenset({
         "global_stats_source", "leg_height_mode", "reversal_threshold",
         "candidate_trigger_threshold", "candidate_trigger_quantile",
@@ -341,6 +388,15 @@ def build_trade_filter_config_from_raw(tf_raw: dict) -> TradeFilterConfig:
         export_trigger_columns=bool(diag_raw.get("export_trigger_columns", True)),
     )
 
+    # time_filter block (docs/time_filter_plan_v1_final.txt §1.2).
+    # Raw values are preserved (no coercion) so validate_trade_filter can detect
+    # and report type mismatches for enabled/window.
+    tflt_raw: dict = tf_raw.get("time_filter") or {}
+    time_filter = TradeFilterTimeFilterConfig(
+        enabled=tflt_raw.get("enabled", False),
+        window=tflt_raw.get("window", None),
+    )
+
     return TradeFilterConfig(
         enabled=enabled_raw,
         type=tf_type,
@@ -348,6 +404,7 @@ def build_trade_filter_config_from_raw(tf_raw: dict) -> TradeFilterConfig:
         triggers=triggers,
         lifecycle=lifecycle,
         diagnostics=diagnostics,
+        time_filter=time_filter,
         _raw_triggers_present=("triggers" in tf_raw),
     )
 
@@ -908,6 +965,91 @@ def validate_trade_filter(
                 )
     # A13: absent gate block -> disabled gate (handled by default values; no action needed)
 
+    # ------------------------------------------------------------------
+    # time_filter validation (docs/time_filter_plan_v1_final.txt §2.1)
+    # Only validated when trade_filter.enabled=true (already inside that branch).
+    # ------------------------------------------------------------------
+    _TF_WINDOW_RE = re.compile(r"^\d{2}:\d{2}-\d{2}:\d{2}$")
+
+    tf_block_present = ("trade_filter", "time_filter") in raw_user_keys
+    tf_enabled_present = ("trade_filter", "time_filter", "enabled") in raw_user_keys
+    tf_window_present = ("trade_filter", "time_filter", "window") in raw_user_keys
+
+    if tf_block_present:
+        tfl = tf.time_filter
+        # Rule 1: enabled must be bool when block is present
+        if not isinstance(tfl.enabled, bool):
+            _append_validation_error(
+                errors,
+                "trade_filter.time_filter.enabled must be bool (true/false), "
+                f"got {type(tfl.enabled).__name__!r} ({tfl.enabled!r})",
+                error_keys,
+                "time_filter_enabled_invalid_type",
+            )
+        elif tfl.enabled:
+            # Rule 2: time_filter.enabled=true — validate window
+            if not tf_window_present or tfl.window is None:
+                _append_validation_error(
+                    errors,
+                    "trade_filter.time_filter.window is required when "
+                    "trade_filter.time_filter.enabled is true",
+                    error_keys,
+                    "time_filter_window_missing",
+                )
+            else:
+                w = tfl.window
+                if not isinstance(w, str) or not _TF_WINDOW_RE.match(w):
+                    _append_validation_error(
+                        errors,
+                        f"trade_filter.time_filter.window must be in HH:MM-HH:MM format, "
+                        f"got {w!r}",
+                        error_keys,
+                        "time_filter_window_invalid_format",
+                    )
+                else:
+                    # Format valid — check numeric ranges
+                    start_str, end_str = w[:5], w[6:]
+                    sh, sm = int(start_str[:2]), int(start_str[3:])
+                    eh, em = int(end_str[:2]), int(end_str[3:])
+                    hours_ok = (0 <= sh <= 23) and (0 <= eh <= 23)
+                    mins_ok = (0 <= sm <= 59) and (0 <= em <= 59)
+                    if not hours_ok:
+                        _append_validation_error(
+                            errors,
+                            f"trade_filter.time_filter.window hours must be in 0–23, "
+                            f"got {w!r}",
+                            error_keys,
+                            "time_filter_window_invalid_hours",
+                        )
+                    elif not mins_ok:
+                        _append_validation_error(
+                            errors,
+                            f"trade_filter.time_filter.window minutes must be in 0–59, "
+                            f"got {w!r}",
+                            error_keys,
+                            "time_filter_window_invalid_minutes",
+                        )
+                    else:
+                        start_total = sh * 60 + sm
+                        end_total = eh * 60 + em
+                        if start_total == end_total:
+                            _append_validation_error(
+                                errors,
+                                f"trade_filter.time_filter.window must have non-zero length "
+                                f"(start == end is not allowed), got {w!r}",
+                                error_keys,
+                                "time_filter_window_zero_length",
+                            )
+                        elif start_total > end_total:
+                            _append_validation_error(
+                                errors,
+                                f"trade_filter.time_filter.window wrap-around (start > end) "
+                                f"is not supported in v1, got {w!r}",
+                                error_keys,
+                                "time_filter_window_cross_midnight",
+                            )
+        # Rule 3: time_filter.enabled=false -> no deep validation (disabled-path)
+
 
 # ---------------------------------------------------------------------------
 # Mode resolution helper (WP-V3-2, ТЗ v3 §3.1, §5)
@@ -1030,6 +1172,42 @@ def resolve_exit_b_immediate_off_in_place(
         trade_filter_config.lifecycle.exit_b_immediate_off = False
 
 
+def resolve_time_filter_in_place(
+    trade_filter_config: Optional[TradeFilterConfig],
+    raw_user_keys: frozenset[tuple[str, ...]],
+) -> None:
+    """Materialise parsed time-window fields on TradeFilterTimeFilterConfig.
+
+    When ``time_filter.enabled=True``, parses the validated ``window`` string
+    (format ``HH:MM-HH:MM``) and stores ``_start_hour``, ``_start_minute``,
+    ``_end_hour``, ``_end_minute`` directly on the config object.  Runtime
+    components (``_infer_time_filter_events``) read these fields instead of
+    re-parsing the string each call.
+
+    No-op when:
+    - ``trade_filter_config`` is None
+    - ``trade_filter.enabled`` is False
+    - ``time_filter.enabled`` is False or not bool
+
+    Must be called strictly after ``validate_trade_filter`` (validator
+    guarantees ``window`` is a valid ``HH:MM-HH:MM`` string when enabled).
+
+    docs/time_filter_plan_v1_final.txt §2.2
+    """
+    if trade_filter_config is None or not trade_filter_config.enabled:
+        return
+    tfl = trade_filter_config.time_filter
+    if not isinstance(tfl.enabled, bool) or not tfl.enabled:
+        return
+    # Validator guarantees window is non-None and matches HH:MM-HH:MM
+    w: str = tfl.window  # type: ignore[assignment]
+    start_str, end_str = w[:5], w[6:]
+    tfl._start_hour = int(start_str[:2])
+    tfl._start_minute = int(start_str[3:])
+    tfl._end_hour = int(end_str[:2])
+    tfl._end_minute = int(end_str[3:])
+
+
 __all__ = [
     "TradeFilterConfig",
     "TradeFilterZigZagConfig",
@@ -1038,6 +1216,7 @@ __all__ = [
     "TradeFilterTriggerToggleConfig",
     "TradeFilterLifecycleConfig",
     "TradeFilterDiagnosticsConfig",
+    "TradeFilterTimeFilterConfig",
     "validate_trade_filter",
     "collect_raw_user_keys",
     "collect_trade_filter_unknown_keys",
@@ -1047,6 +1226,7 @@ __all__ = [
     "resolve_trade_filter_mode_in_place",
     "resolve_exit_off_mode_in_place",
     "resolve_exit_b_immediate_off_in_place",
+    "resolve_time_filter_in_place",
     # Constant whitelists exported for tests / CLI gate logic
     "_LIFECYCLE_STOP_CHECK_VALUES",
     "_LIFECYCLE_STOPPING_EXIT_VALUES",

@@ -71,7 +71,11 @@ def test_disabled_path_matches_baseline():
 
     baseline = load_baseline(_BASELINE_PATH)
 
-    result = run_grid_pipeline(config_path=str(_CONFIG_PATH))
+    # Match scripts/capture_baseline.py: sequential WF for deterministic fingerprints.
+    result = run_grid_pipeline(
+        config_path=str(_CONFIG_PATH),
+        parallel_enabled=False,
+    )
     assert result.error is None, f"Pipeline run failed: {result.error}"
 
     data: pd.DataFrame | None = None

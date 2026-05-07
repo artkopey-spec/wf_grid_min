@@ -84,9 +84,13 @@ def main() -> int:
     log.info("Output:  %s", output_path)
 
     log.info("Running pipeline...")
+    # Sequential WF execution yields a stable, reproducible fingerprint across
+    # machines and pytest reruns. Parallel can introduce tiny float drift in
+    # aggregations and break baseline equality even when logic is identical.
     result = run_grid_pipeline(
         config_path=str(config_path),
         output_path=args.xlsx_output,
+        parallel_enabled=False,
     )
     if result.error:
         log.error("Pipeline failed: %s", result.error)

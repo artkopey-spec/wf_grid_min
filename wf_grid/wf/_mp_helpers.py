@@ -8,7 +8,8 @@ spawn cannot import nested closures.
 Contracts (plan §2.2 / §2.3):
   - pack_data / unpack_data is a LOSSLESS round-trip for any OHLC frame
     that satisfies validate_ohlc_data.  It preserves dtype, timezone,
-    index name and index frequency.  It does NOT coerce.
+    index name and index frequency.  DatetimeIndex storage is normalised
+    to nanoseconds and records index_unit explicitly.
 
 Worker state (plan §2.4):
   - _WORKER_STATE is a per-process dict populated by _init_worker.
@@ -65,8 +66,10 @@ def pack_data(full_data: pd.DataFrame) -> dict:
           - df has a DatetimeIndex, tz-aware or tz-naive;
           - OHLC dtypes are numeric dtypes accepted by validate_ohlc_data.
 
-    The contract is preserve, not normalise.  OHLC dtypes are NOT coerced
-    to float64; index timezone, name and frequency are preserved.
+    OHLC dtypes are NOT coerced to float64; index timezone, name and
+    frequency are preserved.  DatetimeIndex storage is normalised to
+    int64 nanoseconds with ``index_unit="ns"`` so pandas versions that
+    materialise ``datetime64[us]`` indexes cannot be misread as ns later.
     All extra columns beyond OHLC are preserved with their original dtypes.
     """
     if not isinstance(full_data.index, pd.DatetimeIndex):
@@ -91,15 +94,17 @@ def pack_data(full_data: pd.DataFrame) -> dict:
     }
 
     idx = full_data.index
-    # tz-aware: store UTC nanoseconds (asi8 of UTC view).
-    # tz-naive: store asi8 directly without localize / convert (plan §2.2):
-    #   that would silently shift wall-clock instants and break determinism.
+    # Store explicit nanoseconds, not whatever physical unit the pandas
+    # DatetimeIndex happens to carry (ns/us/ms). This prevents a us payload
+    # from being restored as ns and drifting into 1970.
     index_tz: Optional[str] = None
     if idx.tz is not None:
-        index_int64_ns_utc = idx.asi8.copy()
+        idx_ns = idx.tz_convert("UTC").tz_localize(None).astype("datetime64[ns]")
         index_tz = str(idx.tz)
     else:
-        index_int64_ns_utc = idx.asi8.copy()
+        idx_ns = idx.astype("datetime64[ns]")
+    index_int64_ns_utc = idx_ns.asi8.copy()
+    index_unit = "ns"
 
     index_name = idx.name
     # idx.freq may be a DateOffset; freqstr is the picklable string form.
@@ -110,6 +115,7 @@ def pack_data(full_data: pd.DataFrame) -> dict:
         "column_dtypes": column_dtypes,
         "arrays": arrays,
         "index_int64_ns_utc": index_int64_ns_utc,
+        "index_unit": index_unit,
         "index_tz": index_tz,
         "index_name": index_name,
         "index_freq": index_freq,
@@ -122,15 +128,16 @@ def unpack_data(d: dict) -> pd.DataFrame:
     Restores all columns (OHLC + extras) with original dtypes and column
     order; preserves DatetimeIndex tz, name and freq.
     """
+    index_unit = d.get("index_unit", "ns")
     if d["index_tz"] is None:
-        # tz-naive path: feed int64 ns directly to DatetimeIndex.
+        # tz-naive path: restore wall-clock instants using the recorded unit.
         idx = pd.DatetimeIndex(
-            d["index_int64_ns_utc"].astype("datetime64[ns]")
+            pd.to_datetime(d["index_int64_ns_utc"], unit=index_unit)
         )
     else:
-        # tz-aware path: stored values are UTC ns; convert to original tz.
+        # tz-aware path: stored values are UTC; convert to original tz.
         idx = pd.to_datetime(
-            d["index_int64_ns_utc"], unit="ns", utc=True
+            d["index_int64_ns_utc"], unit=index_unit, utc=True
         ).tz_convert(d["index_tz"])
 
     idx.name = d["index_name"]

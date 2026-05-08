@@ -360,6 +360,26 @@ class TestPackDataRoundTrip:
         )
         assert str(round_trip.index.tz) == "UTC"
 
+    def test_us_resolution_index_normalized_to_ns(self):
+        """Regression: datetime64[us] payload must not be restored as ns."""
+        df = _ohlc_frame(n=20, tz="UTC+03:00", freq="min")
+        df.index = df.index.as_unit("us")
+        assert "datetime64[us" in str(df.index.dtype)
+
+        packed = mph.pack_data(df)
+        round_trip = mph.unpack_data(packed)
+
+        assert packed["index_unit"] == "ns"
+        assert "datetime64[ns" in str(round_trip.index.dtype)
+        assert str(round_trip.index.tz) == "UTC+03:00"
+        assert round_trip.index[10] == df.index[10]
+        assert round_trip.index[10].year == 2024
+        pd.testing.assert_frame_equal(
+            df.reset_index(drop=True),
+            round_trip.reset_index(drop=True),
+            check_exact=True,
+        )
+
     def test_non_utc_aware_index_dst_boundary(self):
         # America/New_York Spring-forward: 2024-03-10 02:00 -> 03:00.
         # Build a daily series spanning the boundary; expect tz preserved.

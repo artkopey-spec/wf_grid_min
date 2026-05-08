@@ -19,7 +19,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pandas as pd
-from wf_grid.grid.enumeration import enumerate_grid
+from wf_grid.grid.enumeration import enumerate_grid, _atr_values
 
 if TYPE_CHECKING:
     from wf_grid.config.schema import GridConfig
@@ -97,6 +97,7 @@ def generate_full_bucket_grid(config: "GridConfig") -> list[tuple[int, int]]:
     mult_step = float(opt.multiplier_step)
     atr_bucket_step = int(bk.atr_bucket_step)
     mult_bucket_step = float(bk.mult_bucket_step)
+    atr_period_step = int(opt.atr_period_step)
 
     if atr_min > atr_max or mult_min > mult_max or mult_step <= 0:
         return []
@@ -108,7 +109,7 @@ def generate_full_bucket_grid(config: "GridConfig") -> list[tuple[int, int]]:
     seen: set[tuple[int, int]] = set()
     result: list[tuple[int, int]] = []
 
-    for atr in range(atr_min, atr_max + 1):
+    for atr in _atr_values(atr_min, atr_max, atr_period_step):
         for tick in range(tick_min, tick_max + 1):
             canonical_mult = tick * mult_step
             if canonical_mult > mult_max + 1e-9:
@@ -154,6 +155,7 @@ def compute_expected_bucket_sizes(
     mult_step = float(opt.multiplier_step)
     atr_bucket_step = int(bk.atr_bucket_step)
     mult_bucket_step = float(bk.mult_bucket_step)
+    atr_period_step = int(opt.atr_period_step)
 
     if atr_min > atr_max or mult_min > mult_max or mult_step <= 0:
         return {}
@@ -164,7 +166,7 @@ def compute_expected_bucket_sizes(
 
     sizes: dict[tuple[int, int], int] = {}
 
-    for atr in range(atr_min, atr_max + 1):
+    for atr in _atr_values(atr_min, atr_max, atr_period_step):
         for tick in range(tick_min, tick_max + 1):
             canonical_mult = tick * mult_step
             if canonical_mult > mult_max + 1e-9:

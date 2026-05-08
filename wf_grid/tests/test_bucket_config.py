@@ -226,3 +226,65 @@ bucket:
         assert any("atr_bucket_step" in m for m in warning_messages), (
             f"Expected ATR step warning, got: {warning_messages}"
         )
+
+
+# ---------------------------------------------------------------------------
+# atr_period_step + atr_bucket_step compatibility warnings (ТЗ §7.5)
+# ---------------------------------------------------------------------------
+
+class TestAtrPeriodStepBucketWarnings:
+
+    def test_warns_atr_bucket_step_not_multiple_of_period_step(self, tmp_path, caplog):
+        """step=3, bucket=4 → Warning A: not an integer multiple."""
+        yaml_content = MINIMAL_VALID_YAML + """\
+optimization:
+  atr_period_step: 3
+bucket:
+  atr_bucket_step: 4
+"""
+        path = _write_yaml(tmp_path, yaml_content)
+        with caplog.at_level(logging.WARNING, logger="wf_grid.config.loader"):
+            load_grid_config(path)
+        atr_step_warnings = [
+            r.message for r in caplog.records
+            if r.levelno == logging.WARNING and "atr_period_step" in r.message
+        ]
+        assert any("is not an integer multiple of" in m for m in atr_step_warnings), (
+            f"Expected Warning A, got: {atr_step_warnings}"
+        )
+
+    def test_no_warning_when_period_step_is_one(self, tmp_path, caplog):
+        """Default step=1, bucket=4 → Warning A must NOT fire (clean regression)."""
+        yaml_content = MINIMAL_VALID_YAML + """\
+bucket:
+  atr_bucket_step: 4
+"""
+        path = _write_yaml(tmp_path, yaml_content)
+        with caplog.at_level(logging.WARNING, logger="wf_grid.config.loader"):
+            load_grid_config(path)
+        atr_step_warnings = [
+            r.message for r in caplog.records
+            if r.levelno == logging.WARNING and "atr_period_step" in r.message
+        ]
+        assert not any("is not an integer multiple of" in m for m in atr_step_warnings), (
+            f"Unexpected Warning A at step=1: {atr_step_warnings}"
+        )
+
+    def test_warns_period_step_greater_than_bucket_step(self, tmp_path, caplog):
+        """step=5, bucket=2 → Warning B: at most one ATR grid point per bucket."""
+        yaml_content = MINIMAL_VALID_YAML + """\
+optimization:
+  atr_period_step: 5
+bucket:
+  atr_bucket_step: 2
+"""
+        path = _write_yaml(tmp_path, yaml_content)
+        with caplog.at_level(logging.WARNING, logger="wf_grid.config.loader"):
+            load_grid_config(path)
+        atr_step_warnings = [
+            r.message for r in caplog.records
+            if r.levelno == logging.WARNING and "atr_period_step" in r.message
+        ]
+        assert any("at most one" in m for m in atr_step_warnings), (
+            f"Expected Warning B, got: {atr_step_warnings}"
+        )

@@ -1459,3 +1459,80 @@ class TestExecutionConfigInteraction:
         cfg = load_grid_config(path)
         assert cfg.execution.parallel_enabled is False
         assert cfg.execution.max_workers == 8
+
+
+# ---------------------------------------------------------------------------
+# atr_period_step validation (ТЗ §4.3)
+# ---------------------------------------------------------------------------
+
+class TestAtrPeriodStepValidation:
+    """9 tests covering the atr_period_step validation contract (ТЗ §4.3)."""
+
+    def test_atr_period_step_default_is_one(self, tmp_path):
+        path = _write_yaml(tmp_path, MINIMAL_VALID_YAML)
+        cfg = load_grid_config(path)
+        assert cfg.optimization.atr_period_step == 1
+
+    def test_atr_period_step_explicit_value(self, tmp_path):
+        path = _write_yaml(tmp_path, MINIMAL_VALID_YAML + textwrap.dedent("""\
+            optimization:
+              atr_period_step: 4
+        """))
+        cfg = load_grid_config(path)
+        assert cfg.optimization.atr_period_step == 4
+
+    def test_atr_period_step_zero_rejected(self, tmp_path):
+        path = _write_yaml(tmp_path, MINIMAL_VALID_YAML + textwrap.dedent("""\
+            optimization:
+              atr_period_step: 0
+        """))
+        with pytest.raises(ConfigError, match="atr_period_step"):
+            load_grid_config(path)
+
+    def test_atr_period_step_negative_rejected(self, tmp_path):
+        path = _write_yaml(tmp_path, MINIMAL_VALID_YAML + textwrap.dedent("""\
+            optimization:
+              atr_period_step: -1
+        """))
+        with pytest.raises(ConfigError, match="got -1"):
+            load_grid_config(path)
+
+    def test_atr_period_step_float_rejected(self, tmp_path):
+        path = _write_yaml(tmp_path, MINIMAL_VALID_YAML + textwrap.dedent("""\
+            optimization:
+              atr_period_step: 0.5
+        """))
+        with pytest.raises(ConfigError, match="0\\.5"):
+            load_grid_config(path)
+
+    def test_atr_period_step_bool_rejected(self, tmp_path):
+        path = _write_yaml(tmp_path, MINIMAL_VALID_YAML + textwrap.dedent("""\
+            optimization:
+              atr_period_step: true
+        """))
+        with pytest.raises(ConfigError, match="True"):
+            load_grid_config(path)
+
+    def test_atr_period_step_null_rejected(self, tmp_path):
+        path = _write_yaml(tmp_path, MINIMAL_VALID_YAML + textwrap.dedent("""\
+            optimization:
+              atr_period_step: null
+        """))
+        with pytest.raises(ConfigError, match="None"):
+            load_grid_config(path)
+
+    def test_atr_period_step_string_rejected(self, tmp_path):
+        path = _write_yaml(tmp_path, MINIMAL_VALID_YAML + textwrap.dedent("""\
+            optimization:
+              atr_period_step: "2"
+        """))
+        with pytest.raises(ConfigError, match="'2'"):
+            load_grid_config(path)
+
+    def test_unknown_atr_step_typo_rejected(self, tmp_path):
+        path = _write_yaml(tmp_path, MINIMAL_VALID_YAML + textwrap.dedent("""\
+            optimization:
+              atr_period_steppp: 2
+        """))
+        with pytest.raises(ConfigError, match="unknown config key"):
+            load_grid_config(path)

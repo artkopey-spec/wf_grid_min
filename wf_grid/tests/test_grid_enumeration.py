@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from wf_grid.config.loader import load_grid_config
-from wf_grid.grid.enumeration import GridPoint, _canonical_multiplier, enumerate_grid
+from wf_grid.grid.enumeration import GridPoint, _atr_values, _canonical_multiplier, enumerate_grid
 
 
 # ---------------------------------------------------------------------------
@@ -24,7 +24,8 @@ def _write_yaml(tmp_path: Path, content: str) -> str:
 
 
 def _make_config(tmp_path, atr_range=(5, 7), mult_range=(1.5, 2.5), mult_step=0.5,
-                 trade_mode="both"):
+                 trade_mode="both", atr_period_step=None):
+    step_line = f"  atr_period_step: {atr_period_step}\n" if atr_period_step is not None else ""
     yaml_text = f"""\
 data:
   file_path: data.csv
@@ -33,7 +34,7 @@ optimization:
   multiplier_range: [{mult_range[0]}, {mult_range[1]}]
   multiplier_step: {mult_step}
   trade_mode: {trade_mode}
-validation:
+{step_line}validation:
   walk_forward:
     train_size: "90D"
     test_size: "30D"
@@ -231,3 +232,93 @@ class TestGridPointDataclass:
         assert isinstance(p.multiplier, float)
         assert isinstance(p.trade_mode, str)
         assert isinstance(p.grid_point_id, str)
+
+
+# ---------------------------------------------------------------------------
+# _atr_values — pure function tests (ТЗ §7.2, table §2.3)
+# ---------------------------------------------------------------------------
+
+class TestAtrValuesPure:
+    """Parametrised tests for _atr_values against every row in spec table §2.3."""
+
+    @pytest.mark.parametrize("atr_min,atr_max,step,expected", [
+        (50, 60,  1, list(range(50, 61))),       # 11 points
+        (50, 60,  2, [50, 52, 54, 56, 58, 60]),
+        (50, 60,  4, [50, 54, 58, 60]),          # max appended
+        (50, 60,  9, [50, 59, 60]),
+        (50, 60, 10, [50, 60]),
+        (50, 60, 20, [50, 60]),                  # max appended
+        (50, 50,  1, [50]),
+        (50, 50,  5, [50]),
+        (60, 50,  1, []),                        # guard: min > max
+    ])
+    def test_spec_cases(self, atr_min, atr_max, step, expected):
+        assert _atr_values(atr_min, atr_max, step) == expected
+
+    def test_atr_values_returns_list_not_generator(self):
+        result = _atr_values(5, 10, 2)
+        assert isinstance(result, list)
+
+
+# ---------------------------------------------------------------------------
+# atr_period_step via enumerate_grid (ТЗ §7.2)
+# ---------------------------------------------------------------------------
+
+class TestEnumerateGridWithAtrStep:
+
+    def test_default_step_unchanged_regression(self, tmp_path):
+        """No atr_period_step in config → identical result to old step=1 behaviour."""
+        cfg_no_step = _make_config(tmp_path, atr_range=(5, 7), mult_range=(2.0, 2.0), mult_step=0.5)
+        cfg_step1 = _make_config(tmp_path, atr_range=(5, 7), mult_range=(2.0, 2.0), mult_step=0.5,
+                                 atr_period_step=1)
+        grid_no = enumerate_grid(cfg_no_step)
+        grid_s1 = enumerate_grid(cfg_step1)
+        assert [p.grid_point_id for p in grid_no] == [p.grid_point_id for p in grid_s1]
+
+    def test_step_2_six_points(self, tmp_path):
+        """atr=[50,60], step=2 → 6 distinct ATR values."""
+        cfg = _make_config(tmp_path, atr_range=(50, 60), mult_range=(2.0, 2.0), mult_step=0.5,
+                           atr_period_step=2)
+        grid = enumerate_grid(cfg)
+        atr_vals = sorted({p.atr_period for p in grid})
+        assert atr_vals == [50, 52, 54, 56, 58, 60]
+
+    def test_step_4_max_appended(self, tmp_path):
+        """atr=[50,60], step=4 → [50,54,58,60] (max appended)."""
+        cfg = _make_config(tmp_path, atr_range=(50, 60), mult_range=(2.0, 2.0), mult_step=0.5,
+                           atr_period_step=4)
+        grid = enumerate_grid(cfg)
+        atr_vals = sorted({p.atr_period for p in grid})
+        assert atr_vals == [50, 54, 58, 60]
+
+    def test_step_20_two_points(self, tmp_path):
+        """atr=[50,60], step=20 → [50,60]."""
+        cfg = _make_config(tmp_path, atr_range=(50, 60), mult_range=(2.0, 2.0), mult_step=0.5,
+                           atr_period_step=20)
+        grid = enumerate_grid(cfg)
+        atr_vals = sorted({p.atr_period for p in grid})
+        assert atr_vals == [50, 60]
+
+    def test_equal_range_step_5(self, tmp_path):
+        """atr=[50,50], step=5 → [50]."""
+        cfg = _make_config(tmp_path, atr_range=(50, 50), mult_range=(2.0, 2.0), mult_step=0.5,
+                           atr_period_step=5)
+        grid = enumerate_grid(cfg)
+        atr_vals = sorted({p.atr_period for p in grid})
+        assert atr_vals == [50]
+
+    def test_grid_point_id_format_unchanged(self, tmp_path):
+        """step=4 does not alter grid_point_id format."""
+        cfg = _make_config(tmp_path, atr_range=(50, 50), mult_range=(2.5, 2.5), mult_step=0.5,
+                           atr_period_step=4, trade_mode="both")
+        grid = enumerate_grid(cfg)
+        assert len(grid) == 1
+        assert grid[0].grid_point_id == "atr50_m2.50_both"
+
+    def test_all_grid_point_ids_unique_with_step(self, tmp_path):
+        """No duplicate grid_point_ids when step=4."""
+        cfg = _make_config(tmp_path, atr_range=(50, 60), mult_range=(2.0, 3.0), mult_step=0.5,
+                           atr_period_step=4)
+        grid = enumerate_grid(cfg)
+        ids = [p.grid_point_id for p in grid]
+        assert len(ids) == len(set(ids))

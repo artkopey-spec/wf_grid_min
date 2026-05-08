@@ -1,0 +1,51 @@
+14:35:25 [ERROR] wf_grid.pipeline.orchestrator: Pipeline failed: Config schema validation failed:
+  - unknown config key: 'supertrend'
+  - unknown config key: 'trade_mode'
+  - unknown config key: 'commission'
+  - unknown config key: 'warmup_period'
+  - unknown config key: 'warmup_period_auto'
+  - unknown config key: 'periods_per_year'
+  - unknown config key: 'market'
+  - unknown config key: 'min_trades_required'
+  - unknown config key: 'early_exit'
+  - unknown config key: 'segmentation'
+  - unknown config key: 'export'
+Traceback (most recent call last):
+  File "C:\3.1_wf_grid\wf_grid\pipeline\orchestrator.py", line 206, in run_grid_pipeline
+    _original_config = load_grid_config(config_path)
+  File "C:\3.1_wf_grid\wf_grid\config\loader.py", line 290, in load_grid_config
+    _validate_strict_schema(raw)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^
+  File "C:\3.1_wf_grid\wf_grid\config\loader.py", line 247, in _validate_strict_schema
+    raise ConfigError(
+    ...<2 lines>...
+    )
+wf_grid.config.loader.ConfigError: Config schema validation failed:
+  - unknown config key: 'supertrend'
+  - unknown config key: 'trade_mode'
+  - unknown config key: 'commission'
+  - unknown config key: 'warmup_period'
+  - unknown config key: 'warmup_period_auto'
+  - unknown config key: 'periods_per_year'
+  - unknown config key: 'market'
+  - unknown config key: 'min_trades_required'
+  - unknown config key: 'early_exit'
+  - unknown config key: 'segmentation'
+  - unknown config key: 'export'
+Config:  C:\3.1_wf_grid\config_tester.yaml
+Output:  C:\3.1_wf_grid\batch_smoke\config_tester_20260507_143524.xlsx
+Mode:    sequential (--sequential flag)
+
+
+[ERROR] Pipeline failed: Config schema validation failed:
+  - unknown config key: 'supertrend'
+  - unknown config key: 'trade_mode'
+  - unknown config key: 'commission'
+  - unknown config key: 'warmup_period'
+  - unknown config key: 'warmup_period_auto'
+  - unknown config key: 'periods_per_year'
+  - unknown config key: 'market'
+  - unknown config key: 'min_trades_required'
+  - unknown config key: 'early_exit'
+  - unknown config key: 'segmentation'
+  - unknown config key: 'export'

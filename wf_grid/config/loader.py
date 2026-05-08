@@ -106,6 +106,7 @@ _ALLOWED_KEYS: dict[str, set[str]] = {
         "atr_period_range",
         "multiplier_range",
         "multiplier_step",
+        "atr_period_step",
         "trade_mode",
     },
     "backtest": {
@@ -369,6 +370,10 @@ def _build_config(raw: dict[str, Any]) -> GridConfig:
     atr_range = opt_raw.get("atr_period_range", [5, 55])
     mult_range = opt_raw.get("multiplier_range", [1.5, 5.5])
     mult_step = opt_raw.get("multiplier_step", 0.1)
+    # Raw read (no type coercion) — needed so _validate_config can produce
+    # accurate error messages like "got 0.5" instead of "got 0".
+    # Mirrors the execution.max_workers pattern.
+    atr_period_step_raw = opt_raw.get("atr_period_step", 1)
     trade_mode = opt_raw.get("trade_mode", "both")
 
     # backtest
@@ -457,6 +462,7 @@ def _build_config(raw: dict[str, Any]) -> GridConfig:
             atr_period_range=list(atr_range) if not isinstance(atr_range, list) else atr_range,
             multiplier_range=list(mult_range) if not isinstance(mult_range, list) else mult_range,
             multiplier_step=float(mult_step),
+            atr_period_step=atr_period_step_raw,
             trade_mode=str(trade_mode),
         ),
         backtest=BacktestConfig(
@@ -692,6 +698,14 @@ def _validate_config(
     if cfg.optimization.multiplier_step <= 0:
         errors.append(
             f"optimization.multiplier_step must be > 0, got {cfg.optimization.multiplier_step}"
+        )
+
+    # optimization.atr_period_step — strict type validation, no coercion.
+    # bool is rejected explicitly because isinstance(True, int) is True in Python.
+    v = cfg.optimization.atr_period_step
+    if not isinstance(v, int) or isinstance(v, bool) or v < 1:
+        errors.append(
+            f"optimization.atr_period_step must be an integer >= 1, got {v!r}"
         )
 
     # optimization.trade_mode
@@ -963,6 +977,28 @@ def _warn_bucket_step_compatibility(cfg: GridConfig) -> None:
                 "bucket.atr_bucket_step=%d is larger than the ATR range span=%d "
                 "[%d, %d]. All ATR grid points may fall into a single bucket.",
                 atr_bucket_step, atr_span, int(atr_range[0]), int(atr_range[1]),
+            )
+
+    # Warnings A/B — interaction between atr_period_step and atr_bucket_step.
+    # Both are silent at atr_period_step == 1 (clean regression).
+    # atr_period_step is guaranteed int >= 1 by _validate_config at this point.
+    atr_period_step = cfg.optimization.atr_period_step
+    if atr_period_step >= 1 and atr_bucket_step > 0:
+        # Warning A: bucket step not multiple of grid step (integer modulo).
+        if atr_bucket_step % atr_period_step != 0:
+            _logger.warning(
+                "bucket.atr_bucket_step=%d is not an integer multiple of "
+                "optimization.atr_period_step=%d. "
+                "Bucket boundaries will not align with grid points exactly.",
+                atr_bucket_step, atr_period_step,
+            )
+        # Warning B: grid step larger than bucket step.
+        if atr_period_step > atr_bucket_step:
+            _logger.warning(
+                "optimization.atr_period_step=%d is greater than "
+                "bucket.atr_bucket_step=%d. Each bucket will contain at most one "
+                "ATR grid point, but bucket labels still display the full bucket width.",
+                atr_period_step, atr_bucket_step,
             )
 
 

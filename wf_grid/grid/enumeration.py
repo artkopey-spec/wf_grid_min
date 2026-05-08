@@ -80,8 +80,10 @@ def enumerate_grid(config: "GridConfig") -> list[GridPoint]:
     tick_min = round(mult_min / step)
     tick_max = round(mult_max / step)
 
+    atr_period_step = int(opt.atr_period_step)
+
     points: list[GridPoint] = []
-    for atr in range(atr_min, atr_max + 1):
+    for atr in _atr_values(atr_min, atr_max, atr_period_step):
         for tick in range(tick_min, tick_max + 1):
             canonical_mult = tick * step
             for mode in trade_modes:
@@ -94,6 +96,24 @@ def enumerate_grid(config: "GridConfig") -> list[GridPoint]:
                 ))
 
     return points
+
+
+def _atr_values(atr_min: int, atr_max: int, atr_period_step: int) -> list[int]:
+    """Return sorted list of ATR period values for the grid.
+
+    Generates atr_min, atr_min + step, atr_min + 2*step, … while <= atr_max,
+    then appends atr_max if it was not already included.  This guarantees
+    atr_max is always present (the "tail" may be shorter than step).
+
+    Returns an empty list when atr_min > atr_max (defensive guard; the loader
+    rejects such configs with ConfigError before this is reached).
+    """
+    if atr_min > atr_max:
+        return []
+    values = list(range(atr_min, atr_max + 1, atr_period_step))
+    if not values or values[-1] != atr_max:
+        values.append(atr_max)
+    return values
 
 
 def _resolve_trade_modes(trade_mode_cfg: str) -> list[str]:

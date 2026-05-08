@@ -50,6 +50,7 @@ class OptimizationConfig:
     atr_period_range: list[int] = field(default_factory=lambda: [5, 55])
     multiplier_range: list[float] = field(default_factory=lambda: [1.5, 5.5])
     multiplier_step: float = 0.1
+    atr_period_step: int = 1
     # Valid trade modes: "both", "revers", "long", "short".
     # "revers" and "both" are aliases — both enable long+short with position reversal.
     # The execution engine (core/backtest.py) accepts all four strings as-is;

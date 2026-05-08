@@ -344,3 +344,45 @@ class TestFormatBucketLabel:
     def test_en_dash_in_both_parts(self):
         label = format_bucket_label(10, 10, 2, 0.2)
         assert label.count(_EN_DASH) == 2
+
+
+# ---------------------------------------------------------------------------
+# atr_period_step invariant (ТЗ §7.3)
+# ---------------------------------------------------------------------------
+
+class TestBucketInvariantWithSparseAtr:
+    """Invariant holds with atr_period_step=3 and intentionally incompatible bucket=4."""
+
+    def test_invariant_holds_with_sparse_atr(self):
+        # atr=[10,20], step=3 → ATR values: [10,13,16,19,20] (5 points)
+        # atr_bucket_step=4 is not a multiple of 3 — Warning A fires, math must hold.
+        cfg = GridConfig(
+            data=DataConfig(file_path="dummy.csv"),
+            optimization=OptimizationConfig(
+                atr_period_range=[10, 20],
+                multiplier_range=[2.0, 3.0],
+                multiplier_step=0.5,
+                atr_period_step=3,
+                trade_mode="long",
+            ),
+            bucket=BucketConfig(
+                atr_bucket_step=4,
+                mult_bucket_step=0.5,
+                min_buckets_for_median=1,
+            ),
+        )
+        # Verify ATR values produced
+        from wf_grid.grid.enumeration import _atr_values
+        atr_vals = _atr_values(10, 20, 3)
+        assert atr_vals == [10, 13, 16, 19, 20]
+
+        # compute_expected_bucket_sizes must not raise
+        sizes = compute_expected_bucket_sizes(cfg)
+        assert isinstance(sizes, dict)
+        assert len(sizes) > 0
+
+        # Invariant: sum(sizes) == n_atr_points * n_mult_ticks
+        grid = enumerate_grid(cfg)
+        n_modes = len({p.trade_mode for p in grid})
+        expected_per_mode = len(grid) // max(n_modes, 1)
+        assert sum(sizes.values()) == expected_per_mode

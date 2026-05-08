@@ -1,0 +1,85 @@
+23:12:04 [INFO] supertrend_optimizer.data.timeframe: annualization_factor=252.0 (numeric) overrides annualization_basis='trading'; basis ignored.
+23:12:04 [INFO] wf_grid.pipeline.orchestrator: ZigZag global stats built: global_median=0.003574, candidate_trigger_threshold=0.005917, n_legs=4535
+23:12:04 [INFO] wf_grid.pipeline.orchestrator: Pipeline: 246 grid points \xd7 10 WF steps = 2460 total evaluations
+23:13:24 [INFO] wf_grid.pipeline.orchestrator:   Parallel WF: 24/246 grid points done
+23:14:10 [INFO] wf_grid.pipeline.orchestrator:   Parallel WF: 48/246 grid points done
+23:15:20 [INFO] wf_grid.pipeline.orchestrator:   Parallel WF: 72/246 grid points done
+23:16:08 [INFO] wf_grid.pipeline.orchestrator:   Parallel WF: 96/246 grid points done
+23:17:18 [INFO] wf_grid.pipeline.orchestrator:   Parallel WF: 120/246 grid points done
+23:18:05 [INFO] wf_grid.pipeline.orchestrator:   Parallel WF: 144/246 grid points done
+23:19:14 [INFO] wf_grid.pipeline.orchestrator:   Parallel WF: 168/246 grid points done
+23:20:03 [INFO] wf_grid.pipeline.orchestrator:   Parallel WF: 192/246 grid points done
+23:21:10 [INFO] wf_grid.pipeline.orchestrator:   Parallel WF: 216/246 grid points done
+23:21:57 [INFO] wf_grid.pipeline.orchestrator:   Parallel WF: 240/246 grid points done
+23:22:26 [INFO] wf_grid.logging_.diagnostics: ============================================================
+23:22:26 [INFO] wf_grid.logging_.diagnostics: Pipeline Diagnostics Summary
+23:22:26 [INFO] wf_grid.logging_.diagnostics: ============================================================
+23:22:26 [INFO] wf_grid.logging_.diagnostics: Grid: 246 points \xd7 10 WF steps
+23:22:26 [INFO] wf_grid.logging_.diagnostics: Step status distribution: {'ok': 2460}
+23:22:26 [INFO] wf_grid.logging_.diagnostics: Tier distribution: {1: 246}
+23:22:26 [INFO] wf_grid.logging_.diagnostics: Top 5 ranked:
+23:22:26 [INFO] wf_grid.logging_.diagnostics:   {'grid_rank': 1, 'grid_point_id': 'atr26_m1.00_revers', 'tier': 1, 'tester_seed_score': 0.9674285714285714, 'sum_pnl_pct_Median': 0.7847060000000003, 'seed_gate_passed': True}
+23:22:26 [INFO] wf_grid.logging_.diagnostics:   {'grid_rank': 2, 'grid_point_id': 'atr23_m1.00_revers', 'tier': 1, 'tester_seed_score': 0.9657142857142857, 'sum_pnl_pct_Median': 0.5716100000000002, 'seed_gate_passed': True}
+23:22:26 [INFO] wf_grid.logging_.diagnostics:   {'grid_rank': 3, 'grid_point_id': 'atr25_m1.00_revers', 'tier': 1, 'tester_seed_score': 0.9598367346938775, 'sum_pnl_pct_Median': 0.6334759999999997, 'seed_gate_passed': True}
+23:22:26 [INFO] wf_grid.logging_.diagnostics:   {'grid_rank': 4, 'grid_point_id': 'atr22_m1.00_revers', 'tier': 1, 'tester_seed_score': 0.9568979591836735, 'sum_pnl_pct_Median': 0.415197, 'seed_gate_passed': True}
+23:22:26 [INFO] wf_grid.logging_.diagnostics:   {'grid_rank': 5, 'grid_point_id': 'atr28_m1.00_revers', 'tier': 1, 'tester_seed_score': 0.9566530612244899, 'sum_pnl_pct_Median': 0.66937, 'seed_gate_passed': True}
+23:22:26 [INFO] wf_grid.logging_.diagnostics: Timing breakdown:
+23:22:26 [INFO] wf_grid.logging_.diagnostics:   config_load: 0.00s
+23:22:26 [INFO] wf_grid.logging_.diagnostics:   data_load: 1.72s
+23:22:26 [INFO] wf_grid.logging_.diagnostics:   data_validation: 0.04s
+23:22:26 [INFO] wf_grid.logging_.diagnostics:   ppy_resolve: 0.00s
+23:22:26 [INFO] wf_grid.logging_.diagnostics:   warmup_resolve: 0.00s
+23:22:26 [INFO] wf_grid.logging_.diagnostics:   zigzag_global_stats: 0.20s
+23:22:26 [INFO] wf_grid.logging_.diagnostics:   wf_slicing: 0.00s
+23:22:26 [INFO] wf_grid.logging_.diagnostics:   grid_enum: 0.00s
+23:22:26 [INFO] wf_grid.logging_.diagnostics:   wf_grid_execution: 606.40s
+23:22:26 [INFO] wf_grid.logging_.diagnostics:   collection: 0.06s
+23:22:26 [INFO] wf_grid.logging_.diagnostics:   metric_contracts: 0.12s
+23:22:26 [INFO] wf_grid.logging_.diagnostics:   bucket_matrix_median: 0.08s
+23:22:26 [INFO] wf_grid.logging_.diagnostics:   step_gates: 0.00s
+23:22:26 [INFO] wf_grid.logging_.diagnostics:   aggregation: 0.49s
+23:22:26 [INFO] wf_grid.logging_.diagnostics:   candidate_gates: 0.00s
+23:22:26 [INFO] wf_grid.logging_.diagnostics:   scoring: 0.01s
+23:22:26 [INFO] wf_grid.logging_.diagnostics:   ranking: 0.01s
+23:22:26 [INFO] wf_grid.logging_.diagnostics:   top1_trade_export_filter: 0.02s
+23:22:26 [INFO] wf_grid.logging_.diagnostics:   summary_build: 0.09s
+23:22:26 [INFO] wf_grid.logging_.diagnostics:   xlsx_export: 14.60s
+23:22:26 [INFO] wf_grid.logging_.diagnostics: ============================================================
+Config:  C:\Users\Artem\Desktop\3.1_wf_grid\config\grid_matrix_022.yaml
+Output:  C:\Users\Artem\Desktop\3.1_wf_grid\results\batch\grid_matrix_022_20260507_231159.xlsx
+
+
+[OK] XLSX saved to: C:\Users\Artem\Desktop\3.1_wf_grid\results\batch\grid_matrix_022_20260507_231159.xlsx
+
+Grid:        246 points x 10 WF steps
+Step status: {'ok': 2460}
+Tier dist:   {1: 246}
+
+Top-5 ranked:
+  {'grid_rank': 1, 'grid_point_id': 'atr26_m1.00_revers', 'tier': 1, 'tester_seed_score': 0.9674285714285714, 'sum_pnl_pct_Median': 0.7847060000000003, 'seed_gate_passed': True}
+  {'grid_rank': 2, 'grid_point_id': 'atr23_m1.00_revers', 'tier': 1, 'tester_seed_score': 0.9657142857142857, 'sum_pnl_pct_Median': 0.5716100000000002, 'seed_gate_passed': True}
+  {'grid_rank': 3, 'grid_point_id': 'atr25_m1.00_revers', 'tier': 1, 'tester_seed_score': 0.9598367346938775, 'sum_pnl_pct_Median': 0.6334759999999997, 'seed_gate_passed': True}
+  {'grid_rank': 4, 'grid_point_id': 'atr22_m1.00_revers', 'tier': 1, 'tester_seed_score': 0.9568979591836735, 'sum_pnl_pct_Median': 0.415197, 'seed_gate_passed': True}
+  {'grid_rank': 5, 'grid_point_id': 'atr28_m1.00_revers', 'tier': 1, 'tester_seed_score': 0.9566530612244899, 'sum_pnl_pct_Median': 0.66937, 'seed_gate_passed': True}
+
+Timing:
+  config_load              : 0.00s
+  data_load                : 1.72s
+  data_validation          : 0.04s
+  ppy_resolve              : 0.00s
+  warmup_resolve           : 0.00s
+  zigzag_global_stats      : 0.20s
+  wf_slicing               : 0.00s
+  grid_enum                : 0.00s
+  wf_grid_execution        : 606.40s
+  collection               : 0.06s
+  metric_contracts         : 0.12s
+  bucket_matrix_median     : 0.08s
+  step_gates               : 0.00s
+  aggregation              : 0.49s
+  candidate_gates          : 0.00s
+  scoring                  : 0.01s
+  ranking                  : 0.01s
+  top1_trade_export_filter : 0.02s
+  summary_build            : 0.09s
+  xlsx_export              : 14.60s

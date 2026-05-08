@@ -509,6 +509,33 @@ class TestKnownDifferences:
                 for part in str(ps).split(","):
                     assert part.startswith("Step"), f"Expected Step prefix, got {part}"
 
+    def test_no_drift_with_atr_period_step_2(self):
+        """Invariant sum(sizes) == len(enumerate_grid) // n_modes holds with step=2."""
+        from wf_grid.bucket.assignment import compute_expected_bucket_sizes
+        from wf_grid.grid.enumeration import enumerate_grid
+        from wf_grid.config.schema import (
+            GridConfig, DataConfig, OptimizationConfig, BucketConfig,
+        )
+        cfg = GridConfig(
+            data=DataConfig(file_path="dummy.csv"),
+            optimization=OptimizationConfig(
+                atr_period_range=[10, 20],
+                multiplier_range=[2.0, 3.0],
+                multiplier_step=0.5,
+                atr_period_step=2,
+            ),
+            bucket=BucketConfig(
+                atr_bucket_step=4,
+                mult_bucket_step=0.5,
+                min_buckets_for_median=1,
+            ),
+        )
+        sizes = compute_expected_bucket_sizes(cfg)
+        grid = enumerate_grid(cfg)
+        n_modes = len({p.trade_mode for p in grid})
+        expected_per_mode = len(grid) // max(n_modes, 1)
+        assert sum(sizes.values()) == expected_per_mode
+
     def test_all_expected_columns_present(self, df_30):
         expected = {
             "bucket_param", "bucket_key", "atr_bucket", "mult_bucket_ticks",

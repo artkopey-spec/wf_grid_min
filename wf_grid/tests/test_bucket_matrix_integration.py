@@ -26,6 +26,7 @@ from wf_grid.config.schema import (
     OptimizationConfig,
 )
 from wf_grid.export.bucket_sheet_writer import write_bucket_matrix_median_sheet
+from wf_grid.grid.enumeration import _atr_values
 
 
 # ===========================================================================
@@ -76,7 +77,7 @@ def _make_integration_oos(
     mult_step = opt.multiplier_step
     trade_mode = opt.trade_mode
 
-    atr_vals = list(range(atr_min, atr_max + 1))
+    atr_vals = _atr_values(atr_min, atr_max, int(opt.atr_period_step))
     # build mult list with rounding to avoid float drift
     mult_vals = []
     m = mult_min

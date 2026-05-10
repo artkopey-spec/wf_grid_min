@@ -166,6 +166,12 @@ _EXCEL_PER_BAR_HEADERS_SNAPSHOT: dict = {
     "time_filter_enabled":                      "Time Filter Enabled",
     "time_filter_in_window":                    "Time Filter In Window",
     "time_filter_reset_event":                  "Time Filter Reset Event",
+    # W7 volume diagnostics.
+    "median_relative_volume":                   "Median Relative Volume",
+    "volume_condition_allowed":                 "Volume Condition Allowed",
+    "volume_condition_block_reason":            "Volume Condition Block Reason",
+    "volume_initial_direction":                 "Volume Initial Direction",
+    "volume_regime":                            "Volume Regime",
 }
 
 # EXCEL_SUMMARY_LABELS: ordered params labels and period column set (§14.5 / §8.2).
@@ -197,6 +203,11 @@ _EXCEL_SUMMARY_PERIOD_COLS_SNAPSHOT: list = [
     "Immediate Entries Count", "Immediate Entries Blocked Count",
     # docs/time_filter_plan_v1_final.txt §6.4 / §7.1
     "Time Filter Reset Count", "Time Filter Bars In Window", "Time Filter Bars Out Window",
+    "Volume Blocked Starts", "Volume Warmup Blocks", "Volume Below Baseline",
+    "Volume Above Baseline", "Volume Baseline Zero",
+    "Volume Direction Warmup Blocks", "Volume Unknown Direction Blocks",
+    "Volume Trade Mode Direction Blocks", "Volume Started Cycles",
+    "Avg Median Relative Volume",
 ]
 
 # Mandatory exit-off columns in _FILTER_SUMMARY_COLUMNS (§14.6).
@@ -230,6 +241,22 @@ _STEP_LONG_FILTER_COLUMNS_SNAPSHOT = [
     "trigger_count_confirmed_median",
     "trigger_count_both",
     "stopping_started_count",
+    "n_volume_blocked_start_attempts",
+    "n_volume_blocked_start_attempts_long",
+    "n_volume_blocked_start_attempts_short",
+    "n_volume_blocked_start_attempts_unknown_direction",
+    "n_volume_warmup_blocked_start_attempts",
+    "n_volume_below_baseline_blocked_start_attempts",
+    "n_volume_above_baseline_blocked_start_attempts",
+    "n_volume_baseline_zero_blocked_start_attempts",
+    "n_volume_direction_warmup_blocked_start_attempts",
+    "n_volume_unknown_direction_blocked_start_attempts",
+    "n_volume_trade_mode_disallowed_direction_blocked_start_attempts",
+    "n_volume_low_regime_bars",
+    "n_volume_normal_regime_bars",
+    "n_volume_high_regime_bars",
+    "avg_median_relative_volume",
+    "n_volume_started_cycles",
 ]
 
 
@@ -899,6 +926,7 @@ class TestWFTesterExitOffParity:
         cfg = TradeFilterConfig(
             enabled=True, type="zigzag_st_mode",
             zigzag=TradeFilterZigZagConfig(
+                enabled=True,
                 reversal_threshold=0.03, local_window=20,
                 candidate_trigger_threshold=0.4,
             ),
@@ -1007,6 +1035,7 @@ class TestWFTesterExitOffParity:
             enabled=True,
             type="zigzag_st_mode",
             zigzag=TradeFilterZigZagConfig(
+                enabled=True,
                 reversal_threshold=0.03,
                 local_window=20,
                 candidate_trigger_threshold=0.4,

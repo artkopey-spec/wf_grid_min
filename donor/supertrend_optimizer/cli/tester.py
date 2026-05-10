@@ -14,7 +14,7 @@ import pandas as pd
 import yaml
 
 from supertrend_optimizer.data.loader import load_ohlc_csv
-from supertrend_optimizer.data.validator import validate_ohlc_data
+from supertrend_optimizer.data.validator import validate_ohlc_data, validate_volume_filter_data
 from supertrend_optimizer.data.timeframe import (
     coerce_annualization_config_value,
     detect_timeframe,
@@ -37,11 +37,21 @@ from supertrend_optimizer.core.trade_filter_config import (
     build_trade_filter_config_from_raw,
     collect_raw_user_keys,
     collect_trade_filter_unknown_keys,
+    is_trade_filter_enabled,
+    is_volume_enabled,
+    is_zigzag_enabled,
+    resolve_zigzag_enabled_in_place,
+    resolve_volume_enabled_in_place,
     resolve_trade_filter_mode_in_place,
     resolve_exit_off_mode_in_place,
     resolve_exit_b_immediate_off_in_place,
     resolve_time_filter_in_place,
+    resolve_volume_defaults_in_place,
     validate_trade_filter,
+)
+from supertrend_optimizer.core.volume_metrics import (
+    _warn_if_volume_baseline_window_large,
+    build_volume_global_metrics,
 )
 
 # Phase 2 (WP-T4): ZigZag global stats materialisation for legacy CLI path.
@@ -383,6 +393,8 @@ def load_tester_config(
         raw_user_keys = collect_raw_user_keys({"trade_filter": tf_raw})
         # Build TradeFilterConfig (raw values preserved for type validation)
         tf_cfg = build_trade_filter_config_from_raw(tf_raw)
+        resolve_zigzag_enabled_in_place(tf_cfg, raw_user_keys)
+        resolve_volume_enabled_in_place(tf_cfg, raw_user_keys)
         # Validate against Appendix A v1.1 §11–§11.3
         errors: list[str] = []
         validate_trade_filter(
@@ -397,20 +409,22 @@ def load_tester_config(
         resolve_exit_off_mode_in_place(tf_cfg, raw_user_keys)
         resolve_exit_b_immediate_off_in_place(tf_cfg, raw_user_keys)
         resolve_time_filter_in_place(tf_cfg, raw_user_keys)
+        resolve_volume_defaults_in_place(tf_cfg, raw_user_keys)
         config["trade_filter"] = tf_cfg
 
         # Phase 2 (WP-T2 + WP-T5 advanced into WP-T2 fail-fast slot, plan §5.5):
         # zigzag_st_mode is supported only with segmentation.mode=legacy. Reject
         # equal_blocks + enabled=true at config-validation time, BEFORE any
-        # stats / backtest work. tf_cfg.enabled is guaranteed bool here because
-        # validate_trade_filter returns early if it isn't, and we just raised
-        # on errors above.
-        if tf_cfg.enabled and config["segmentation"]["mode"] == "equal_blocks":
+        # stats / backtest work. Use the strict helper so malformed raw values
+        # are never coerced into an enabled runtime branch.
+        if (
+            is_trade_filter_enabled(tf_cfg)
+            and config["segmentation"]["mode"] == "equal_blocks"
+        ):
             raise ConfigError(
-                "zigzag_st_mode is supported only with segmentation.mode=legacy "
-                "in Phase 2; got segmentation.mode='equal_blocks' and "
-                "trade_filter.enabled=true. "
-                "Set segmentation.mode: legacy OR trade_filter.enabled: false."
+                "equal_blocks segmentation is not supported with "
+                "trade_filter.enabled=true; use 'legacy' segmentation instead. "
+                "zigzag_st_mode is supported only with segmentation.mode=legacy."
             )
 
     print(f"Loaded config from: {config_path}")
@@ -564,6 +578,19 @@ def run_backtest(args: argparse.Namespace) -> str:
     # Load and validate data
     df = load_ohlc_csv(args.csv)
     df = validate_ohlc_data(df)
+    df = validate_volume_filter_data(df, params.get("trade_filter"))
+    tf_cfg = params.get("trade_filter")
+    if is_volume_enabled(tf_cfg):
+        full_volume_runtime = build_volume_global_metrics(
+            df["volume"].to_numpy(),
+            df["close"].to_numpy(),
+            tf_cfg.volume,
+        )
+        _warn_if_volume_baseline_window_large(
+            tf_cfg.volume, len(df)
+        )
+    else:
+        full_volume_runtime = None
     
     n = len(df)
     
@@ -682,9 +709,8 @@ def run_backtest(args: argparse.Namespace) -> str:
         #
         # Disabled path: trade_filter is None or enabled=False → zigzag_global_stats
         # stays None; run_all_periods disabled path is bit-identical baseline.
-        tf_cfg = params.get("trade_filter")
         zigzag_global_stats = None
-        if tf_cfg is not None and tf_cfg.enabled:
+        if is_zigzag_enabled(tf_cfg):
             print("  [trade_filter] Building ZigZag global stats from full dataset...")
             zigzag_global_stats = build_zigzag_global_stats(
                 close=df["close"].values,
@@ -712,6 +738,7 @@ def run_backtest(args: argparse.Namespace) -> str:
             # Phase 2 (WP-T4): pass filter config + pre-materialised stats
             trade_filter_config=tf_cfg,
             zigzag_global_stats=zigzag_global_stats,
+            volume_runtime=full_volume_runtime,
         )
 
         print(f"\nBacktest completed:")

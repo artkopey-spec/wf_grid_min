@@ -180,6 +180,8 @@ def _init_worker(
     config: Any,
     prepend_bars: int,
     zigzag_global_stats: Any,
+    volume_runtime: Any = None,
+    retain_per_bar_filter_diagnostics: bool = False,
 ) -> None:
     """ProcessPoolExecutor initializer (plan §2.4).
 
@@ -240,6 +242,8 @@ def _init_worker(
         "config": config,
         "prepend_bars": prepend_bars,
         "zigzag_global_stats": zigzag_global_stats,
+        "volume_runtime": volume_runtime,
+        "retain_per_bar_filter_diagnostics": retain_per_bar_filter_diagnostics,
     })
 
 
@@ -288,6 +292,7 @@ def _run_grid_point_both(grid_point: Any) -> tuple[str, list, list]:
         config=state["config"],
         prepend_bars_requested=state["prepend_bars"],
         zigzag_global_stats=state["zigzag_global_stats"],
+        volume_runtime=state["volume_runtime"],
     )
     train_results = run_wf_train_for_grid_point(
         grid_point=grid_point,
@@ -295,24 +300,35 @@ def _run_grid_point_both(grid_point: Any) -> tuple[str, list, list]:
         full_data=state["full_data"],
         config=state["config"],
         zigzag_global_stats=state["zigzag_global_stats"],
+        volume_runtime=state["volume_runtime"],
     )
-    # filter_diagnostics_oos holds ~21 per-bar numpy arrays per step
-    # (~24K bars OOS, ~72K bars train).  The downstream consumer
-    # (collect_oos_steps / collect_train_steps) only reads
-    # filter_diagnostics_summary, which has already been derived at
-    # StepResult construction time.  Keeping the per-bar arrays inflates
-    # the IPC payload to ~100 MB/task and OOMs the queue on large grids.
-    _strip_filter_diagnostics_arrays(oos_results)
-    _strip_filter_diagnostics_arrays(train_results)
+    _strip_filter_diagnostics_arrays(
+        oos_results,
+        retain_per_bar_filter_diagnostics=state.get(
+            "retain_per_bar_filter_diagnostics", False
+        ),
+    )
+    _strip_filter_diagnostics_arrays(
+        train_results,
+        retain_per_bar_filter_diagnostics=state.get(
+            "retain_per_bar_filter_diagnostics", False
+        ),
+    )
     return grid_point.grid_point_id, oos_results, train_results
 
 
-def _strip_filter_diagnostics_arrays(step_results: list) -> None:
+def _strip_filter_diagnostics_arrays(
+    step_results: list,
+    *,
+    retain_per_bar_filter_diagnostics: bool = False,
+) -> None:
     """Null per-bar filter_diagnostics_oos on each StepResult in-place.
 
     Safe to call on any iterable of StepResult: filter_diagnostics_summary
     is preserved (it is the only field consumed by downstream collectors).
     """
+    if retain_per_bar_filter_diagnostics:
+        return
     for sr in step_results:
         if getattr(sr, "filter_diagnostics_oos", None) is not None:
             sr.filter_diagnostics_oos = None

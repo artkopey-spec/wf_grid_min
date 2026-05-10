@@ -52,6 +52,7 @@ def _make_enabled_cfg():
     return TradeFilterConfig(
         enabled=True, type="zigzag_st_mode",
         zigzag=TradeFilterZigZagConfig(
+            enabled=True,
             reversal_threshold=0.03, local_window=20, candidate_trigger_threshold=0.4,
         ),
         triggers=TradeFilterTriggersConfig(

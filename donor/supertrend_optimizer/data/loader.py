@@ -21,6 +21,8 @@ from typing import Optional
 
 import pandas as pd
 
+from supertrend_optimizer.data.validator import _check_no_duplicate_lowercase_columns
+
 logger = logging.getLogger(__name__)
 
 # Minimum number of columns expected in a valid OHLC CSV
@@ -111,6 +113,8 @@ def load_ohlc_csv(
             )
     else:
         df = pd.read_csv(path, sep=sep)
+
+    _check_no_duplicate_lowercase_columns(list(df.columns), path, mode="info")
 
     # Normalise column names to lowercase
     df.columns = df.columns.str.lower()

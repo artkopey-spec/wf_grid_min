@@ -249,6 +249,7 @@ def make_parity_trade_filter_config(*, exit_b_immediate_off: bool):
         enabled=True,
         type="zigzag_st_mode",
         zigzag=TradeFilterZigZagConfig(
+            enabled=True,
             reversal_threshold=0.03,
             local_window=20,
             candidate_trigger_threshold=0.4,

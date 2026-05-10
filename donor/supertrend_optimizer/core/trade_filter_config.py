@@ -22,6 +22,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field
+from contextvars import ContextVar
 from typing import Optional, Union
 
 
@@ -72,6 +73,7 @@ _V3_INIT_FAILURE_KEYS = frozenset({
 # Any caller outside the whitelist invoking enabled+zigzag_st_mode is rejected.
 _CALLER_PIPELINE_DOMAIN = frozenset({"wf_grid", "tester", "optimizer", "single"})
 _ZIGZAG_ST_MODE_ALLOWED_CALLERS = frozenset({"wf_grid", "tester"})
+_TF_WINDOW_RE = re.compile(r"^\d{2}:\d{2}-\d{2}:\d{2}$")
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +147,7 @@ class TradeFilterZigZagConfig:
     - mode: canonical mode literal; None = absent (use legacy triggers or default A).
     - candidate_duration_gate: optional duration gate for candidate-component modes.
     """
+    enabled: Optional[bool] = None
     global_stats_source: str = "full_dataset"
     leg_height_mode: str = "pct"
     reversal_threshold: Optional[float] = None          # required when enabled; numeric fraction
@@ -194,6 +197,18 @@ class TradeFilterDiagnosticsConfig:
 
 
 @dataclass
+class TradeFilterVolumeConfig:
+    enabled: object = None
+    mode: object = None
+    short_window: object = None
+    baseline_window: object = None
+    threshold_ratio: object = None
+    regime_low_ratio: object = None
+    regime_high_ratio: object = None
+    direction_lookback_bars: object = None
+
+
+@dataclass
 class TradeFilterConfig:
     """Root trade-filter block.
 
@@ -223,9 +238,94 @@ class TradeFilterConfig:
     time_filter: TradeFilterTimeFilterConfig = field(
         default_factory=TradeFilterTimeFilterConfig
     )
+    volume: Optional[TradeFilterVolumeConfig] = None
     # Raw YAML presence marker.  ``None`` means "unknown / hand-built config",
     # so runtime consumers fall back to the historical duck-typed behaviour.
     _raw_triggers_present: Optional[bool] = field(default=None, repr=False)
+
+
+# ---------------------------------------------------------------------------
+# Runtime helpers
+# ---------------------------------------------------------------------------
+
+def is_trade_filter_enabled(tf: object) -> bool:
+    """Return True only for a post-validation root trade-filter enable."""
+    return tf is not None and getattr(tf, "enabled", None) is True
+
+
+def is_zigzag_enabled(tf: object) -> bool:
+    """Return True when the ZigZag subfilter is enabled.
+
+    W2.A materializes the compatibility default in
+    ``resolve_zigzag_enabled_in_place`` before validation.
+    """
+    if not is_trade_filter_enabled(tf):
+        return False
+    zigzag = getattr(tf, "zigzag", None)
+    if zigzag is None:
+        return False
+    return getattr(zigzag, "enabled", None) is True
+
+
+def is_volume_enabled(tf: object) -> bool:
+    """Return True when the volume subfilter is explicitly enabled."""
+    if not is_trade_filter_enabled(tf):
+        return False
+    volume = getattr(tf, "volume", None)
+    return volume is not None and getattr(volume, "enabled", None) is True
+
+
+def resolve_zigzag_enabled_in_place(
+    trade_filter_config: Optional["TradeFilterConfig"],
+    raw_user_keys: frozenset[tuple[str, ...]],
+) -> None:
+    """Resolve ``trade_filter.zigzag.enabled`` without breaking legacy configs."""
+    if trade_filter_config is None:
+        return
+    zigzag = getattr(trade_filter_config, "zigzag", None)
+    if zigzag is None:
+        return
+    if ("trade_filter", "zigzag", "enabled") in raw_user_keys:
+        return
+
+    legacy_type_marker = _has_legacy_zigzag_marker(trade_filter_config, raw_user_keys)
+    volume = getattr(trade_filter_config, "volume", None)
+    volume_enabled = volume is not None and getattr(volume, "enabled", None) is True
+
+    if legacy_type_marker:
+        zigzag.enabled = True
+    elif volume_enabled:
+        zigzag.enabled = False
+    elif getattr(trade_filter_config, "enabled", None) is True:
+        zigzag.enabled = False
+    else:
+        zigzag.enabled = False
+
+
+def resolve_volume_enabled_in_place(
+    trade_filter_config: Optional["TradeFilterConfig"],
+    raw_user_keys: frozenset[tuple[str, ...]],
+) -> None:
+    """Phase 3 hook: preserve raw ``trade_filter.volume.enabled`` as-is."""
+    return
+
+
+def resolve_volume_defaults_in_place(
+    trade_filter_config: Optional["TradeFilterConfig"],
+    raw_user_keys: frozenset[tuple[str, ...]],
+) -> None:
+    """Materialize optional volume defaults after validation."""
+    if not is_volume_enabled(trade_filter_config):
+        return
+    vol = trade_filter_config.volume
+    if vol is None:
+        return
+    if vol.regime_low_ratio is None:
+        vol.regime_low_ratio = 0.8
+    if vol.regime_high_ratio is None:
+        vol.regime_high_ratio = 1.2
+    if vol.direction_lookback_bars is None:
+        vol.direction_lookback_bars = 3
 
 
 # ---------------------------------------------------------------------------
@@ -237,11 +337,11 @@ class TradeFilterConfig:
 TRADE_FILTER_ALLOWED_KEYS: dict[str, frozenset[str]] = {
     "trade_filter": frozenset({
         "enabled", "type", "zigzag", "triggers", "lifecycle", "diagnostics",
-        "time_filter",
+        "time_filter", "volume",
     }),
     "trade_filter.time_filter": frozenset({"enabled", "window"}),
     "trade_filter.zigzag": frozenset({
-        "global_stats_source", "leg_height_mode", "reversal_threshold",
+        "enabled", "global_stats_source", "leg_height_mode", "reversal_threshold",
         "candidate_trigger_threshold", "candidate_trigger_quantile",
         "global_median", "local_window", "daily_reset",
         # v3 fields (WP-V3-1)
@@ -264,6 +364,11 @@ TRADE_FILTER_ALLOWED_KEYS: dict[str, frozenset[str]] = {
     }),
     "trade_filter.diagnostics": frozenset({
         "export_state_columns", "export_trigger_columns",
+    }),
+    "trade_filter.volume": frozenset({
+        "enabled", "mode", "short_window", "baseline_window",
+        "threshold_ratio", "regime_low_ratio", "regime_high_ratio",
+        "direction_lookback_bars",
     }),
 }
 
@@ -320,8 +425,16 @@ def collect_trade_filter_unknown_keys(
         else:
             child = raw[key]
             child_path = f"{path}.{key}"
-            if isinstance(child, dict) and child_path in TRADE_FILTER_ALLOWED_KEYS:
-                errors.extend(collect_trade_filter_unknown_keys(child, child_path))
+            if child_path in TRADE_FILTER_ALLOWED_KEYS:
+                if not isinstance(child, dict):
+                    errors.append(
+                        f"{child_path} must be a YAML mapping, "
+                        f"got {type(child).__name__!r}"
+                    )
+                else:
+                    errors.extend(
+                        collect_trade_filter_unknown_keys(child, child_path)
+                    )
     return errors
 
 
@@ -348,6 +461,7 @@ def build_trade_filter_config_from_raw(tf_raw: dict) -> TradeFilterConfig:
         max_bars=cdg_raw.get("max_bars", None),
     )
     zigzag = TradeFilterZigZagConfig(
+        enabled=zigzag_raw.get("enabled", None),
         global_stats_source=zigzag_raw.get("global_stats_source", "full_dataset"),
         leg_height_mode=zigzag_raw.get("leg_height_mode", "pct"),
         reversal_threshold=zigzag_raw.get("reversal_threshold", None),
@@ -397,6 +511,18 @@ def build_trade_filter_config_from_raw(tf_raw: dict) -> TradeFilterConfig:
         window=tflt_raw.get("window", None),
     )
 
+    vol_raw: dict = tf_raw.get("volume") or {}
+    volume = TradeFilterVolumeConfig(
+        enabled=vol_raw.get("enabled", None),
+        mode=vol_raw.get("mode", None),
+        short_window=vol_raw.get("short_window", None),
+        baseline_window=vol_raw.get("baseline_window", None),
+        threshold_ratio=vol_raw.get("threshold_ratio", None),
+        regime_low_ratio=vol_raw.get("regime_low_ratio", None),
+        regime_high_ratio=vol_raw.get("regime_high_ratio", None),
+        direction_lookback_bars=vol_raw.get("direction_lookback_bars", None),
+    ) if "volume" in tf_raw else None
+
     return TradeFilterConfig(
         enabled=enabled_raw,
         type=tf_type,
@@ -405,6 +531,7 @@ def build_trade_filter_config_from_raw(tf_raw: dict) -> TradeFilterConfig:
         lifecycle=lifecycle,
         diagnostics=diagnostics,
         time_filter=time_filter,
+        volume=volume,
         _raw_triggers_present=("triggers" in tf_raw),
     )
 
@@ -424,54 +551,163 @@ def _append_validation_error(
         error_keys.append(key)
 
 
-def validate_trade_filter(
+def _validate_int_ge_one(value: object, field_path: str, errors: list[str]) -> Optional[int]:
+    if isinstance(value, bool) or not isinstance(value, int):
+        errors.append(f"{field_path} must be int >= 1, got {value!r}")
+        return None
+    if value < 1:
+        errors.append(f"{field_path} must be int >= 1, got {value!r}")
+        return None
+    return value
+
+
+def _validate_positive_finite(
+    value: object,
+    field_path: str,
+    errors: list[str],
+) -> Optional[float]:
+    if isinstance(value, bool):
+        errors.append(f"{field_path} must be finite > 0, got {value!r}")
+        return None
+    try:
+        value_f = float(value)
+    except (TypeError, ValueError):
+        errors.append(f"{field_path} must be finite > 0, got {value!r}")
+        return None
+    if not math.isfinite(value_f) or value_f <= 0:
+        errors.append(f"{field_path} must be finite > 0, got {value!r}")
+        return None
+    return value_f
+
+
+def _validate_volume_block(
     tf: TradeFilterConfig,
     errors: list[str],
     raw_user_keys: frozenset[tuple[str, ...]],
-    caller_pipeline: str = "wf_grid",
-    error_keys: Optional[list[str]] = None,
 ) -> None:
-    """Validate the trade_filter block per Appendix A v1.1 §11–§11.3.
-
-    Push-style: appends error strings to ``errors``. Caller raises ConfigError
-    if ``errors`` is non-empty after the call. Returns None.
-
-    Parameters
-    ----------
-    tf:
-        Already-built TradeFilterConfig (raw values preserved for absent /
-        wrong-type keys; see _build_trade_filter_config in loader).
-    errors:
-        Mutable list to append error strings to.
-    error_keys:
-        Optional mutable list for canonical v3 init-failure identifiers
-        (spec §4.5).  Existing callers can omit it and keep the historical
-        text-only contract.
-    raw_user_keys:
-        Set of dotted-path tuples explicitly present in the parsed YAML.
-        Required by plan §6.4.1 (numeric-threshold + explicit-quantile reject).
-    caller_pipeline:
-        "wf_grid" (Phase 1) or "tester" (Phase 2). Reserved for per-pipeline
-        log prefixes; does NOT change validation rules. Default "wf_grid"
-        preserves Phase 1 backward compatibility.
-
-    All Appendix A v1.1 §11.x rules are implemented; the one non-rule is:
-        freeze_confirmed_legs < local_window is VALID (§3.2, §17.20) — no reject,
-        no warning.
-
-    Spec reference: Appendix A v1.1 §11, §11.1, §11.2, §11.3, §15.6, §17.2
-    Plan reference: Phase 1 plan §6.4.1, §6.5; Phase 2 plan §5.1, §5.3, §5.5
-    """
-    # ------------------------------------------------------------------
-    # WP-T3 step 6 — caller_pipeline domain check
-    # ------------------------------------------------------------------
-    if caller_pipeline not in _CALLER_PIPELINE_DOMAIN:
-        errors.append(
-            f"validate_trade_filter: unknown caller_pipeline {caller_pipeline!r}; "
-            f"supported: {sorted(_CALLER_PIPELINE_DOMAIN)}"
-        )
+    volume_block_present = ("trade_filter", "volume") in raw_user_keys
+    if not volume_block_present:
+        return
+    vol = getattr(tf, "volume", None)
+    if vol is None:
         return
 
+    enabled_present = ("trade_filter", "volume", "enabled") in raw_user_keys
+    if not enabled_present:
+        return
+    if vol.enabled is None:
+        errors.append(
+            "trade_filter.volume.enabled must be bool (true/false), got null"
+        )
+        return
+    if not isinstance(vol.enabled, bool):
+        errors.append(
+            "trade_filter.volume.enabled must be bool (true/false), "
+            f"got {type(vol.enabled).__name__!r} ({vol.enabled!r})"
+        )
+        return
+    if not vol.enabled:
+        return
+
+    mode_key = ("trade_filter", "volume", "mode")
+    if mode_key not in raw_user_keys or vol.mode is None:
+        errors.append(
+            "trade_filter.volume.mode is required when "
+            "trade_filter.volume.enabled is true"
+        )
+    elif vol.mode not in ("volume_A", "volume_B"):
+        errors.append(
+            "trade_filter.volume.mode must be 'volume_A' or 'volume_B', "
+            f"got {vol.mode!r}"
+        )
+
+    short_key = ("trade_filter", "volume", "short_window")
+    if short_key not in raw_user_keys or vol.short_window is None:
+        errors.append(
+            "trade_filter.volume.short_window is required when "
+            "trade_filter.volume.enabled is true"
+        )
+        short_window = None
+    else:
+        short_window = _validate_int_ge_one(
+            vol.short_window,
+            "trade_filter.volume.short_window",
+            errors,
+        )
+
+    baseline_key = ("trade_filter", "volume", "baseline_window")
+    if baseline_key not in raw_user_keys or vol.baseline_window is None:
+        errors.append(
+            "trade_filter.volume.baseline_window is required when "
+            "trade_filter.volume.enabled is true"
+        )
+        baseline_window = None
+    else:
+        baseline_window = _validate_int_ge_one(
+            vol.baseline_window,
+            "trade_filter.volume.baseline_window",
+            errors,
+        )
+
+    if (
+        short_window is not None
+        and baseline_window is not None
+        and baseline_window < short_window
+    ):
+        errors.append(
+            "trade_filter.volume.baseline_window must be >= "
+            "trade_filter.volume.short_window"
+        )
+
+    threshold_key = ("trade_filter", "volume", "threshold_ratio")
+    if threshold_key not in raw_user_keys or vol.threshold_ratio is None:
+        errors.append(
+            "trade_filter.volume.threshold_ratio is required when "
+            "trade_filter.volume.enabled is true"
+        )
+    else:
+        _validate_positive_finite(
+            vol.threshold_ratio,
+            "trade_filter.volume.threshold_ratio",
+            errors,
+        )
+
+    low_key = ("trade_filter", "volume", "regime_low_ratio")
+    high_key = ("trade_filter", "volume", "regime_high_ratio")
+    low_ratio = 0.8
+    high_ratio = 1.2
+    if low_key in raw_user_keys:
+        low_ratio = _validate_positive_finite(
+            vol.regime_low_ratio,
+            "trade_filter.volume.regime_low_ratio",
+            errors,
+        )
+    if high_key in raw_user_keys:
+        high_ratio = _validate_positive_finite(
+            vol.regime_high_ratio,
+            "trade_filter.volume.regime_high_ratio",
+            errors,
+        )
+    if low_ratio is not None and high_ratio is not None and high_ratio <= low_ratio:
+        errors.append(
+            "trade_filter.volume.regime_high_ratio must be > "
+            "trade_filter.volume.regime_low_ratio"
+        )
+
+    lookback_key = ("trade_filter", "volume", "direction_lookback_bars")
+    if lookback_key in raw_user_keys:
+        _validate_int_ge_one(
+            vol.direction_lookback_bars,
+            "trade_filter.volume.direction_lookback_bars",
+            errors,
+        )
+
+
+_VALIDATION_ERROR_KEYS: ContextVar[Optional[list[str]]] = ContextVar(
+    "_VALIDATION_ERROR_KEYS", default=None
+)
+
+def _validate_root_enabled_and_type(tf: TradeFilterConfig, errors: list[str], raw_user_keys: frozenset[tuple[str, ...]]) -> bool:
     # ------------------------------------------------------------------
     # Rule: enabled key presence and type
     # ------------------------------------------------------------------
@@ -480,14 +716,14 @@ def validate_trade_filter(
         errors.append(
             "trade_filter.enabled is required when trade_filter block is present"
         )
-        return  # cannot infer intent without enabled — stop here
+        return False  # cannot infer intent without enabled — stop here
 
     if not isinstance(tf.enabled, bool):
         errors.append(
             f"trade_filter.enabled must be bool (true/false), "
             f"got {type(tf.enabled).__name__!r} ({tf.enabled!r})"
         )
-        return
+        return False
 
     # ------------------------------------------------------------------
     # Rule: type validation
@@ -495,30 +731,11 @@ def validate_trade_filter(
     type_present = ("trade_filter", "type") in raw_user_keys
 
     if tf.enabled:
-        # enabled=true: type required and must be zigzag_st_mode
-        if not type_present or tf.type is None:
-            errors.append(
-                "trade_filter.type is required when trade_filter.enabled is true; "
-                "set type: zigzag_st_mode"
-            )
-        elif tf.type not in _SUPPORTED_TRADE_FILTER_TYPES:
+        if type_present and tf.type is not None and tf.type not in _SUPPORTED_TRADE_FILTER_TYPES:
             errors.append(
                 f"trade_filter.type {tf.type!r} is not supported; "
                 f"supported: {sorted(_SUPPORTED_TRADE_FILTER_TYPES)}"
             )
-        elif (
-            tf.type == "zigzag_st_mode"
-            and caller_pipeline not in _ZIGZAG_ST_MODE_ALLOWED_CALLERS
-        ):
-            # WP-T3 step 6 — pipeline whitelist (plan §5.5).
-            errors.append(
-                f"trade_filter.type='zigzag_st_mode' is not supported in "
-                f"pipeline {caller_pipeline!r}; allowed pipelines: "
-                f"{sorted(_ZIGZAG_ST_MODE_ALLOWED_CALLERS)}"
-            )
-            # Hard stop: downstream rules assume the filter is acceptable for
-            # this caller.
-            return
     else:
         # enabled=false: type optional; if present, must be zigzag_st_mode (§11.1)
         if type_present and tf.type is not None and tf.type not in _SUPPORTED_TRADE_FILTER_TYPES:
@@ -535,37 +752,20 @@ def validate_trade_filter(
                 errors,
                 "trade_filter.lifecycle.exit_b_immediate_off must be absent when "
                 "trade_filter.enabled is false",
-                error_keys,
+                _VALIDATION_ERROR_KEYS.get(),
                 "exit_b_immediate_off_present_when_filter_disabled",
             )
         # disabled filter: skip all further validation (§11.1)
-        return
+        return False
 
-    # ------------------------------------------------------------------
-    # enabled=true: required sub-blocks
-    # ------------------------------------------------------------------
-    zigzag_present = ("trade_filter", "zigzag") in raw_user_keys
-    triggers_present = ("trade_filter", "triggers") in raw_user_keys
-    lifecycle_present = ("trade_filter", "lifecycle") in raw_user_keys
+    return True
 
-    if not zigzag_present:
-        errors.append(
-            "trade_filter.zigzag block is required when trade_filter.enabled is true"
-        )
-    # v3: triggers block is NOT required; only legacy path uses it (WP-V3-1)
-    if not lifecycle_present:
-        errors.append(
-            "trade_filter.lifecycle block is required when trade_filter.enabled is true"
-        )
-
-    # Avoid cascade errors if critical blocks are missing
-    if not zigzag_present or not lifecycle_present:
-        return
-
+def _validate_zigzag_block(tf: TradeFilterConfig, errors: list[str], raw_user_keys: frozenset[tuple[str, ...]]) -> None:
     # ------------------------------------------------------------------
     # v3: Mode validation (WP-V3-1 §4.1, A1/A2/A7/A8)
     # ------------------------------------------------------------------
     mode_present = ("trade_filter", "zigzag", "mode") in raw_user_keys
+    triggers_present = ("trade_filter", "triggers") in raw_user_keys
     mode_value = tf.zigzag.mode
 
     # A8: candidate_entry deprecated (ТЗ v3 §3.1, §4.5 candidate_entry_deprecated)
@@ -576,7 +776,7 @@ def validate_trade_filter(
             errors,
             "trade_filter.zigzag.candidate_entry is deprecated in v3 and not "
             "supported; use trade_filter.zigzag.mode instead",
-            error_keys,
+            _VALIDATION_ERROR_KEYS.get(),
             "candidate_entry_deprecated",
         )
 
@@ -586,7 +786,7 @@ def validate_trade_filter(
             errors,
             "trade_filter.zigzag.mode and trade_filter.triggers cannot be used together; "
             "use canonical mode (zigzag.mode) or legacy triggers, not both",
-            error_keys,
+            _VALIDATION_ERROR_KEYS.get(),
             "mode_conflicts_with_legacy_triggers",
         )
 
@@ -597,38 +797,20 @@ def validate_trade_filter(
                 errors,
                 f"trade_filter.zigzag.mode must be one of "
                 f"{{'A', 'B', 'C', 'A+B', 'C+B'}}; got {mode_value!r}",
-                error_keys,
+                _VALIDATION_ERROR_KEYS.get(),
                 "mode_invalid_literal",
             )
-
-    # ------------------------------------------------------------------
-    # Triggers (legacy path: only when mode is absent)
-    # ------------------------------------------------------------------
-    if not mode_present and triggers_present:
-        ct_enabled = tf.triggers.candidate_threshold.enabled
-        cm_enabled = tf.triggers.confirmed_median.enabled
-
-        if not isinstance(ct_enabled, bool):
-            errors.append(
-                f"trade_filter.triggers.candidate_threshold.enabled must be bool, "
-                f"got {type(ct_enabled).__name__!r}"
-            )
-        if not isinstance(cm_enabled, bool):
-            errors.append(
-                f"trade_filter.triggers.confirmed_median.enabled must be bool, "
-                f"got {type(cm_enabled).__name__!r}"
-            )
-        if isinstance(ct_enabled, bool) and isinstance(cm_enabled, bool):
-            if not ct_enabled and not cm_enabled:
-                errors.append(
-                    "at least one trigger must be enabled "
-                    "(trade_filter.triggers.candidate_threshold or confirmed_median)"
-                )
 
     # ------------------------------------------------------------------
     # ZigZag block
     # ------------------------------------------------------------------
     zz = tf.zigzag
+    zigzag_enabled_present = ("trade_filter", "zigzag", "enabled") in raw_user_keys
+    if zigzag_enabled_present and not isinstance(zz.enabled, bool):
+        errors.append(
+            "trade_filter.zigzag.enabled must be bool (true/false), "
+            f"got {type(zz.enabled).__name__!r} ({zz.enabled!r})"
+        )
 
     # global_stats_source
     if zz.global_stats_source != "full_dataset":
@@ -779,6 +961,68 @@ def validate_trade_filter(
                 )
 
     # ------------------------------------------------------------------
+    # v3: candidate_duration_gate validation (WP-V3-1 §4.2, A9-A14)
+    # ------------------------------------------------------------------
+    gate = tf.zigzag.candidate_duration_gate
+    gate_block_present = (
+        ("trade_filter", "zigzag", "candidate_duration_gate") in raw_user_keys
+    )
+    gate_max_bars_present = (
+        ("trade_filter", "zigzag", "candidate_duration_gate", "max_bars") in raw_user_keys
+    )
+
+    if gate_block_present:
+        gate_enabled = gate.enabled
+        # A9: enabled must be bool
+        if not isinstance(gate_enabled, bool):
+            _append_validation_error(
+                errors,
+                "candidate_duration_gate.enabled must be bool (true/false), "
+                f"got {type(gate_enabled).__name__!r}",
+                _VALIDATION_ERROR_KEYS.get(),
+                "duration_gate_enabled_invalid_type",
+            )
+        elif gate_enabled:
+            # A10: max_bars required when enabled=true
+            if not gate_max_bars_present:
+                _append_validation_error(
+                    errors,
+                    "candidate_duration_gate.max_bars is required when enabled is true",
+                    _VALIDATION_ERROR_KEYS.get(),
+                    "duration_gate_max_bars_missing",
+                )
+            else:
+                # A11: max_bars must be int >= 1; bool/float/string/null rejected
+                mb = gate.max_bars
+                if isinstance(mb, bool) or not isinstance(mb, int):
+                    _append_validation_error(
+                        errors,
+                        f"candidate_duration_gate.max_bars must be int >= 1; got {mb!r}",
+                        _VALIDATION_ERROR_KEYS.get(),
+                        "duration_gate_max_bars_invalid_type",
+                    )
+                elif mb < 1:
+                    _append_validation_error(
+                        errors,
+                        f"candidate_duration_gate.max_bars must be int >= 1; got {mb!r}",
+                        _VALIDATION_ERROR_KEYS.get(),
+                        "duration_gate_max_bars_below_one",
+                    )
+        else:
+            # enabled=false: A12: max_bars must be absent
+            if gate_max_bars_present:
+                _append_validation_error(
+                    errors,
+                    "candidate_duration_gate.max_bars must be absent when enabled is false; "
+                    "remove the key",
+                    _VALIDATION_ERROR_KEYS.get(),
+                    "duration_gate_max_bars_present_when_disabled",
+                )
+    # A13: absent gate block -> disabled gate (handled by default values; no action needed)
+
+
+def _validate_lifecycle_block(tf: TradeFilterConfig, errors: list[str], raw_user_keys: frozenset[tuple[str, ...]]) -> None:
+    # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
     lc = tf.lifecycle
@@ -821,7 +1065,7 @@ def validate_trade_filter(
                 "trade_filter.lifecycle.exit_off_mode must be str literal "
                 "\"exit A\" or \"exit B\", got "
                 f"{type(eom_raw).__name__!r} ({eom_raw!r})",
-                error_keys,
+                _VALIDATION_ERROR_KEYS.get(),
                 "exit_off_mode_invalid_type",
             )
         elif eom_raw not in ("exit A", "exit B"):
@@ -829,7 +1073,7 @@ def validate_trade_filter(
                 errors,
                 "trade_filter.lifecycle.exit_off_mode must be \"exit A\" or "
                 f"\"exit B\"; got {eom_raw!r}",
-                error_keys,
+                _VALIDATION_ERROR_KEYS.get(),
                 "exit_off_mode_invalid_literal",
             )
 
@@ -850,7 +1094,7 @@ def validate_trade_filter(
             errors,
             "trade_filter.lifecycle.exit_b_immediate_off must be absent when "
             "exit_off_mode is not 'exit B'",
-            error_keys,
+            _VALIDATION_ERROR_KEYS.get(),
             "exit_b_immediate_off_present_when_not_exit_b",
         )
     elif imm_present and _effective_exit_off == "exit B":
@@ -860,7 +1104,7 @@ def validate_trade_filter(
                 "trade_filter.lifecycle.exit_b_immediate_off must be bool "
                 f"(true/false), got {type(lc.exit_b_immediate_off).__name__!r} "
                 f"({lc.exit_b_immediate_off!r})",
-                error_keys,
+                _VALIDATION_ERROR_KEYS.get(),
                 "exit_b_immediate_off_invalid_type",
             )
 
@@ -870,7 +1114,7 @@ def validate_trade_filter(
             "trade_filter.lifecycle.exit_off_zz_leg_count must be absent when "
             "trade_filter.lifecycle.exit_off_mode is \"exit A\" or exit_off_mode "
             "is omitted from YAML",
-            error_keys,
+            _VALIDATION_ERROR_KEYS.get(),
             "exit_off_zz_leg_count_present_when_exit_a",
         )
 
@@ -880,7 +1124,7 @@ def validate_trade_filter(
                 errors,
                 "trade_filter.lifecycle.exit_off_zz_leg_count is required when "
                 "trade_filter.lifecycle.exit_off_mode is \"exit B\"",
-                error_keys,
+                _VALIDATION_ERROR_KEYS.get(),
                 "exit_off_zz_leg_count_missing",
             )
         else:
@@ -890,7 +1134,7 @@ def validate_trade_filter(
                     errors,
                     "trade_filter.lifecycle.exit_off_zz_leg_count must be int >= 1, "
                     f"got {c_raw!r}",
-                    error_keys,
+                    _VALIDATION_ERROR_KEYS.get(),
                     "exit_off_zz_leg_count_invalid_type",
                 )
             elif c_raw < 1:
@@ -898,79 +1142,47 @@ def validate_trade_filter(
                     errors,
                     "trade_filter.lifecycle.exit_off_zz_leg_count must be int >= 1, "
                     f"got {c_raw!r}",
-                    error_keys,
+                    _VALIDATION_ERROR_KEYS.get(),
                     "exit_off_zz_leg_count_below_one",
                 )
 
     # NOTE: freeze_confirmed_legs < local_window is VALID — not a warning, not a
     # reject (Appendix A v1.1 §3.2, §17.20; plan §6.5 Note 1).  No check here.
 
-    # ------------------------------------------------------------------
-    # v3: candidate_duration_gate validation (WP-V3-1 §4.2, A9-A14)
-    # ------------------------------------------------------------------
-    gate = tf.zigzag.candidate_duration_gate
-    gate_block_present = (
-        ("trade_filter", "zigzag", "candidate_duration_gate") in raw_user_keys
-    )
-    gate_max_bars_present = (
-        ("trade_filter", "zigzag", "candidate_duration_gate", "max_bars") in raw_user_keys
-    )
 
-    if gate_block_present:
-        gate_enabled = gate.enabled
-        # A9: enabled must be bool
-        if not isinstance(gate_enabled, bool):
-            _append_validation_error(
-                errors,
-                "candidate_duration_gate.enabled must be bool (true/false), "
-                f"got {type(gate_enabled).__name__!r}",
-                error_keys,
-                "duration_gate_enabled_invalid_type",
+def _validate_triggers_block(tf: TradeFilterConfig, errors: list[str], raw_user_keys: frozenset[tuple[str, ...]]) -> None:
+    # ------------------------------------------------------------------
+    # Triggers (legacy path: only when mode is absent)
+    # ------------------------------------------------------------------
+    mode_present = ("trade_filter", "zigzag", "mode") in raw_user_keys
+    triggers_present = ("trade_filter", "triggers") in raw_user_keys
+    if not mode_present and triggers_present:
+        ct_enabled = tf.triggers.candidate_threshold.enabled
+        cm_enabled = tf.triggers.confirmed_median.enabled
+
+        if not isinstance(ct_enabled, bool):
+            errors.append(
+                f"trade_filter.triggers.candidate_threshold.enabled must be bool, "
+                f"got {type(ct_enabled).__name__!r}"
             )
-        elif gate_enabled:
-            # A10: max_bars required when enabled=true
-            if not gate_max_bars_present:
-                _append_validation_error(
-                    errors,
-                    "candidate_duration_gate.max_bars is required when enabled is true",
-                    error_keys,
-                    "duration_gate_max_bars_missing",
+        if not isinstance(cm_enabled, bool):
+            errors.append(
+                f"trade_filter.triggers.confirmed_median.enabled must be bool, "
+                f"got {type(cm_enabled).__name__!r}"
+            )
+        if isinstance(ct_enabled, bool) and isinstance(cm_enabled, bool):
+            if not ct_enabled and not cm_enabled:
+                errors.append(
+                    "at least one trigger must be enabled "
+                    "(trade_filter.triggers.candidate_threshold or confirmed_median)"
                 )
-            else:
-                # A11: max_bars must be int >= 1; bool/float/string/null rejected
-                mb = gate.max_bars
-                if isinstance(mb, bool) or not isinstance(mb, int):
-                    _append_validation_error(
-                        errors,
-                        f"candidate_duration_gate.max_bars must be int >= 1; got {mb!r}",
-                        error_keys,
-                        "duration_gate_max_bars_invalid_type",
-                    )
-                elif mb < 1:
-                    _append_validation_error(
-                        errors,
-                        f"candidate_duration_gate.max_bars must be int >= 1; got {mb!r}",
-                        error_keys,
-                        "duration_gate_max_bars_below_one",
-                    )
-        else:
-            # enabled=false: A12: max_bars must be absent
-            if gate_max_bars_present:
-                _append_validation_error(
-                    errors,
-                    "candidate_duration_gate.max_bars must be absent when enabled is false; "
-                    "remove the key",
-                    error_keys,
-                    "duration_gate_max_bars_present_when_disabled",
-                )
-    # A13: absent gate block -> disabled gate (handled by default values; no action needed)
 
+
+def _validate_time_filter_block(tf: TradeFilterConfig, errors: list[str], raw_user_keys: frozenset[tuple[str, ...]]) -> None:
     # ------------------------------------------------------------------
     # time_filter validation (docs/time_filter_plan_v1_final.txt §2.1)
     # Only validated when trade_filter.enabled=true (already inside that branch).
     # ------------------------------------------------------------------
-    _TF_WINDOW_RE = re.compile(r"^\d{2}:\d{2}-\d{2}:\d{2}$")
-
     tf_block_present = ("trade_filter", "time_filter") in raw_user_keys
     tf_enabled_present = ("trade_filter", "time_filter", "enabled") in raw_user_keys
     tf_window_present = ("trade_filter", "time_filter", "window") in raw_user_keys
@@ -983,7 +1195,7 @@ def validate_trade_filter(
                 errors,
                 "trade_filter.time_filter.enabled must be bool (true/false), "
                 f"got {type(tfl.enabled).__name__!r} ({tfl.enabled!r})",
-                error_keys,
+                _VALIDATION_ERROR_KEYS.get(),
                 "time_filter_enabled_invalid_type",
             )
         elif tfl.enabled:
@@ -993,7 +1205,7 @@ def validate_trade_filter(
                     errors,
                     "trade_filter.time_filter.window is required when "
                     "trade_filter.time_filter.enabled is true",
-                    error_keys,
+                    _VALIDATION_ERROR_KEYS.get(),
                     "time_filter_window_missing",
                 )
             else:
@@ -1003,7 +1215,7 @@ def validate_trade_filter(
                         errors,
                         f"trade_filter.time_filter.window must be in HH:MM-HH:MM format, "
                         f"got {w!r}",
-                        error_keys,
+                        _VALIDATION_ERROR_KEYS.get(),
                         "time_filter_window_invalid_format",
                     )
                 else:
@@ -1018,7 +1230,7 @@ def validate_trade_filter(
                             errors,
                             f"trade_filter.time_filter.window hours must be in 0–23, "
                             f"got {w!r}",
-                            error_keys,
+                            _VALIDATION_ERROR_KEYS.get(),
                             "time_filter_window_invalid_hours",
                         )
                     elif not mins_ok:
@@ -1026,7 +1238,7 @@ def validate_trade_filter(
                             errors,
                             f"trade_filter.time_filter.window minutes must be in 0–59, "
                             f"got {w!r}",
-                            error_keys,
+                            _VALIDATION_ERROR_KEYS.get(),
                             "time_filter_window_invalid_minutes",
                         )
                     else:
@@ -1037,7 +1249,7 @@ def validate_trade_filter(
                                 errors,
                                 f"trade_filter.time_filter.window must have non-zero length "
                                 f"(start == end is not allowed), got {w!r}",
-                                error_keys,
+                                _VALIDATION_ERROR_KEYS.get(),
                                 "time_filter_window_zero_length",
                             )
                         elif start_total > end_total:
@@ -1045,10 +1257,204 @@ def validate_trade_filter(
                                 errors,
                                 f"trade_filter.time_filter.window wrap-around (start > end) "
                                 f"is not supported in v1, got {w!r}",
-                                error_keys,
+                                _VALIDATION_ERROR_KEYS.get(),
                                 "time_filter_window_cross_midnight",
                             )
         # Rule 3: time_filter.enabled=false -> no deep validation (disabled-path)
+
+def _validate_caller_pipeline_gate(tf: TradeFilterConfig, errors: list[str], raw_user_keys: frozenset[tuple[str, ...]], caller_pipeline: str) -> bool:
+    # ------------------------------------------------------------------
+    # WP-T3 step 6 — caller_pipeline domain check
+    # ------------------------------------------------------------------
+    if caller_pipeline not in _CALLER_PIPELINE_DOMAIN:
+        errors.append(
+            f"validate_trade_filter: unknown caller_pipeline {caller_pipeline!r}; "
+            f"supported: {sorted(_CALLER_PIPELINE_DOMAIN)}"
+        )
+        return False
+
+    if (
+        getattr(tf, "enabled", None) is True
+        and _is_zigzag_enabled_for_validation(tf, raw_user_keys)
+        and getattr(tf, "type", None) == "zigzag_st_mode"
+        and caller_pipeline not in _ZIGZAG_ST_MODE_ALLOWED_CALLERS
+    ):
+        # WP-T3 step 6 - pipeline whitelist (plan section 5.5).
+        errors.append(
+            f"trade_filter.type='zigzag_st_mode' is not supported in "
+            f"pipeline {caller_pipeline!r}; allowed pipelines: "
+            f"{sorted(_ZIGZAG_ST_MODE_ALLOWED_CALLERS)}"
+        )
+        return False
+
+    return True
+
+
+def _has_legacy_zigzag_marker(
+    tf: TradeFilterConfig,
+    raw_user_keys: frozenset[tuple[str, ...]],
+) -> bool:
+    if getattr(tf, "type", None) == "zigzag_st_mode":
+        return True
+    return any(
+        len(key) >= 3
+        and key[0] == "trade_filter"
+        and key[1] == "zigzag"
+        and key[2] != "enabled"
+        for key in raw_user_keys
+    )
+
+
+def _is_zigzag_enabled_for_validation(
+    tf: TradeFilterConfig,
+    raw_user_keys: frozenset[tuple[str, ...]],
+) -> bool:
+    if is_zigzag_enabled(tf):
+        return True
+    if not is_trade_filter_enabled(tf):
+        return False
+    zigzag = getattr(tf, "zigzag", None)
+    if zigzag is None:
+        return False
+    if ("trade_filter", "zigzag", "enabled") in raw_user_keys:
+        return False
+    return getattr(zigzag, "enabled", None) is None and _has_legacy_zigzag_marker(
+        tf, raw_user_keys
+    )
+
+
+def _has_malformed_subfilter_enabled_flags(
+    tf: TradeFilterConfig,
+    errors: list[str],
+    raw_user_keys: frozenset[tuple[str, ...]],
+) -> bool:
+    before = len(errors)
+    if ("trade_filter", "zigzag", "enabled") in raw_user_keys:
+        zz_enabled = getattr(getattr(tf, "zigzag", None), "enabled", None)
+        if not isinstance(zz_enabled, bool):
+            errors.append(
+                "trade_filter.zigzag.enabled must be bool (true/false), "
+                f"got {type(zz_enabled).__name__!r} ({zz_enabled!r})"
+            )
+    if ("trade_filter", "volume", "enabled") in raw_user_keys:
+        _validate_volume_block(tf, errors, raw_user_keys)
+    return len(errors) > before
+
+
+def _validate_standalone_volume_legality(
+    tf: TradeFilterConfig,
+    errors: list[str],
+    raw_user_keys: frozenset[tuple[str, ...]],
+) -> None:
+    zigzag_payload_keys = [
+        ".".join(key)
+        for key in raw_user_keys
+        if len(key) >= 3
+        and key[0] == "trade_filter"
+        and key[1] == "zigzag"
+        and key[2] != "enabled"
+    ]
+    if zigzag_payload_keys:
+        errors.append(
+            "standalone volume mode requires removing ZigZag fields other than "
+            "trade_filter.zigzag.enabled; remove "
+            f"{sorted(zigzag_payload_keys)} or set trade_filter.zigzag.enabled: true"
+        )
+
+    if ("trade_filter", "type") in raw_user_keys and tf.type == "zigzag_st_mode":
+        errors.append(
+            "trade_filter.type=zigzag_st_mode is only valid when "
+            "trade_filter.zigzag.enabled is true; remove trade_filter.type for "
+            "standalone volume mode"
+        )
+
+    if ("trade_filter", "triggers") in raw_user_keys:
+        errors.append(
+            "trade_filter.triggers is not allowed when "
+            "trade_filter.zigzag.enabled is false; remove triggers or enable ZigZag"
+        )
+
+
+def _validate_zigzag_required_blocks(
+    errors: list[str],
+    raw_user_keys: frozenset[tuple[str, ...]],
+) -> bool:
+    zigzag_present = ("trade_filter", "zigzag") in raw_user_keys
+    lifecycle_present = ("trade_filter", "lifecycle") in raw_user_keys
+
+    if not zigzag_present:
+        errors.append(
+            "trade_filter.zigzag block is required when trade_filter.zigzag.enabled is true"
+        )
+    if not lifecycle_present:
+        errors.append(
+            "trade_filter.lifecycle block is required when trade_filter.zigzag.enabled is true"
+        )
+    return zigzag_present and lifecycle_present
+
+
+def _validate_subfilter_legality_dispatch(
+    tf: TradeFilterConfig,
+    errors: list[str],
+    raw_user_keys: frozenset[tuple[str, ...]],
+) -> None:
+    if not is_trade_filter_enabled(tf):
+        return
+
+    if _has_malformed_subfilter_enabled_flags(tf, errors, raw_user_keys):
+        return
+
+    zigzag_enabled = _is_zigzag_enabled_for_validation(tf, raw_user_keys)
+    volume_enabled = is_volume_enabled(tf)
+
+    if zigzag_enabled and not volume_enabled:
+        if not _validate_zigzag_required_blocks(errors, raw_user_keys):
+            return
+        _validate_zigzag_block(tf, errors, raw_user_keys)
+        _validate_lifecycle_block(tf, errors, raw_user_keys)
+        _validate_triggers_block(tf, errors, raw_user_keys)
+        _validate_time_filter_block(tf, errors, raw_user_keys)
+    elif zigzag_enabled and volume_enabled:
+        if not _validate_zigzag_required_blocks(errors, raw_user_keys):
+            return
+        _validate_zigzag_block(tf, errors, raw_user_keys)
+        _validate_lifecycle_block(tf, errors, raw_user_keys)
+        _validate_triggers_block(tf, errors, raw_user_keys)
+        _validate_time_filter_block(tf, errors, raw_user_keys)
+        _validate_volume_block(tf, errors, raw_user_keys)
+    elif not zigzag_enabled and volume_enabled:
+        _validate_standalone_volume_legality(tf, errors, raw_user_keys)
+        if ("trade_filter", "lifecycle") in raw_user_keys:
+            _validate_lifecycle_block(tf, errors, raw_user_keys)
+        _validate_time_filter_block(tf, errors, raw_user_keys)
+        _validate_volume_block(tf, errors, raw_user_keys)
+    else:
+        errors.append(
+            "at least one subfilter must be enabled: set "
+            "trade_filter.zigzag.enabled: true or trade_filter.volume.enabled: true"
+        )
+
+
+def validate_trade_filter(
+    tf: TradeFilterConfig,
+    errors: list[str],
+    raw_user_keys: frozenset[tuple[str, ...]],
+    caller_pipeline: str = "wf_grid",
+    error_keys: Optional[list[str]] = None,
+) -> None:
+    """Validate the trade_filter block.
+
+    Push-style: appends error strings to ``errors``. Caller raises ConfigError
+    if ``errors`` is non-empty after the call. Returns None.
+    """
+    token = _VALIDATION_ERROR_KEYS.set(error_keys)
+    try:
+        should_continue = _validate_root_enabled_and_type(tf, errors, raw_user_keys)
+        if should_continue:
+            _validate_subfilter_legality_dispatch(tf, errors, raw_user_keys)
+        _validate_caller_pipeline_gate(tf, errors, raw_user_keys, caller_pipeline)
+    finally:
+        _VALIDATION_ERROR_KEYS.reset(token)
 
 
 # ---------------------------------------------------------------------------
@@ -1217,10 +1623,17 @@ __all__ = [
     "TradeFilterLifecycleConfig",
     "TradeFilterDiagnosticsConfig",
     "TradeFilterTimeFilterConfig",
+    "TradeFilterVolumeConfig",
     "validate_trade_filter",
     "collect_raw_user_keys",
     "collect_trade_filter_unknown_keys",
     "build_trade_filter_config_from_raw",
+    "is_trade_filter_enabled",
+    "is_zigzag_enabled",
+    "is_volume_enabled",
+    "resolve_zigzag_enabled_in_place",
+    "resolve_volume_enabled_in_place",
+    "resolve_volume_defaults_in_place",
     "TRADE_FILTER_ALLOWED_KEYS",
     "resolve_zigzag_mode",
     "resolve_trade_filter_mode_in_place",

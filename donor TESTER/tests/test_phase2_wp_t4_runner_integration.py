@@ -88,6 +88,7 @@ def _make_trade_filter_config(
         enabled=True,
         type="zigzag_st_mode",
         zigzag=TradeFilterZigZagConfig(
+            enabled=True,
             reversal_threshold=reversal_threshold,
             local_window=local_window,
             candidate_trigger_threshold=candidate_trigger_threshold,
@@ -748,6 +749,7 @@ class TestRunnerEchoesImmediateOffFlag:
         return TradeFilterConfig(
             enabled=True, type="zigzag_st_mode",
             zigzag=TradeFilterZigZagConfig(
+                enabled=True,
                 reversal_threshold=0.03, local_window=20,
                 candidate_trigger_threshold=0.4,
             ),

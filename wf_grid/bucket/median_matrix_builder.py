@@ -614,6 +614,7 @@ def _compute_derived_metrics(
         c_dd = c_dd.clip(0.0, 1.0)
 
     balanced = w * c_presence + w * c_pnl + w * c_dd
+    bdf = bdf.copy()
     bdf["bucket_balanced_score"] = balanced.round(6)
 
     return bdf

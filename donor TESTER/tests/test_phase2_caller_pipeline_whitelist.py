@@ -51,6 +51,7 @@ def _build_enabled_zigzag_cfg() -> tuple[TradeFilterConfig, frozenset]:
         enabled=True,
         type="zigzag_st_mode",
         zigzag=TradeFilterZigZagConfig(
+            enabled=True,
             reversal_threshold=0.04,
             candidate_trigger_threshold=0.4,
             candidate_trigger_quantile=None,

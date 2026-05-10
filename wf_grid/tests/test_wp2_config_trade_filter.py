@@ -275,7 +275,7 @@ class TestEnabledKey:
 # ---------------------------------------------------------------------------
 
 class TestTypeWhenEnabled:
-    def test_type_absent_reject(self, tmp_path):
+    def test_type_absent_no_longer_rejects_by_itself(self, tmp_path):
         _assert_error(
             tmp_path,
             _MINIMAL_BASE + (
@@ -286,7 +286,7 @@ class TestTypeWhenEnabled:
                 "  lifecycle:\n    freeze_confirmed_legs: 3\n"
                 "    stop_check: confirm_bar_only\n    stopping_exit: opposite_st_flip\n"
             ),
-            "type is required",
+            "candidate_trigger_threshold is required",
         )
 
     def test_unsupported_type_reject(self, tmp_path):

@@ -16,6 +16,7 @@ from __future__ import annotations
 import copy
 import math
 import sys
+import warnings
 from pathlib import Path
 from typing import Any, Optional
 
@@ -54,6 +55,7 @@ from wf_grid.config.schema import (
     StatusConfig,
     BucketConfig,
     ExecutionConfig,
+    ExportConfig,
     TradeFilterConfig,
     TradeFilterZigZagConfig,
     TradeFilterTriggersConfig,
@@ -100,6 +102,7 @@ _ALLOWED_KEYS: dict[str, set[str]] = {
         "trade_filter",
         # WP-PAR: parallelization controls (plan В§1.3)
         "execution",
+        "export",
     },
     "data": {"file_path", "periods_per_year", "annualization_basis"},
     "optimization": {
@@ -157,6 +160,9 @@ _ALLOWED_KEYS: dict[str, set[str]] = {
         "chunksize",
         "fallback_to_sequential",
     },
+    "export": {
+        "retain_per_bar_filter_diagnostics",
+    },
     # --- trade_filter subtree (plan В§6.4; Appendix A v1.1 В§11) ---
     "trade_filter": {
         "enabled",
@@ -166,12 +172,14 @@ _ALLOWED_KEYS: dict[str, set[str]] = {
         "lifecycle",
         "diagnostics",
         "time_filter",
+        "volume",
     },
     "trade_filter.time_filter": {
         "enabled",
         "window",
     },
     "trade_filter.zigzag": {
+        "enabled",
         "global_stats_source",
         "leg_height_mode",
         "reversal_threshold",
@@ -208,6 +216,16 @@ _ALLOWED_KEYS: dict[str, set[str]] = {
     "trade_filter.diagnostics": {
         "export_state_columns",
         "export_trigger_columns",
+    },
+    "trade_filter.volume": {
+        "enabled",
+        "mode",
+        "short_window",
+        "baseline_window",
+        "threshold_ratio",
+        "regime_low_ratio",
+        "regime_high_ratio",
+        "direction_lookback_bars",
     },
 }
 
@@ -259,6 +277,7 @@ class ConfigError(ValueError):
 # Phase 1 plan В§6.4.1 / Phase 2 plan В§5.1 В§14 WP-T2 step 0b.
 from supertrend_optimizer.core.trade_filter_config import (  # noqa: E402
     collect_raw_user_keys as _collect_raw_keys,
+    collect_trade_filter_unknown_keys as _collect_trade_filter_unknown_keys,
 )
 
 
@@ -289,11 +308,16 @@ def load_grid_config(path: str, ohlc_data: Optional[pd.DataFrame] = None) -> Gri
     """
     raw = _read_yaml(path)
     _validate_strict_schema(raw)
+    _validate_trade_filter_unknown_keys(raw)
     # Collect raw key-paths BEFORE _build_config fills in dataclass defaults; this
     # preserves the distinction between "user supplied the key" and "absent / default".
     # Required by plan В§6.4.1 for the numeric-threshold + explicit-quantile rule.
     raw_user_keys = _collect_raw_keys(raw)
     cfg = _build_config(raw)
+
+    _resolve_zigzag_enabled_in_place(cfg, raw_user_keys)
+    _resolve_volume_enabled_in_place(cfg, raw_user_keys)
+
     _validate_config(cfg, raw_user_keys=raw_user_keys)
 
     # v3 WP-V3-2: resolve effective zigzag mode in-place after validation so
@@ -302,11 +326,30 @@ def load_grid_config(path: str, ohlc_data: Optional[pd.DataFrame] = None) -> Gri
     _resolve_exit_off_mode_in_place(cfg, raw_user_keys)
     _resolve_exit_b_immediate_off_in_place(cfg, raw_user_keys)
     _resolve_time_filter_in_place(cfg, raw_user_keys)
+    _resolve_volume_defaults_in_place(cfg, raw_user_keys)
 
     if ohlc_data is not None:
         cfg = _resolve_periods_per_year(cfg, ohlc_data)
 
     return cfg
+
+
+def _validate_trade_filter_unknown_keys(raw: dict[str, Any]) -> None:
+    """Run the shared trade_filter unknown-key collector as an explicit phase."""
+    tf_raw = raw.get("trade_filter")
+    if tf_raw is None:
+        return
+    if not isinstance(tf_raw, dict):
+        raise ConfigError(
+            f"trade_filter must be a YAML mapping, got "
+            f"{type(tf_raw).__name__!r}"
+        )
+    errors = _collect_trade_filter_unknown_keys(tf_raw, "trade_filter")
+    if errors:
+        raise ConfigError(
+            "trade_filter schema validation failed:\n"
+            + "\n".join(f"  - {e}" for e in errors)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -360,6 +403,13 @@ def _build_config(raw: dict[str, Any]) -> GridConfig:
     scoring_raw = raw.get("scoring", {})
     status_raw = raw.get("status", {})
     bucket_raw = raw.get("bucket", {})
+    export_raw = raw.get("export", {})
+    if export_raw is None:
+        export_raw = {}
+    elif not isinstance(export_raw, dict):
+        raise ConfigError(
+            f"export must be a YAML mapping, got {type(export_raw).__name__!r}"
+        )
 
     # data
     file_path = data_raw.get("file_path", "")
@@ -451,6 +501,11 @@ def _build_config(raw: dict[str, Any]) -> GridConfig:
         chunksize=ex_raw.get("chunksize", None),
         fallback_to_sequential=ex_raw.get("fallback_to_sequential", False),
     )
+    export = ExportConfig(
+        retain_per_bar_filter_diagnostics=export_raw.get(
+            "retain_per_bar_filter_diagnostics", False
+        ),
+    )
 
     return GridConfig(
         data=DataConfig(
@@ -521,6 +576,7 @@ def _build_config(raw: dict[str, Any]) -> GridConfig:
         ),
         trade_filter=trade_filter,
         execution=execution,
+        export=export,
     )
 
 
@@ -586,7 +642,28 @@ from supertrend_optimizer.core.trade_filter_config import (  # noqa: E402
     resolve_exit_off_mode_in_place as _resolve_exit_off_mode_shared,
     resolve_exit_b_immediate_off_in_place as _resolve_exit_b_immediate_off_shared,
     resolve_time_filter_in_place as _resolve_time_filter_shared,
+    resolve_zigzag_enabled_in_place as _resolve_zigzag_enabled_shared,
+    resolve_volume_enabled_in_place as _resolve_volume_enabled_shared,
+    resolve_volume_defaults_in_place as _resolve_volume_defaults_shared,
 )
+
+
+def _resolve_zigzag_enabled_in_place(
+    cfg: GridConfig,
+    raw_user_keys: frozenset[tuple[str, ...]],
+) -> None:
+    """Phase 3 resolver hook for ``trade_filter.zigzag.enabled``."""
+    _resolve_zigzag_enabled_shared(cfg.trade_filter, raw_user_keys)
+    return
+
+
+def _resolve_volume_enabled_in_place(
+    cfg: GridConfig,
+    raw_user_keys: frozenset[tuple[str, ...]],
+) -> None:
+    """Phase 3 resolver hook for ``trade_filter.volume.enabled``."""
+    _resolve_volume_enabled_shared(cfg.trade_filter, raw_user_keys)
+    return
 
 
 def _resolve_trade_filter_mode_in_place(
@@ -632,6 +709,15 @@ def _resolve_time_filter_in_place(
 ) -> None:
     """Materialise parsed time-window fields when time_filter.enabled=True."""
     _resolve_time_filter_shared(cfg.trade_filter, raw_user_keys)
+    return
+
+
+def _resolve_volume_defaults_in_place(
+    cfg: GridConfig,
+    raw_user_keys: frozenset[tuple[str, ...]],
+) -> None:
+    """Phase 5 default hook for future volume config."""
+    _resolve_volume_defaults_shared(cfg.trade_filter, raw_user_keys)
     return
 
 
@@ -936,6 +1022,14 @@ def _validate_config(
                 f"got {ex.chunksize!r}"
             )
 
+    # export
+    exp = cfg.export
+    if not isinstance(exp.retain_per_bar_filter_diagnostics, bool):
+        errors.append(
+            "export.retain_per_bar_filter_diagnostics must be bool, got "
+            f"{type(exp.retain_per_bar_filter_diagnostics).__name__!r}"
+        )
+
     # trade_filter (WP2; plan В§6.5; Appendix A v1.1 В§11-В§11.3, В§15.6)
     if cfg.trade_filter is not None:
         _ruk = raw_user_keys if raw_user_keys is not None else frozenset()
@@ -945,6 +1039,12 @@ def _validate_config(
         raise ConfigError("Config validation failed:\n" + "\n".join(f"  - {e}" for e in errors))
 
     # Compatibility warnings (not errors) вЂ” issued after validation passes
+    if cfg.export.retain_per_bar_filter_diagnostics:
+        warnings.warn(
+            "retain_per_bar_filter_diagnostics=true may increase memory and IPC usage",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     _warn_bucket_step_compatibility(cfg)
 
 

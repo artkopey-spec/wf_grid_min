@@ -180,6 +180,7 @@ def _period_result(filter_diagnostics, trades_df=None):
 def _enabled_cfg(*, export_state_columns=True, export_trigger_columns=True):
     return SimpleNamespace(
         enabled=True,
+        zigzag=SimpleNamespace(enabled=True),
         diagnostics=SimpleNamespace(
             export_state_columns=export_state_columns,
             export_trigger_columns=export_trigger_columns,

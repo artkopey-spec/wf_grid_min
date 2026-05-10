@@ -30,6 +30,7 @@ __all__ = [
     "INVALID_METRIC_VALUE",
     "MAX_VALID_METRIC",
     "ExecutionConfig",
+    "ExportConfig",
 ]
 
 
@@ -172,6 +173,11 @@ class ExecutionConfig:
     fallback_to_sequential: bool = False
 
 
+@dataclass
+class ExportConfig:
+    retain_per_bar_filter_diagnostics: bool = False
+
+
 # ---------------------------------------------------------------------------
 # Trade filter dataclasses — re-exported from active donor (WP-T2 step 0b shim)
 #
@@ -194,6 +200,7 @@ from supertrend_optimizer.core.trade_filter_config import (  # noqa: E402,F401
     TradeFilterLifecycleConfig,
     TradeFilterDiagnosticsConfig,
     TradeFilterTimeFilterConfig,
+    TradeFilterVolumeConfig,
     resolve_zigzag_mode,
 )
 
@@ -220,6 +227,7 @@ class GridConfig:
 
     # WP-PAR: parallelization controls (plan §1.2)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
+    export: ExportConfig = field(default_factory=ExportConfig)
 
     # Resolved at load time (not from YAML directly)
     resolved_periods_per_year: Optional[float] = None

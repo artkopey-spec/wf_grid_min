@@ -1249,6 +1249,7 @@ class TestApplyTimeFilterZigZagCandidateState:
 
         cfg = _FilterCfgDouble(
             zigzag=TradeFilterZigZagConfig(
+                enabled=True,
                 reversal_threshold=0.001,
                 candidate_trigger_threshold=0.001,
                 local_window=2,
@@ -1320,6 +1321,7 @@ class TestApplyTimeFilterZigZagCandidateState:
 
         cfg_enabled = _FilterCfgDouble(
             zigzag=TradeFilterZigZagConfig(
+                enabled=True,
                 reversal_threshold=0.001,
                 candidate_trigger_threshold=0.001,
                 local_window=2,
@@ -1330,6 +1332,7 @@ class TestApplyTimeFilterZigZagCandidateState:
         )
         cfg_disabled = _FilterCfgDouble(
             zigzag=TradeFilterZigZagConfig(
+                enabled=True,
                 reversal_threshold=0.001,
                 candidate_trigger_threshold=0.001,
                 local_window=2,

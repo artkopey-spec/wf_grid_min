@@ -34,6 +34,8 @@ warmup_period_auto:  true      # авто: ~10% данных, clamp 100–400, >
 # Явное число вместо auto — если нужно зафиксировать нормализацию вручную.
 periods_per_year:    auto
 market:              stocks
+annualization_basis: trading      # calendar | trading (можно omit — тогда только market/ppy)
+execution_model:     open_to_open # единственный поддерживаемый литерал; можно omit (= null)
 min_trades_required: 5         # минимум сделок для валидных Sharpe/Sortino/CAGR
 
 
@@ -73,11 +75,16 @@ export:
 #
 # Spec reference: docs/zigzag_st_trade_filter_spec_v1_1.txt §11
 #
+# Полный набор ключей trade_filter (как в WF config): volume оставлен выключенным,
+# чтобы типовой CSV без колонки volume не ломал запуск; включите volume.enabled: true
+# и убедитесь, что в данных есть столбец volume.
+#
 trade_filter:
   enabled: true
   type: zigzag_st_mode
 
   zigzag:
+    enabled: true                          # явно; при отсутствии ключа резолвится по маркерам
     global_stats_source: full_dataset      # only full_dataset supported in v1
     leg_height_mode: pct                   # fractions of price (NOT 0–100)
     reversal_threshold: 0.0005              # 0.1% доли цены; required when enabled
@@ -107,3 +114,13 @@ trade_filter:
   time_filter:
     enabled: true
     window: "09:00-19:00"
+
+  volume:
+    enabled: false                       # true — нужен столбец volume в CSV
+    mode: volume_A                       # volume_A | volume_B
+    short_window: 5
+    baseline_window: 20
+    threshold_ratio: 1.05
+    regime_low_ratio: 0.8
+    regime_high_ratio: 1.2
+    direction_lookback_bars: 3

@@ -115,7 +115,7 @@ _TRAIN_COLUMNS_BASE: List[str] = [
 
 # Shared by both OOS and train exports.  Order: §10.6.4 required fields
 # first, then additional informational fields.
-_FILTER_SUMMARY_COLUMNS: List[str] = [
+_ZIGZAG_FILTER_SUMMARY_COLUMNS: List[str] = [
     # §10.6.4 required
     "filter_states_visited",
     "n_bars_in_off",
@@ -141,6 +141,44 @@ _FILTER_SUMMARY_COLUMNS: List[str] = [
     "trigger_count_both",
     "stopping_started_count",
 ]
+
+_ZIGZAG_DISCRIMINATOR_KEYS = frozenset(
+    {
+        "trigger_count_candidate_threshold",
+        "trigger_count_confirmed_median",
+        "trigger_count_both",
+        "median_stop_triggered_count",
+        "zz_leg_stop_triggered_count",
+        "exit_off_mode",
+        "exit_off_zz_leg_count",
+        "exit_b_immediate_off",
+        "exit_b_immediate_off_count",
+        "stopping_started_count",
+    }
+)
+
+_VOLUME_FILTER_SUMMARY_COLUMNS: List[str] = [
+    "n_volume_blocked_start_attempts",
+    "n_volume_blocked_start_attempts_long",
+    "n_volume_blocked_start_attempts_short",
+    "n_volume_blocked_start_attempts_unknown_direction",
+    "n_volume_warmup_blocked_start_attempts",
+    "n_volume_below_baseline_blocked_start_attempts",
+    "n_volume_above_baseline_blocked_start_attempts",
+    "n_volume_baseline_zero_blocked_start_attempts",
+    "n_volume_direction_warmup_blocked_start_attempts",
+    "n_volume_unknown_direction_blocked_start_attempts",
+    "n_volume_trade_mode_disallowed_direction_blocked_start_attempts",
+    "n_volume_low_regime_bars",
+    "n_volume_normal_regime_bars",
+    "n_volume_high_regime_bars",
+    "avg_median_relative_volume",
+    "n_volume_started_cycles",
+]
+
+_FILTER_SUMMARY_COLUMNS: List[str] = (
+    _ZIGZAG_FILTER_SUMMARY_COLUMNS + _VOLUME_FILTER_SUMMARY_COLUMNS
+)
 
 # Back-compat aliases: callers that reference the old monolithic names still
 # get the correct combined list.
@@ -185,6 +223,7 @@ def _unpack_filter_summary(summary: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "trigger_count_both": "trigger_count_both",
         "stopping_started_count": "stopping_started_count",
     }
+    _summary_key_map.update({k: k for k in _VOLUME_FILTER_SUMMARY_COLUMNS})
     row: Dict[str, Any] = {k: None for k in _FILTER_SUMMARY_COLUMNS}
     for src_key, col_name in _summary_key_map.items():
         if src_key in summary:
@@ -205,6 +244,28 @@ def _has_filter_summary(grid_results: Dict[str, List[StepResult]]) -> bool:
             if getattr(sr, "filter_diagnostics_summary", None) is not None:
                 return True
     return False
+
+
+def _filter_summary_columns_for(
+    grid_results: Dict[str, List[StepResult]],
+) -> List[str]:
+    include_zigzag = False
+    include_volume = False
+    for step_results in grid_results.values():
+        for sr in step_results:
+            summary = getattr(sr, "filter_diagnostics_summary", None)
+            if not summary:
+                continue
+            if any(k in summary for k in _ZIGZAG_DISCRIMINATOR_KEYS):
+                include_zigzag = True
+            if any(k in summary for k in _VOLUME_FILTER_SUMMARY_COLUMNS):
+                include_volume = True
+    cols: List[str] = []
+    if include_zigzag:
+        cols.extend(_ZIGZAG_FILTER_SUMMARY_COLUMNS)
+    if include_volume:
+        cols.extend(_VOLUME_FILTER_SUMMARY_COLUMNS)
+    return cols
 
 
 def collect_oos_steps(
@@ -243,8 +304,9 @@ def collect_oos_steps(
         If uniqueness or completeness invariants are violated.
     """
     gp_lookup = _build_gp_lookup(grid_points)
-    include_filter = _has_filter_summary(grid_results)
-    columns = _OOS_COLUMNS_BASE + (_FILTER_SUMMARY_COLUMNS if include_filter else [])
+    filter_columns = _filter_summary_columns_for(grid_results)
+    include_filter = bool(filter_columns)
+    columns = _OOS_COLUMNS_BASE + filter_columns
 
     rows = []
 
@@ -352,8 +414,9 @@ def collect_train_steps(
         step_train_long.
     """
     gp_lookup = _build_gp_lookup(grid_points)
-    include_filter = _has_filter_summary(grid_results)
-    columns = _TRAIN_COLUMNS_BASE + (_FILTER_SUMMARY_COLUMNS if include_filter else [])
+    filter_columns = _filter_summary_columns_for(grid_results)
+    include_filter = bool(filter_columns)
+    columns = _TRAIN_COLUMNS_BASE + filter_columns
 
     rows = []
 

@@ -63,6 +63,7 @@ def _make_trade_filter_config(enabled: bool = True):
         enabled=enabled,
         type="zigzag_st_mode" if enabled else None,
         zigzag=TradeFilterZigZagConfig(
+            enabled=True,
             reversal_threshold=0.04,
             local_window=20,
             candidate_trigger_threshold=0.4,

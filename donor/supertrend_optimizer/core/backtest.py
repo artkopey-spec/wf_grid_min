@@ -27,6 +27,11 @@ from typing import Any, Dict, Optional
 import numpy as np
 
 from supertrend_optimizer.core.calculator import calculate_supertrend
+from supertrend_optimizer.core.trade_filter_config import (
+    is_trade_filter_enabled,
+    is_volume_enabled,
+    is_zigzag_enabled,
+)
 from supertrend_optimizer.utils.enums import ExecutionModel
 
 
@@ -51,6 +56,7 @@ class RawBacktestArtifacts:
     exit_bar: "Optional[int]"
     exit_drawdown: "Optional[float]"
     filter_diagnostics: "Optional[Dict[str, np.ndarray]]" = field(default=None)
+    filter_config_snapshot: Optional[dict] = None
 
 
 def generate_positions(
@@ -314,6 +320,7 @@ def run_backtest_fast(
     # NEW (WP7 / Phase 1) — ZigZag ST filter
     trade_filter_config: Any = None,
     zigzag_global_stats: Any = None,
+    volume_runtime: Any = None,
     global_offset: int = 0,
     index: Any = None,                        # NEW: trailing optional for daily_reset
 ) -> RawBacktestArtifacts:
@@ -390,12 +397,30 @@ def run_backtest_fast(
 
     # Step 2: Positions — enabled path uses FSM; disabled path uses generate_positions.
     filter_diagnostics: "Optional[Dict[str, np.ndarray]]" = None
-    filter_enabled = (
-        trade_filter_config is not None
-        and getattr(trade_filter_config, "enabled", False)
+    filter_config_snapshot: Optional[dict] = None
+    zigzag_enabled = is_zigzag_enabled(trade_filter_config)
+    volume_enabled = is_volume_enabled(trade_filter_config)
+    filter_enabled = zigzag_enabled or volume_enabled
+    zigzag_cfg = getattr(trade_filter_config, "zigzag", None)
+    volume_cfg = getattr(trade_filter_config, "volume", None)
+    subfilters_explicitly_disabled = (
+        is_trade_filter_enabled(trade_filter_config)
+        and getattr(zigzag_cfg, "enabled", None) is False
+        and (volume_cfg is None or getattr(volume_cfg, "enabled", None) is False)
     )
+    if subfilters_explicitly_disabled:
+        raise RuntimeError(
+            "at least one trade subfilter must be enabled when "
+            "trade_filter.enabled=true"
+        )
+    if zigzag_enabled and zigzag_global_stats is None:
+        raise RuntimeError(
+            "zigzag_global_stats required when trade_filter.zigzag.enabled=true"
+        )
+    if volume_enabled and volume_runtime is None:
+        raise RuntimeError("volume_runtime required when trade_filter.volume.enabled=true")
 
-    if filter_enabled:
+    if zigzag_enabled:
         # Lazy import to avoid circular dependency at module load time.
         from supertrend_optimizer.core.zigzag_st_filter import apply as _zz_apply
         filter_result = _zz_apply(
@@ -408,9 +433,27 @@ def run_backtest_fast(
             global_offset=global_offset,
             execution_model=execution_model,
             index=index,                      # NEW: propogate for daily_reset
+            volume_runtime=volume_runtime if volume_enabled else None,
         )
         positions = filter_result.positions
         filter_diagnostics = filter_result.filter_diagnostics
+        filter_config_snapshot = getattr(filter_result, "filter_config_snapshot", None)
+    elif volume_enabled:
+        from supertrend_optimizer.core.volume_only_filter import apply as _volume_apply
+
+        filter_result = _volume_apply(
+            open_prices=open_prices,
+            close=close,
+            trend=trend,
+            trade_mode=trade_mode,
+            trade_filter_config=trade_filter_config,
+            volume_runtime=volume_runtime,
+            execution_model=execution_model,
+            index=index,
+        )
+        positions = filter_result.positions
+        filter_diagnostics = filter_result.filter_diagnostics
+        filter_config_snapshot = filter_result.filter_config_snapshot
     else:
         # Disabled path — bit-identical to pre-WP7 baseline.
         positions = generate_positions(trend, trade_mode, execution_model)
@@ -481,5 +524,5 @@ def run_backtest_fast(
         exit_bar=exit_bar,
         exit_drawdown=exit_dd,
         filter_diagnostics=filter_diagnostics,
+        filter_config_snapshot=filter_config_snapshot,
     )
-

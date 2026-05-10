@@ -158,6 +158,7 @@ class _Lifecycle:
 
 @dataclass
 class _ZigZagCfg:
+    enabled: bool = True
     reversal_threshold: float = 0.02
     local_window: int = 5
     daily_reset: bool = False

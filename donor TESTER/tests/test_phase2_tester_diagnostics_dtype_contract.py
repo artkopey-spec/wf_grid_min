@@ -120,6 +120,7 @@ def _make_enabled_cfg(*, daily_reset: bool = False):
     return TradeFilterConfig(
         enabled=True, type="zigzag_st_mode",
         zigzag=TradeFilterZigZagConfig(
+            enabled=True,
             reversal_threshold=0.03,
             local_window=20,
             candidate_trigger_threshold=0.4,
@@ -344,6 +345,7 @@ class TestExitOffExactDtypeContract:
         cfg = TradeFilterConfig(
             enabled=True, type="zigzag_st_mode",
             zigzag=TradeFilterZigZagConfig(
+                enabled=True,
                 reversal_threshold=0.03, local_window=20,
                 candidate_trigger_threshold=0.4,
             ),

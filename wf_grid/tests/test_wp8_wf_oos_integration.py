@@ -104,6 +104,7 @@ class _LifecycleDouble:
 
 @dataclass
 class _ZigZagCfgDouble:
+    enabled: bool = True
     reversal_threshold: float = 0.02
     local_window: int = 5
     global_stats_source: str = "full_dataset"

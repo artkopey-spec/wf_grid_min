@@ -48,12 +48,21 @@ import logging
 import math
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Any, Dict, List, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional
 
 import numpy as np
 import pandas as pd
 
+from supertrend_optimizer.core._block_reason import select_block_reason
+from supertrend_optimizer.core._reset_events import (
+    _infer_daily_reset_event,
+    _infer_time_filter_events,
+    detect_st_flip,
+)
 from supertrend_optimizer.utils.exceptions import ConfigError
+
+if TYPE_CHECKING:
+    from supertrend_optimizer.core.volume_metrics import VolumeRuntime
 
 # Module-level logger (ТЗ v3 §11: INFO once per run for Mode B + enabled gate).
 _logger = logging.getLogger(__name__)
@@ -243,143 +252,6 @@ def _validate_close_and_threshold(
     if arr.ndim != 1 or arr.size == 0:
         return None, r
     return arr, r
-
-
-def _infer_daily_reset_event(
-    index: "Optional[pd.Index]",
-    n: int,
-    *,
-    enabled: bool,
-) -> np.ndarray:
-    """Calendar-day reset event mask (bool[n]).
-
-    Source: алгоритм нормализации заимствован 1:1 из
-    ``donor zigzag/engine/run.py:_infer_session_ids`` (plan v3 §4 / §0.9).
-    Отличия от донора:
-    - возвращает bool[]-event, а не int64[]-session_ids;
-    - short-circuit при enabled=False (baseline bit-identity, §0.5);
-    - non-monotonic / non-datetime → ConfigError (fail-closed, §0.3/§0.4).
-
-    event[t] == True означает «бар t — первый бар нового календарного дня».
-    event[0] всегда False — нет «предыдущего бара».
-    """
-    # §0.5: short-circuit ДО любых проверок индекса
-    if not enabled:
-        return np.zeros(n, dtype=bool)
-
-    # §0.4: type-gate — enabled=True требует DatetimeIndex
-    if not isinstance(index, pd.DatetimeIndex):
-        raise ConfigError(
-            "trade_filter.zigzag.daily_reset=true requires DatetimeIndex; "
-            f"got {type(index).__name__}"
-        )
-    if len(index) != n:
-        raise ConfigError(
-            f"daily_reset: index length {len(index)} != n={n}"
-        )
-
-    # §0.3: monotonic-gate — нарушение = баг данных
-    if not index.is_monotonic_increasing:
-        raise ConfigError(
-            "trade_filter.zigzag.daily_reset=true requires "
-            "monotonic-increasing DatetimeIndex; got non-monotonic"
-        )
-
-    # Нормализация — 1:1 из donor zigzag/engine/run.py:98-102.
-    # CRITICAL: tz_localize(None), не tz_convert(None) — иначе
-    # MSK 23:55 сместится в UTC 20:55 и граница полуночи сломается.
-    if index.tz is not None:
-        normalized = index.tz_localize(None).normalize()
-    else:
-        normalized = index.normalize()
-
-    days = normalized.astype("int64").to_numpy()
-    event = np.zeros(n, dtype=bool)
-    if n >= 2:
-        event[1:] = days[1:] != days[:-1]
-    # event[0] всегда False — нет «предыдущего дня»
-    return event
-
-
-def _infer_time_filter_events(
-    index: "Optional[pd.Index]",
-    n: int,
-    *,
-    enabled: bool,
-    start_h: int,
-    start_m: int,
-    end_h: int,
-    end_m: int,
-) -> "tuple[np.ndarray, np.ndarray]":
-    """Time-of-day window event masks (in_window: bool[n], reset_event: bool[n]).
-
-    docs/time_filter_plan_v1_final.txt §3.
-
-    ``in_window[t] == True``  ⟺  bar t falls within the half-open window
-    ``[start, end)``, evaluated by (hour * 60 + minute) of the bar timestamp.
-    Seconds and sub-second components of the timestamp are ignored.
-
-    ``reset_event[t] == True`` ⟺  bar t is the first bar *outside* the window
-    after at least one bar inside it (transition True → False).
-    ``reset_event[0]`` is always False — there is no previous bar.
-
-    enabled=False (short-circuit — ДО любых проверок индекса):
-        in_window  = np.ones(n, bool)
-        reset_event = np.zeros(n, bool)
-
-    enabled=True gates:
-        1. DatetimeIndex required (type-gate) → ConfigError
-        2. len(index) == n required (length-gate) → ConfigError
-        3. is_monotonic_increasing required (monotonic-gate) → ConfigError
-    """
-    # §3.2: short-circuit ДО любых проверок индекса
-    if not enabled:
-        return np.ones(n, dtype=bool), np.zeros(n, dtype=bool)
-
-    # §3.2 п.1: type-gate
-    if not isinstance(index, pd.DatetimeIndex):
-        raise ConfigError(
-            "trade_filter.time_filter.enabled=true requires DatetimeIndex; "
-            f"got {type(index).__name__}"
-        )
-    # §3.2 п.2: length-gate
-    if len(index) != n:
-        raise ConfigError(
-            f"time_filter: index length {len(index)} != n={n}"
-        )
-    # §3.2 п.3: monotonic-gate (защита от ложных границ при неупорядоченном индексе)
-    if not index.is_monotonic_increasing:
-        raise ConfigError(
-            "trade_filter.time_filter.enabled=true requires "
-            "monotonic-increasing DatetimeIndex; got non-monotonic"
-        )
-
-    # §3.2 п.4: нормализация timezone.
-    # CRITICAL: tz_localize(None), не tz_convert — иначе MSK 09:00 сместится
-    # в UTC и граница сессии сломается (зеркально daily_reset §0.3 #3).
-    if index.tz is not None:
-        idx_naive = index.tz_localize(None)
-    else:
-        idx_naive = index
-
-    # §3.2 п.5: minutes_of_day — секунды/наносекунды игнорируются (§0.3 #4)
-    minutes_of_day = idx_naive.hour * 60 + idx_naive.minute  # pandas IntegerArray-like
-
-    # §3.2 п.6-7: полуоткрытый контракт [start, end)
-    start_total = start_h * 60 + start_m
-    end_total = end_h * 60 + end_m
-    in_window = np.asarray(
-        (minutes_of_day >= start_total) & (minutes_of_day < end_total),
-        dtype=bool,
-    )
-
-    # §3.2 п.8: reset_event на баре перехода True → False
-    reset_event = np.zeros(n, dtype=bool)
-    if n >= 2:
-        reset_event[1:] = in_window[:-1] & ~in_window[1:]
-    # reset_event[0] всегда False — нет «предыдущего» бара
-
-    return in_window, reset_event
 
 
 def _run_close_only_zigzag_pass(
@@ -1223,43 +1095,12 @@ class ZigZagSTFilterResult:
     positions: np.ndarray
     filter_diagnostics: Dict[str, np.ndarray]
     internal_legs: Optional[List[ConfirmedLeg]] = None
+    filter_config_snapshot: Optional[dict] = None
 
 
 # ---------------------------------------------------------------------------
 # WP6 — ST flip detection (plan §5.5 / WP6, spec §3.3, §17.13–§17.14).
 # ---------------------------------------------------------------------------
-
-def detect_st_flip(prev_trend: int, curr_trend: int) -> int:
-    """Return the ST flip direction at close(t).
-
-    Public WP6 contract for ST flip detection from ``trend``.  The only
-    tradable flips are between ``+1`` and ``-1``.  ``0 -> ±1`` is an
-    initialization transition (SuperTrend bootstrap) and is **not** a
-    tradable flip; ``±1 -> 0`` and ``0 -> 0`` are likewise non-tradable.
-
-    Parameters
-    ----------
-    prev_trend : int
-        SuperTrend direction at ``close(t-1)`` (``-1``, ``0`` or ``+1``).
-    curr_trend : int
-        SuperTrend direction at ``close(t)`` (``-1``, ``0`` or ``+1``).
-
-    Returns
-    -------
-    int
-        - ``+1``: long flip   (prev=-1, curr=+1)
-        - ``-1``: short flip  (prev=+1, curr=-1)
-        - ``0``:  no flip / non-tradable transition
-
-    Notes
-    -----
-    Plan reference:  §5.5, WP6.
-    Spec  reference: Appendix A v1.1 §3.3, §17.13–§17.14.
-    """
-    if prev_trend in (1, -1) and curr_trend in (1, -1) and prev_trend != curr_trend:
-        return curr_trend
-    return 0
-
 
 def _is_first_flip_allowed(flip_dir: int, trade_mode: str) -> bool:
     """First ST flip allowance in ``WAIT_FIRST_ST_FLIP`` (plan §5.2 / spec §9).
@@ -1394,6 +1235,120 @@ def _resolve_trigger_toggles(trade_filter_config: Any) -> tuple[bool, bool]:
     return a_enabled, b_enabled
 
 
+class _LifecycleStartFromOffResult(NamedTuple):
+    state: ZigZagFSMState
+    trigger_source: str
+    held_pos: int
+    confirmed_legs_since_start: int
+    zz_legs_since_lifecycle_start: int
+    immediate_used_this_bar: bool
+
+
+def _try_lifecycle_start_from_off(
+    *,
+    t: int,
+    state: ZigZagFSMState,
+    resolved_mode: str,
+    candidate_component_ok: bool,
+    b_component_ok: bool,
+    immediate_allowed: bool,
+    is_exit_b: bool,
+    cand_dir_t: int,
+    volume_allowed: bool = True,
+) -> "Optional[_LifecycleStartFromOffResult]":
+    """Resolve mode-specific lifecycle starts from OFF only."""
+    if state != ZigZagFSMState.OFF:
+        return None
+    if not volume_allowed:
+        return None
+
+    if resolved_mode == "A":
+        if candidate_component_ok:
+            return _wait_lifecycle_start_from_off(_TRIGGER_SOURCE_A)
+        return None
+
+    if resolved_mode == "B":
+        if b_component_ok:
+            return _wait_lifecycle_start_from_off(_TRIGGER_SOURCE_B)
+        return None
+
+    if resolved_mode == "C":
+        if candidate_component_ok and immediate_allowed:
+            return _immediate_lifecycle_start_from_off(
+                is_exit_b=is_exit_b,
+                cand_dir_t=cand_dir_t,
+                trigger_source=_TRIGGER_SOURCE_A,
+            )
+        return None
+
+    if resolved_mode == "A+B":
+        a_fired = candidate_component_ok
+        b_fired = b_component_ok
+        if a_fired and b_fired:
+            return _wait_lifecycle_start_from_off(_TRIGGER_SOURCE_BOTH)
+        if a_fired:
+            return _wait_lifecycle_start_from_off(_TRIGGER_SOURCE_A)
+        if b_fired:
+            return _wait_lifecycle_start_from_off(_TRIGGER_SOURCE_B)
+        return None
+
+    if resolved_mode == "C+B":
+        c_fired = candidate_component_ok
+        b_fired = b_component_ok
+        if c_fired and immediate_allowed:
+            return _immediate_lifecycle_start_from_off(
+                is_exit_b=is_exit_b,
+                cand_dir_t=cand_dir_t,
+                trigger_source=_TRIGGER_SOURCE_BOTH if b_fired else _TRIGGER_SOURCE_A,
+            )
+        if c_fired and (not immediate_allowed) and b_fired:
+            return _wait_lifecycle_start_from_off(_TRIGGER_SOURCE_BOTH)
+        if (not c_fired) and b_fired:
+            return _wait_lifecycle_start_from_off(_TRIGGER_SOURCE_B)
+        return None
+
+    raise ConfigError(
+        f"apply(): unknown resolved ZigZag mode {resolved_mode!r}; "
+        f"expected one of: A, B, C, A+B, C+B"
+    )
+
+
+def _wait_lifecycle_start_from_off(trigger_source: str) -> _LifecycleStartFromOffResult:
+    return _LifecycleStartFromOffResult(
+        state=ZigZagFSMState.WAIT_FIRST_ST_FLIP,
+        trigger_source=trigger_source,
+        held_pos=0,
+        confirmed_legs_since_start=-1,
+        zz_legs_since_lifecycle_start=-1,
+        immediate_used_this_bar=False,
+    )
+
+
+def _immediate_lifecycle_start_from_off(
+    *,
+    is_exit_b: bool,
+    cand_dir_t: int,
+    trigger_source: str,
+) -> _LifecycleStartFromOffResult:
+    if is_exit_b:
+        return _LifecycleStartFromOffResult(
+            state=ZigZagFSMState.ST_COUNTING_ZZ_LEGS,
+            trigger_source=trigger_source,
+            held_pos=cand_dir_t,
+            confirmed_legs_since_start=-1,
+            zz_legs_since_lifecycle_start=0,
+            immediate_used_this_bar=True,
+        )
+    return _LifecycleStartFromOffResult(
+        state=ZigZagFSMState.ST_ACTIVE_FREEZE,
+        trigger_source=trigger_source,
+        held_pos=cand_dir_t,
+        confirmed_legs_since_start=0,
+        zz_legs_since_lifecycle_start=-1,
+        immediate_used_this_bar=True,
+    )
+
+
 def _resolve_freeze_confirmed_legs(trade_filter_config: Any) -> int:
     """Read ``lifecycle.freeze_confirmed_legs`` (plan §5 / spec §4.3)."""
     lifecycle_cfg = getattr(trade_filter_config, "lifecycle", None)
@@ -1447,6 +1402,7 @@ def apply(
     # When None, resolved from trade_filter_config.time_filter via
     # _infer_time_filter_events (docs/time_filter_plan_v1_final.txt §4.1).
     time_filter_events: "Optional[tuple[np.ndarray, np.ndarray]]" = None,
+    volume_runtime: "Optional[VolumeRuntime]" = None,
 ) -> "ZigZagSTFilterResult":
     """Run the ZigZag ST FSM and build ``filtered_positions``.
 
@@ -1663,6 +1619,55 @@ def apply(
         raise ConfigError(
             f"[BUG] apply() pre-computed n={n_pre} != "
             f"validated n={n}"
+        )
+
+    volume_condition_allowed_runtime = None
+    volume_condition_block_reason_runtime = None
+    volume_regime_runtime = None
+    volume_initial_direction_runtime = None
+    volume_median_relative_runtime = None
+    volume_condition_block_reason_labels = None
+    volume_regime_labels = None
+    volume_initial_direction_labels = None
+    if volume_runtime is not None:
+        from supertrend_optimizer.core.volume_metrics import (
+            materialize_volume_block_reason,
+            materialize_volume_initial_direction,
+            materialize_volume_regime,
+        )
+
+        volume_condition_allowed_runtime = np.asarray(
+            volume_runtime.volume_condition_allowed, dtype=bool
+        )
+        volume_condition_block_reason_runtime = np.asarray(
+            volume_runtime.volume_condition_block_reason
+        )
+        volume_regime_runtime = np.asarray(volume_runtime.volume_regime)
+        volume_initial_direction_runtime = np.asarray(
+            volume_runtime.volume_initial_direction
+        )
+        volume_median_relative_runtime = np.asarray(
+            volume_runtime.median_relative_volume, dtype=np.float64
+        )
+        _volume_arrays = {
+            "volume_condition_allowed": volume_condition_allowed_runtime,
+            "volume_condition_block_reason": volume_condition_block_reason_runtime,
+            "volume_regime": volume_regime_runtime,
+            "volume_initial_direction": volume_initial_direction_runtime,
+            "median_relative_volume": volume_median_relative_runtime,
+        }
+        for _name, _arr in _volume_arrays.items():
+            if _arr.ndim != 1 or _arr.shape[0] != n:
+                raise ConfigError(
+                    f"apply() volume_runtime.{_name} must be 1-D with length "
+                    f"n={n}; got shape={_arr.shape}"
+                )
+        volume_condition_block_reason_labels = materialize_volume_block_reason(
+            volume_condition_block_reason_runtime
+        )
+        volume_regime_labels = materialize_volume_regime(volume_regime_runtime)
+        volume_initial_direction_labels = materialize_volume_initial_direction(
+            volume_initial_direction_runtime
         )
 
     a_enabled, b_enabled = _resolve_trigger_toggles(trade_filter_config)
@@ -1980,98 +1985,52 @@ def apply(
         # bar.
         # ------------------------------------------------------------------
         immediate_used_this_bar = False
+        volume_blocked_lifecycle_start = False
         # §4.6: entry allowed only when FSM is OFF, not on reset bar, AND
         # inside the time_filter window. When time_filter is disabled,
         # in_window is all-ones (short-circuit), so no behaviour change.
         if state_at_bar_start == ZigZagFSMState.OFF and not is_reset and bool(time_filter_in_window[t]):
-            if resolved_mode == "A":
-                # §8.1: candidate_component_ok -> WAIT, source=candidate_threshold.
-                if candidate_component_ok:
-                    state = ZigZagFSMState.WAIT_FIRST_ST_FLIP
-                    trigger_source_arr[t] = _TRIGGER_SOURCE_A
-
-            elif resolved_mode == "B":
-                # §8.2: b_component_ok -> WAIT, source=confirmed_median.
-                # Duration gate is materialised but does NOT influence
-                # Mode B runtime decisions (one-shot INFO logged at init).
-                if b_component_ok:
-                    state = ZigZagFSMState.WAIT_FIRST_ST_FLIP
-                    trigger_source_arr[t] = _TRIGGER_SOURCE_B
-
-            elif resolved_mode == "C":
-                # §8.3: candidate_component_ok AND immediate_allowed
-                #   -> FREEZE or ST_COUNTING_ZZ_LEGS (exit B), held_pos=candidate_leg_direction, used=1.
-                # Pure C blocked by unknown direction/trade_mode stays OFF —
-                # NO WAIT fallback (§8.3 last paragraph).
-                if candidate_component_ok and immediate_allowed:
-                    if is_exit_b:
-                        state = ZigZagFSMState.ST_COUNTING_ZZ_LEGS
-                        held_pos = cand_dir_t
-                        zz_legs_since_lifecycle_start = 0
-                        confirmed_legs_since_start = -1
-                    else:
-                        state = ZigZagFSMState.ST_ACTIVE_FREEZE
-                        held_pos = cand_dir_t
-                        confirmed_legs_since_start = 0
-                    trigger_source_arr[t] = _TRIGGER_SOURCE_A
-                    immediate_used_this_bar = True
-                # else: stays OFF, source remains "none".
-
-            elif resolved_mode == "A+B":
-                # §8.4 table.  Gate-blocked A is not an A-source for
-                # trigger_source (candidate_component_ok already enforces
-                # gate, so a "false" component is naturally not counted).
-                a_fired = candidate_component_ok
-                b_fired = b_component_ok
-                if a_fired and b_fired:
-                    state = ZigZagFSMState.WAIT_FIRST_ST_FLIP
-                    trigger_source_arr[t] = _TRIGGER_SOURCE_BOTH
-                elif a_fired:
-                    state = ZigZagFSMState.WAIT_FIRST_ST_FLIP
-                    trigger_source_arr[t] = _TRIGGER_SOURCE_A
-                elif b_fired:
-                    state = ZigZagFSMState.WAIT_FIRST_ST_FLIP
-                    trigger_source_arr[t] = _TRIGGER_SOURCE_B
-                # else: OFF stays OFF, source remains "none".
-
-            elif resolved_mode == "C+B":
-                # §8.5 table.  C has priority over B; B-rescue applies when
-                # immediate is blocked by direction/trade_mode but B fired.
-                # Gate-blocked C is NOT a candidate source for trigger_source
-                # (the false candidate_component_ok value already excludes it).
-                c_fired = candidate_component_ok
-                b_fired = b_component_ok
-                if c_fired and immediate_allowed:
-                    # OFF -> FREEZE or ST_COUNTING_ZZ_LEGS (exit B); trigger_source = "both" if B also fired.
-                    if is_exit_b:
-                        state = ZigZagFSMState.ST_COUNTING_ZZ_LEGS
-                        held_pos = cand_dir_t
-                        zz_legs_since_lifecycle_start = 0
-                        confirmed_legs_since_start = -1
-                    else:
-                        state = ZigZagFSMState.ST_ACTIVE_FREEZE
-                        held_pos = cand_dir_t
-                        confirmed_legs_since_start = 0
-                    trigger_source_arr[t] = (
-                        _TRIGGER_SOURCE_BOTH if b_fired else _TRIGGER_SOURCE_A
+            volume_allowed = (
+                volume_condition_allowed_runtime is None
+                or bool(volume_condition_allowed_runtime[t])
+            )
+            lifecycle_start = _try_lifecycle_start_from_off(
+                t=t,
+                state=state_at_bar_start,
+                resolved_mode=resolved_mode,
+                candidate_component_ok=candidate_component_ok,
+                b_component_ok=b_component_ok,
+                immediate_allowed=immediate_allowed,
+                is_exit_b=is_exit_b,
+                cand_dir_t=cand_dir_t,
+                volume_allowed=volume_allowed,
+            )
+            if lifecycle_start is None and not volume_allowed:
+                volume_blocked_lifecycle_start = (
+                    _try_lifecycle_start_from_off(
+                        t=t,
+                        state=state_at_bar_start,
+                        resolved_mode=resolved_mode,
+                        candidate_component_ok=candidate_component_ok,
+                        b_component_ok=b_component_ok,
+                        immediate_allowed=immediate_allowed,
+                        is_exit_b=is_exit_b,
+                        cand_dir_t=cand_dir_t,
+                        volume_allowed=True,
                     )
-                    immediate_used_this_bar = True
-                elif c_fired and (not immediate_allowed) and b_fired:
-                    # B-rescue: immediate blocked, B fired → OFF -> WAIT.
-                    state = ZigZagFSMState.WAIT_FIRST_ST_FLIP
-                    trigger_source_arr[t] = _TRIGGER_SOURCE_BOTH
-                elif (not c_fired) and b_fired:
-                    # B alone (gate-blocked C is not a candidate source).
-                    state = ZigZagFSMState.WAIT_FIRST_ST_FLIP
-                    trigger_source_arr[t] = _TRIGGER_SOURCE_B
-                # else: OFF stays OFF (covers both
-                #   {C true, immediate blocked, B false}  and
-                #   {C false, B false} rows of §8.5).
-            else:
-                raise ConfigError(
-                    f"apply(): unknown resolved ZigZag mode {resolved_mode!r}; "
-                    f"expected one of: A, B, C, A+B, C+B"
+                    is not None
                 )
+            if lifecycle_start is not None:
+                state = lifecycle_start.state
+                held_pos = lifecycle_start.held_pos
+                confirmed_legs_since_start = (
+                    lifecycle_start.confirmed_legs_since_start
+                )
+                zz_legs_since_lifecycle_start = (
+                    lifecycle_start.zz_legs_since_lifecycle_start
+                )
+                trigger_source_arr[t] = lifecycle_start.trigger_source
+                immediate_used_this_bar = lifecycle_start.immediate_used_this_bar
 
         # WP-V3-7: §10.4 immediate_candidate_entry_block_reason priority.
         # Computed AFTER the dispatcher so ``immediate_used_this_bar`` is
@@ -2324,6 +2283,20 @@ def apply(
         ):
             filter_block_reason_arr[t] = "local_median_unavailable"
 
+        elif volume_blocked_lifecycle_start:
+            zigzag_reason = "none"
+            if flip_dir != 0:
+                if state == ZigZagFSMState.ST_STOPPING:
+                    zigzag_reason = "stopping_mode_no_new_entries"
+                elif state == ZigZagFSMState.OFF:
+                    zigzag_reason = "filter_off"
+                elif state == ZigZagFSMState.WAIT_FIRST_ST_FLIP:
+                    zigzag_reason = "trade_mode_disallowed_flip"
+            filter_block_reason_arr[t] = select_block_reason(
+                zigzag_reason,
+                volume_condition_block_reason_labels[t],
+            )
+
         # Priority 3-5: flip-based reasons (only when not already set
         # above and a flip event occurred on this bar).
         elif flip_dir != 0:
@@ -2415,11 +2388,24 @@ def apply(
         "immediate_candidate_entry_used": immediate_used_arr,
         "immediate_candidate_entry_block_reason": immediate_block_reason_arr,
     }
+    if volume_runtime is not None:
+        filter_diagnostics_out.update(
+            {
+                "volume_regime": volume_regime_labels,
+                "volume_condition_allowed": volume_condition_allowed_runtime,
+                "volume_condition_block_reason": volume_condition_block_reason_labels,
+                "volume_initial_direction": volume_initial_direction_labels,
+                "median_relative_volume": volume_median_relative_runtime,
+            }
+        )
 
     return ZigZagSTFilterResult(
         positions=filtered_positions,
         filter_diagnostics=filter_diagnostics_out,
         internal_legs=None,
+        filter_config_snapshot=(
+            volume_runtime.filter_config_snapshot if volume_runtime is not None else None
+        ),
     )
 
 

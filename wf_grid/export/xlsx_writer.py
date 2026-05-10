@@ -39,6 +39,7 @@ import pandas as pd
 
 from wf_grid.config.schema import GridConfig
 from wf_grid.export.summary_builder import _BLOCK_A, _BLOCK_B, _BLOCK_TAIL, _parse_grid_point_id
+from supertrend_optimizer.core.trade_filter_config import is_volume_enabled
 
 # Donor helpers (reuse per policy)
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "donor"))
@@ -157,6 +158,7 @@ def export_workbook(
     wf_slices: Optional[List[Any]] = None,
     gates_result: Optional[Any] = None,
     bucket_matrix_median: Optional[pd.DataFrame] = None,
+    step_results_oos: Optional[dict[str, list]] = None,
 ) -> Path:
     """
     Write full XLSX workbook to output_path.
@@ -234,6 +236,9 @@ def export_workbook(
             atr_bucket_step=config.bucket.atr_bucket_step,
             mult_bucket_step=config.bucket.mult_bucket_step,
         )
+
+        if config.export.retain_per_bar_filter_diagnostics:
+            _write_filter_diagnostics_sheet(writer, step_results_oos)
 
     return output_path.resolve()
 
@@ -535,6 +540,22 @@ def _write_step_sheet(
         "trigger_count_confirmed_median",
         "trigger_count_both",
         "stopping_started_count",
+        "n_volume_blocked_start_attempts",
+        "n_volume_blocked_start_attempts_long",
+        "n_volume_blocked_start_attempts_short",
+        "n_volume_blocked_start_attempts_unknown_direction",
+        "n_volume_warmup_blocked_start_attempts",
+        "n_volume_below_baseline_blocked_start_attempts",
+        "n_volume_above_baseline_blocked_start_attempts",
+        "n_volume_baseline_zero_blocked_start_attempts",
+        "n_volume_direction_warmup_blocked_start_attempts",
+        "n_volume_unknown_direction_blocked_start_attempts",
+        "n_volume_trade_mode_disallowed_direction_blocked_start_attempts",
+        "n_volume_low_regime_bars",
+        "n_volume_normal_regime_bars",
+        "n_volume_high_regime_bars",
+        "avg_median_relative_volume",
+        "n_volume_started_cycles",
     ]
 
     step_df = step_oos_long[step_oos_long["wf_step"] == step_idx].copy()
@@ -594,6 +615,44 @@ def _write_trades_sheet(
 
     format_excel_export_df(df).to_excel(writer, sheet_name=sheet_name, index=False)
     _apply_autofilter(writer, sheet_name, df)
+
+
+def _write_filter_diagnostics_sheet(
+    writer: pd.ExcelWriter,
+    step_results_oos: Optional[dict[str, list]],
+) -> None:
+    """Write retained per-bar filter diagnostics when explicitly requested."""
+    if not step_results_oos:
+        return
+
+    rows: list[dict[str, Any]] = []
+    for gp_id, step_results in step_results_oos.items():
+        for sr in step_results:
+            diag = getattr(sr, "filter_diagnostics_oos", None)
+            if not diag:
+                continue
+            n = len(next(iter(diag.values()))) if diag else 0
+            for bar_idx in range(n):
+                row = {
+                    "grid_point_id": gp_id,
+                    "wf_step": getattr(sr, "wf_step", None),
+                    "bar_index": bar_idx,
+                }
+                for key, arr in diag.items():
+                    row[str(key)] = arr[bar_idx]
+                rows.append(row)
+                if len(rows) > _ROW_LIMIT:
+                    raise ExportError(
+                        "WF_FilterDiagnostics has more than Excel's row limit; "
+                        "disable export.retain_per_bar_filter_diagnostics or "
+                        "reduce grid/window size."
+                    )
+
+    if not rows:
+        return
+    df = format_excel_export_df(pd.DataFrame(rows))
+    df.to_excel(writer, sheet_name="WF_FilterDiagnostics", index=False)
+    _apply_autofilter(writer, "WF_FilterDiagnostics", df)
 
 
 def _render_disabled_gate_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -939,4 +998,22 @@ def _config_to_dict(config: GridConfig) -> dict:
             return {k: _to_dict(v) for k, v in obj.items()}
         return obj
 
-    return _to_dict(config)
+    config_dict = _to_dict(config)
+    tf = getattr(config, "trade_filter", None)
+    if not is_volume_enabled(tf):
+        trade_filter = config_dict.get("trade_filter")
+        if isinstance(trade_filter, dict):
+            trade_filter.pop("volume", None)
+    else:
+        volume = tf.volume
+        config_dict["filter_config_snapshot"] = {
+            "volume_filter_enabled": True,
+            "volume_filter_mode": volume.mode,
+            "volume_short_window": volume.short_window,
+            "volume_baseline_window": volume.baseline_window,
+            "volume_threshold_ratio": volume.threshold_ratio,
+            "volume_regime_low_ratio": volume.regime_low_ratio,
+            "volume_regime_high_ratio": volume.regime_high_ratio,
+            "volume_direction_lookback_bars": volume.direction_lookback_bars,
+        }
+    return config_dict

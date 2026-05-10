@@ -140,6 +140,7 @@ class _Lifecycle:
 
 @dataclass
 class _ZigZagCfg:
+    enabled: bool = True
     reversal_threshold: float = 0.02
     local_window: int = 5
     global_stats_source: str = "full_dataset"
@@ -1218,10 +1219,10 @@ class TestE3FilterTradeColumnsInXLSX:
         """XLSX WF_Trades sheet must contain filter diagnostic columns."""
         if e2e_enabled_result.output_path is None:
             pytest.skip("No output path")
-        xlsx = pd.ExcelFile(e2e_enabled_result.output_path)
-        if "WF_Trades" not in xlsx.sheet_names:
-            pytest.skip("No WF_Trades sheet")
-        trades_sheet = xlsx.parse("WF_Trades")
+        with pd.ExcelFile(e2e_enabled_result.output_path) as xlsx:
+            if "WF_Trades" not in xlsx.sheet_names:
+                pytest.skip("No WF_Trades sheet")
+            trades_sheet = xlsx.parse("WF_Trades")
         if len(trades_sheet) == 0:
             pytest.skip("WF_Trades is empty")
         present = [c for c in _FILTER_TRADE_COLS if c in trades_sheet.columns]

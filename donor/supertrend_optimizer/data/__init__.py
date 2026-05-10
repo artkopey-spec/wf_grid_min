@@ -18,7 +18,7 @@ Public API:
 """
 
 from .loader import load_ohlc_csv
-from .validator import validate_ohlc_data
+from .validator import validate_ohlc_data, validate_volume_filter_data
 from .timeframe import (
     TimeframeStats,
     detect_timeframe,
@@ -33,6 +33,7 @@ __all__ = [
     "load_ohlc_csv",
     # validator
     "validate_ohlc_data",
+    "validate_volume_filter_data",
     # timeframe
     "TimeframeStats",
     "detect_timeframe",

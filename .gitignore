@@ -4,4 +4,5 @@ __pycache__/
 *.xlsx
 *.csv
 *.txt
+!docs/volume_filter_implementation_plan_tz_v5.txt
 *.yaml

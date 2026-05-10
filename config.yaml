@@ -1,106 +1,111 @@
-schema_version: 1                      # Версия схемы конфига; обязательна для strict-validator (Этап 2)
+schema_version: 1                      # Обязательна для strict-validator (Этап 2)
+# Полный перечень ключей схемы WF Grid. trade_filter.enabled=false — безопасный дефолт (WP11);
+# для активации фильтра поставьте trade_filter.enabled: true (и при exit B при необходимости
+# добавьте trade_filter.lifecycle.exit_b_immediate_off: true|false).
 
-data:                                  # Блок данных и параметров годовой нормализации
-  file_path: "data.csv"                # Путь к CSV; от каталога, из которого запущен run.py
-  periods_per_year: 252                # Сколько баров считать за год для метрик
-  annualization_basis: "trading"       # Использовать торговый календарь, не календарный
+data:                                  # Данные и годовая нормализация
+  file_path: "data.csv"                # Путь к CSV от каталога запуска run.py
+  periods_per_year: 252                 # Положительное число или "auto"
+  annualization_basis: "trading"        # null (как в доноре) | "calendar" | "trading"
 
-optimization:                          # Блок параметров перебора сетки
-  atr_period_range: [50, 60]           # Диапазон ATR period: от 20 до 40 включительно
-  multiplier_range: [6.0, 9.0]         # Диапазон множителя SuperTrend: от 1.5 до 4.0
-  multiplier_step: 0.2                 # Шаг перебора multiplier
-  # atr_period_step: 1                # Шаг перебора ATR period (int >= 1, дефолт 1).
-  #   Пример: step=4, atr=[50,60] → [50,54,58,60] (atr_max всегда включён).
-  trade_mode: "revers"                 # Реверсивный режим торговли
+optimization:                          # Сетка перебора
+  atr_period_range: [50, 60]
+  multiplier_range: [6.0, 9.0]
+  multiplier_step: 0.2
+  atr_period_step: 1                   # Целое >= 1; шаг по ATR period в сетке
+  trade_mode: "revers"                 # both | revers | long | short
 
-backtest:                              # Блок параметров самого бэктеста
-  commission: 0.0000                   # Комиссия на одно действие/операцию
-  min_trades_required: 3               # Минимум сделок для осмысленной оценки шага
-  early_exit_enabled: false            # Досрочную остановку по просадке отключаем
-  early_exit_max_drawdown: 0.50        # Порог early-exit: 50% просадки
-  early_exit_check_bars: 50            # Проверять early-exit только на первых 50 барах
+backtest:
+  commission: 0.0000
+  min_trades_required: 3
+  early_exit_enabled: false            # Для WF-сетки всегда false (искажение горизонта OOS)
+  early_exit_max_drawdown: 0.50
+  early_exit_check_bars: 50
 
-validation:                            # Блок валидации и walk-forward
-  warmup_period: 0                     # Ручной warmup не задаём
-  warmup_period_auto: true             # Warmup считать автоматически от max ATR
+validation:
+  warmup_period: 0
+  warmup_period_auto: true
+  walk_forward:
+    train_size: "90d"
+    test_size: "30d"
+    step_size: "30d"                   # null = как test_size в движке
+    scheme: "rolling"                  # rolling | expanding
+    anchor: "start"                    # start | end
+    min_train_bars: 50
+    min_test_bars: 15
 
-  walk_forward:                        # Настройки walk-forward разбиения
-    train_size: "90d"                  # Минутки: train-окно ~3 календарных месяца
-    test_size: "30d"                   # Минутки: OOS-окно ~1 календарный месяц
-    step_size: "30d"                   # Минутки: сдвиг на одно OOS-окно
-    scheme: "rolling"                  # Скользящее окно: train и test двигаются вместе
-    anchor: "start"                    # Привязка окон: "start" (от начала) или "end" (от конца ряда)
-    min_train_bars: 50                # daily data: 90d window ≈ 63 bars
-    min_test_bars: 15                 # daily data: 30d window ≈ 21 bars
-    
-gates:                                 # Блок фильтров/гейтов
-  step:                                # Фильтры на уровне каждого WF-шага
-    min_trades: 0                     # ослаблено: не режем шаги из-за числа сделок
-    max_drawdown_threshold: -10.0     # ослаблено: почти любая отрицательная просадка проходит
+gates:
+  step:
+    min_trades: 0                      # null = брать из backtest.min_trades_required
+    max_drawdown_threshold: -10.0
+  candidate:
+    positive_median_threshold: -1000.0
+    min_trades_median: 0.0
+    worst_segment_pnl_threshold: null  # null — гейт выключен
+    max_drawdown_threshold: -10.0
+    min_total_trades: 0
+    min_ok_ratio: 0.0
 
-  candidate:                           # Фильтры на уровне всей комбинации параметров
-    positive_median_threshold: -1000.0 # ослаблено: сум_pnl_pct_Median > этого порога
-    min_trades_median: 0.0            # ослаблено
-    worst_segment_pnl_threshold: null  # Худший сегмент не фильтруем, гейт отключён
-    max_drawdown_threshold: -10.0     # ослаблено (кандидат max_drawdown_Min >= порог)
-    min_total_trades: 0               # ослаблено: суммарные OOS-сделки
-    min_ok_ratio: 0.0            # Минимум 70% WF-шагов должны быть ok
+ranking:
+  mode: "gates_score"                  # legacy | gates_score
+  min_segments_for_ranking: null       # null — авто
+  sort_by: "sum_pnl_pct_Median"
+  tiebreaker: "sum_pnl_pct_Min"
 
-ranking:                               # Блок логики ранжирования кандидатов
-  mode: "gates_score"                  # Ранжировать по gate+score логике
-  min_segments_for_ranking: null       # Порог сегментов считать автоматически
-  sort_by: "sum_pnl_pct_Median"        # Основная сортировка: медианный суммарный PnL
-  tiebreaker: "sum_pnl_pct_Min"        # Тайбрейк: худший сегмент по PnL
-
-scoring:                               # Блок весов итогового seed score
-  normalization_mode: "rank"           # "minmax" (legacy) или "rank" (устойчив к выбросам)
-  min_passed_for_discrimination: 1     # Минимум passed-сегментов для дискриминации
-  low_spread_threshold: 1.0e-6         # Порог слишком малого разброса score
+scoring:
+  normalization_mode: "rank"           # minmax | rank
+  min_passed_for_discrimination: 1
+  low_spread_threshold: 1.0e-6
   score_weights:
-    sum_pnl_pct_Median:        0.42    # Вес стабильной медианной доходности
-    profitable_segments_count: 0.34    # Вес числа прибыльных сегментов
-    abs_max_drawdown_Median:   0.12    # Штраф за типичную просадку
-    abs_max_drawdown_Min:      0.12    # Штраф за хвостовой риск
+    sum_pnl_pct_Median:        0.42
+    profitable_segments_count: 0.34
+    abs_max_drawdown_Median:   0.12
+    abs_max_drawdown_Min:      0.12
 
-status:                                # Блок правил присвоения статуса шагу
-  min_meaningful_bars: 1              # Меньше 30 OOS-баров = шаг не считается осмысленным
+status:
+  min_meaningful_bars: 1               # Целое > 0
 
-bucket:                                # Блок параметров бакетизации (BucketMatrix_Median)
-  atr_bucket_step: 2                   # Шаг бакета по ATR period
-  mult_bucket_step: 0.2                # Шаг бакета по multiplier
-  min_buckets_for_median: 1            # Минимум бакетов для above-median расчёта
+bucket:
+  atr_bucket_step: 2
+  mult_bucket_step: 0.2
+  min_buckets_for_median: 1
 
-execution:                             # WP-PAR: parallelization controls (plan §1.6)
-  parallel_enabled: true               # YAML default ON; dataclass default is false
-  max_workers: null                    # null => os.cpu_count(), capped at grid size and 32
-  chunksize: null                      # Reserved for future batching; currently ignored
-  fallback_to_sequential: false        # On infra failure do NOT silently retry sequential
+execution:                             # WP-PAR — параллельный запуск сетки
+  parallel_enabled: true
+  max_workers: null                    # null → os.cpu_count() с кэпами
+  chunksize: null                      # Зарезервировано
+  fallback_to_sequential: false
 
-trade_filter:                          # Блок WP2: фильтр сделок ZigZag + SuperTrend
-  enabled: true                      # Safe rollout default (WP11 rollback contract)
+export:                                # Экспорт / сбор метрик пайплайна
+  retain_per_bar_filter_diagnostics: false
+
+trade_filter:
+  enabled: false                       # WP11: должно оставаться false в репозитории по умолчанию
   type: "zigzag_st_mode"
 
   zigzag:
-    global_stats_source: "full_dataset"  # В v1 только full_dataset
-    leg_height_mode: "pct"               # Доли цены, не 0-100
-    reversal_threshold: 0.002            # 0.5% цены; дробь в (0, 1)
-    candidate_trigger_threshold: auto    # Дробь (0-1) или auto
-    candidate_trigger_quantile: 0.80     # При auto обязательно; типично 0.7-0.9
+    enabled: true
+    global_stats_source: "full_dataset"
+    leg_height_mode: "pct"
+    reversal_threshold: 0.002
+    candidate_trigger_threshold: auto
+    candidate_trigger_quantile: 0.80   # Обязательно при threshold: auto (не смешивать с числовым threshold)
     global_median: "auto"
-    local_window: 5                      # rolling N для local_median_N
-    daily_reset: true                    # Календарный reset ZigZag/FSM при смене даты
-    mode: "A"
+    local_window: 5
+    daily_reset: true
+    mode: "A+B"                         # Явный режим v3 (A | B | C | A+B | C+B); не используйте вместе с triggers
     candidate_duration_gate:
-      enabled: false
+      enabled: true
+      max_bars: 30
 
   lifecycle:
-    freeze_confirmed_legs: 5             # Подтверждённых ног после старта lifecycle
-    stop_check: "confirm_bar_only"       # В v1 только этот литерал
-    stopping_exit: "opposite_st_flip"    # В v1 только этот литерал
-    exit_off_mode: "exit B"              # «exit B» + exit_off_zz_leg_count (int >= 1); при «exit A» count не указывать
-    exit_off_zz_leg_count: 5             # подтверждённых ZZ-ног до ST_STOPPING (exit B)
-    # при trade_filter.enabled: false ключ недопустим (validate). При exit B: true|false
-    exit_b_immediate_off: true
+    freeze_confirmed_legs: 5
+    stop_check: "confirm_bar_only"
+    stopping_exit: "opposite_st_flip"
+    exit_off_mode: "exit B"
+    exit_off_zz_leg_count: 5
+    # exit_b_immediate_off: недопустим при trade_filter.enabled: false;
+    # при включении фильтра и exit B можно задать true или false.
 
   diagnostics:
     export_state_columns: true
@@ -110,3 +115,12 @@ trade_filter:                          # Блок WP2: фильтр сделок
     enabled: false
     window: "09:00-19:00"
 
+  volume:
+    enabled: false
+    mode: "volume_A"                    # volume_A | volume_B (актуально при volume.enabled: true)
+    short_window: 5
+    baseline_window: 20
+    threshold_ratio: 1.05
+    regime_low_ratio: 0.8
+    regime_high_ratio: 1.2
+    direction_lookback_bars: 3

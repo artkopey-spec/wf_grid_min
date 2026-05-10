@@ -29,7 +29,9 @@ from typing import Any, Optional, Union
 from supertrend_optimizer.core.backtest import run_backtest_fast, RawBacktestArtifacts
 from supertrend_optimizer.core.metrics import calculate_all_metrics
 from supertrend_optimizer.core.trades import extract_trades
-from supertrend_optimizer.core.zigzag_st_filter import attach_trade_filter_diagnostics
+from supertrend_optimizer.core.filter_trade_diagnostics import (
+    attach_trade_filter_diagnostics,
+)
 from supertrend_optimizer.engine.result import BacktestResult
 from supertrend_optimizer.utils.enums import ExecutionModel
 from supertrend_optimizer.utils.time_utils import resolve_warmup_bars
@@ -61,6 +63,7 @@ def run_single_backtest(
     # NEW (WP7 / Phase 1) — ZigZag ST filter
     trade_filter_config: Any = None,
     zigzag_global_stats: Any = None,
+    volume_runtime: Any = None,
     global_offset: int = 0,
 ) -> BacktestResult:
     """
@@ -221,6 +224,7 @@ def run_single_backtest(
         precomputed_atr=precomputed_atr,
         trade_filter_config=trade_filter_config,
         zigzag_global_stats=zigzag_global_stats,
+        volume_runtime=volume_runtime,
         global_offset=global_offset,
         index=index,                          # NEW: for daily_reset
     )
@@ -231,6 +235,7 @@ def run_single_backtest(
     early_exit = _artifacts.early_exit
     exit_bar = _artifacts.exit_bar
     exit_dd = _artifacts.exit_drawdown
+    filter_config_snapshot = _artifacts.filter_config_snapshot
     
     # Step 2: Handle truncation for execution_prices and index (if early_exit=True)
     # run_backtest_fast already truncated returns/equity/positions/trend
@@ -427,7 +432,7 @@ def run_single_backtest(
         n_bars_original=n_bars_original,
         period_label="",
         filter_diagnostics=_artifacts.filter_diagnostics,
+        filter_config_snapshot=filter_config_snapshot,
     )
     
     return result
-

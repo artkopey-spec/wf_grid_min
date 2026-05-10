@@ -267,6 +267,7 @@ def _make_tf_config_with_time_filter(*, window: str = "09:00-15:00") -> Any:
         enabled=True,
         type="zigzag_st_mode",
         zigzag=TradeFilterZigZagConfig(
+            enabled=True,
             reversal_threshold=0.002,
             candidate_trigger_threshold=0.002,
             local_window=3,

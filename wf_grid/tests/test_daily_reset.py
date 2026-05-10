@@ -118,12 +118,14 @@ class _LifecycleDouble:
 
 @dataclass
 class _ZigZagDouble:
+    enabled: bool = True
     daily_reset: bool = False
     local_window: int = 5
 
 
 @dataclass
 class _FilterCfgDouble:
+    enabled: bool = True
     zigzag: _ZigZagDouble = field(default_factory=_ZigZagDouble)
     triggers: _TriggersDouble = field(default_factory=_TriggersDouble)
     lifecycle: _LifecycleDouble = field(default_factory=_LifecycleDouble)
@@ -269,6 +271,7 @@ def _make_daily_reset_trade_filter(*, daily_reset: bool = True) -> TradeFilterCo
         enabled=True,
         type="zigzag_st_mode",
         zigzag=TradeFilterZigZagConfig(
+            enabled=True,
             reversal_threshold=0.03,
             candidate_trigger_threshold=0.01,
             local_window=3,

@@ -153,6 +153,7 @@ class BacktestResult:
 
     # ZigZag ST filter diagnostics (WP7).  None on disabled path.
     filter_diagnostics: "Optional[Dict[str, np.ndarray]]" = field(default=None)
+    filter_config_snapshot: Optional[dict] = None
 
     def __post_init__(self) -> None:
         """Validate internal invariants after construction.
@@ -237,4 +238,3 @@ class BacktestResult:
                 raise ConfigError(
                     f"BacktestResult dtype contract violated (Plan v3 §7): {_msg}"
                 )
-

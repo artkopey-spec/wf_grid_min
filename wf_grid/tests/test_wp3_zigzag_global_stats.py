@@ -101,6 +101,7 @@ def _make_filter_config(
         enabled=True,
         type="zigzag_st_mode",
         zigzag=TradeFilterZigZagConfig(
+            enabled=True,
             reversal_threshold=reversal_threshold,
             candidate_trigger_threshold=candidate_trigger_threshold,
             candidate_trigger_quantile=candidate_trigger_quantile,

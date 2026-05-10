@@ -75,7 +75,10 @@ import yaml  # noqa: E402
 
 from supertrend_optimizer.cli.tester import load_tester_config, merge_cli_and_config  # noqa: E402
 from supertrend_optimizer.data.loader import load_ohlc_csv  # noqa: E402
-from supertrend_optimizer.data.validator import validate_ohlc_data  # noqa: E402
+from supertrend_optimizer.data.validator import (  # noqa: E402
+    validate_ohlc_data,
+    validate_volume_filter_data,
+)
 from supertrend_optimizer.data.timeframe import (  # noqa: E402
     detect_timeframe,
     resolve_periods_per_year_from_config,
@@ -85,7 +88,15 @@ from supertrend_optimizer.io.excel_tester import (  # noqa: E402
     export_tester_results,
     export_equal_blocks_results,
 )
+from supertrend_optimizer.core.volume_metrics import (  # noqa: E402
+    _warn_if_volume_baseline_window_large,
+    build_volume_global_metrics,
+)
 from supertrend_optimizer.core.zigzag_st_filter import build_zigzag_global_stats  # noqa: E402
+from supertrend_optimizer.core.trade_filter_config import (  # noqa: E402
+    is_volume_enabled,
+    is_zigzag_enabled,
+)
 from supertrend_optimizer.testing.runner import run_all_periods, run_equal_blocks  # noqa: E402
 from supertrend_optimizer.testing.signal_events import build_signal_events  # noqa: E402
 from supertrend_optimizer.utils.config import load_config  # noqa: E402
@@ -149,6 +160,7 @@ def main() -> None:
     try:
         df = load_ohlc_csv(args.csv)
         df = validate_ohlc_data(df)
+        df = validate_volume_filter_data(df, cfg.get("trade_filter"))
     except (FileNotFoundError, DataValidationError, pd.errors.ParserError, ValueError) as e:
         print(f"Data error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -212,7 +224,8 @@ def main() -> None:
     # base_params also carries it under key "trade_filter" (via merge_cli_and_config).
     tf_cfg = base_params.get("trade_filter")
     zigzag_global_stats = None
-    if tf_cfg is not None and tf_cfg.enabled:
+    full_volume_runtime = None
+    if is_zigzag_enabled(tf_cfg):
         try:
             zigzag_global_stats = build_zigzag_global_stats(
                 close=df["close"].values,
@@ -220,6 +233,17 @@ def main() -> None:
             )
         except (ConfigError, ValueError) as e:
             print(f"Trade-filter stats error: {e}", file=sys.stderr)
+            sys.exit(1)
+    if is_volume_enabled(tf_cfg):
+        try:
+            full_volume_runtime = build_volume_global_metrics(
+                df["volume"].to_numpy(),
+                df["close"].to_numpy(),
+                tf_cfg.volume,
+            )
+            _warn_if_volume_baseline_window_large(tf_cfg.volume, len(df))
+        except (ConfigError, ValueError) as e:
+            print(f"Trade-filter volume error: {e}", file=sys.stderr)
             sys.exit(1)
 
     print("=" * 48)
@@ -233,7 +257,7 @@ def main() -> None:
     print(f"  Commission:   {base_params['commission']}")
     print(f"  Warmup:       {warmup_period} bars")
     print(f"  Periods/year: {periods_per_year:.2f}")
-    if tf_cfg is not None and tf_cfg.enabled:
+    if is_zigzag_enabled(tf_cfg):
         print(
             f"  trade_filter: enabled (type={tf_cfg.type}), "
             f"n_legs={zigzag_global_stats.n_legs_total}, "
@@ -279,6 +303,7 @@ def main() -> None:
                     periods_per_year=periods_per_year,
                     execution_model=execution_model,
                     min_trades_required=params["min_trades_required"],
+                    trade_filter_config=tf_cfg,
                 )
                 for s in segment_results:
                     m = s.segment_metrics
@@ -318,6 +343,7 @@ def main() -> None:
                     min_trades_required=params["min_trades_required"],
                     trade_filter_config=tf_cfg,
                     zigzag_global_stats=zigzag_global_stats,
+                    volume_runtime=full_volume_runtime,
                 )
                 for r in results:
                     print(

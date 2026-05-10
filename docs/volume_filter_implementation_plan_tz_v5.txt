@@ -1,0 +1,1862 @@
+# Implementation Plan: Volume Filter v5
+
+This document is the final standalone implementation plan for the `volume`
+trade filter based on `docs/TZ_volume_filter_v3.txt`.
+
+It replaces the implementation strategy from
+`docs/volume_filter_implementation_plan_tz_v4.txt` but does not modify or
+delete that historical file.
+
+v5 is not a patch-list over v4. It is a complete implementation plan intended
+to be executable as a sequence of small, reviewable PRs.
+
+Core corrections versus v4:
+
+- `trade_filter.enabled` is only the root switch, not a ZigZag switch.
+- `zigzag.enabled` and `volume.enabled` are independent subfilter switches.
+- Runtime helpers use strict post-validation semantics, not `bool(...)`
+  coercion of raw config values.
+- Resolver logic and runtime helper logic are explicitly separated.
+- `trade_filter.type` is treated as a legacy ZigZag marker, not a required
+  field for standalone volume.
+- The W2.C legality change is an explicit breaking config migration.
+- `filter_config_snapshot` is an independent end-to-end transport field.
+- Trade-level diagnostics become subfilter-aware and are not owned by
+  `zigzag_st_filter.py`.
+- Golden and performance tests are placed in pytest-discovered paths.
+- Export schemas are explicitly split by active subfilter groups.
+- The per-bar diagnostics retention flag is named to avoid conflict with
+  `trade_filter.diagnostics`.
+
+---
+
+## 0. Architecture and Runtime Contract
+
+### 0.1 Runtime Modes
+
+The implementation supports exactly four runtime modes.
+
+1. **baseline**
+
+   Conditions:
+
+   ```text
+   trade_filter absent
+   OR trade_filter.enabled=false
+   ```
+
+   Runtime:
+
+   ```text
+   run_backtest_fast -> generate_positions(...)
+   ```
+
+   Invariant:
+
+   ```text
+   positions / returns / equity / trades / export schemas are bit-identical
+   to the pre-volume baseline.
+   ```
+
+2. **zigzag-only**
+
+   Conditions:
+
+   ```text
+   trade_filter.enabled=true
+   zigzag.enabled=true
+   volume.enabled=false
+   ```
+
+   Runtime:
+
+   ```text
+   build_zigzag_global_stats(...)
+   run_backtest_fast -> zigzag_st_filter.apply(...)
+   ```
+
+   Invariant:
+
+   ```text
+   Bit-identical to the current ZigZag runtime before volume work.
+   This is not no-filter baseline parity.
+   ```
+
+3. **standalone-volume**
+
+   Conditions:
+
+   ```text
+   trade_filter.enabled=true
+   zigzag.enabled=false
+   volume.enabled=true
+   ```
+
+   Runtime:
+
+   ```text
+   build_volume_global_metrics(...)
+   run_backtest_fast -> volume_only_filter.apply(...)
+   ```
+
+   Invariant:
+
+   ```text
+   ZigZag stats are not built.
+   ZigZag apply is not called.
+   Volume-only FSM owns positions and diagnostics.
+   ```
+
+4. **zigzag+volume**
+
+   Conditions:
+
+   ```text
+   trade_filter.enabled=true
+   zigzag.enabled=true
+   volume.enabled=true
+   ```
+
+   Runtime:
+
+   ```text
+   build_zigzag_global_stats(...)
+   build_volume_global_metrics(...)
+   run_backtest_fast -> zigzag_st_filter.apply(..., volume_runtime=...)
+   ```
+
+   Invariant:
+
+   ```text
+   ZigZag owns lifecycle.
+   Volume gates lifecycle starts from OFF only.
+   Volume does not close, reset or otherwise mutate an active ZigZag lifecycle.
+   Volume does not gate WAIT_FIRST_ST_FLIP -> ACTIVE_*.
+   ```
+
+### 0.2 Grid Search Invariants
+
+- Volume parameters do not participate in grid enumeration.
+- Volume parameters do not enter `grid_point_id`.
+- Volume parameters are identical for all grid candidates and WF steps in one
+  run.
+- The `grid_point_id` builder is not changed.
+- Cross-volume comparison is performed by running the pipeline multiple times
+  with different config files.
+
+### 0.3 `trade_filter.type` Contract
+
+`trade_filter.type` is retained only as a legacy ZigZag marker.
+
+Rules:
+
+- Existing ZigZag YAML may continue to use:
+
+  ```text
+  trade_filter.type: zigzag_st_mode
+  ```
+
+- `type=zigzag_st_mode` implies a ZigZag legacy marker when
+  `zigzag.enabled` is absent.
+- Standalone volume does not require `trade_filter.type`.
+- `trade_filter.enabled=true` no longer means `trade_filter.type` is required.
+- If `type=zigzag_st_mode` and `zigzag.enabled=false`, the config is rejected
+  unless an explicit migration exception is documented and tested.
+- No new `trade_filter.type` literal is introduced in v5.
+
+Reason:
+
+```text
+The runtime mode is determined by subfilter flags, not by a root type enum.
+```
+
+### 0.4 Strict Runtime Helpers
+
+In `donor/supertrend_optimizer/core/trade_filter_config.py` add:
+
+```text
+is_trade_filter_enabled(tf) -> bool
+is_zigzag_enabled(tf) -> bool
+is_volume_enabled(tf) -> bool
+```
+
+Runtime helpers are post-validation helpers. They must not coerce malformed raw
+YAML values with `bool(...)`.
+
+Final semantics:
+
+```text
+is_trade_filter_enabled(tf):
+  tf is not None
+  AND tf.enabled is True
+
+is_zigzag_enabled(tf):
+  is_trade_filter_enabled(tf)
+  AND getattr(tf, "zigzag", None) is not None
+  AND getattr(tf.zigzag, "enabled", None) is True
+
+is_volume_enabled(tf):
+  is_trade_filter_enabled(tf)
+  AND getattr(tf, "volume", None) is not None
+  AND getattr(tf.volume, "enabled", None) is True
+```
+
+Compatibility window rule:
+
+- Before W2.A materializes `zigzag.enabled`, `is_zigzag_enabled` may use
+  `getattr(tf.zigzag, "enabled", True)` only for legacy objects that have
+  already passed validation or are hand-built test fixtures.
+- Resolvers must not use these runtime helpers to classify malformed raw
+  values.
+
+Resolver functions must preserve malformed raw values so Phase 4 validation can
+emit canonical `ConfigError`.
+
+### 0.5 Diagnostics Contract
+
+`filter_diagnostics` is a per-bar export-facing diagnostics container.
+
+Mandatory keys for every enabled filter:
+
+```text
+trade_filter_state
+filter_block_reason
+```
+
+Optional ZigZag keys are emitted only when `is_zigzag_enabled(tf)=true`.
+Optional volume keys are emitted only when `is_volume_enabled(tf)=true`.
+
+Standalone volume must not emit ZigZag-only optional keys.
+ZigZag-only must not emit volume optional keys.
+ZigZag+volume may emit both groups.
+
+Consumers must be subfilter-aware:
+
+- Generic consumers may read only mandatory keys.
+- ZigZag consumers must guard ZigZag optional keys with `is_zigzag_enabled`.
+- Volume consumers must guard volume optional keys with `is_volume_enabled`.
+- Summary and export layers must not infer active mode from
+  `trade_filter.enabled`.
+
+### 0.6 Runtime Codes vs Diagnostic Strings
+
+`VolumeRuntime` is the compact transport/runtime layer. It stores int-coded
+categorical arrays under TZ-aligned names without `_code` suffixes:
+
+```text
+volume_regime                    np.ndarray dtype=int8
+volume_condition_block_reason    np.ndarray dtype=int8
+volume_initial_direction         np.ndarray dtype=int8
+```
+
+`filter_diagnostics` is the user-facing layer. It stores strings under the same
+logical keys:
+
+```text
+filter_diagnostics["volume_regime"]                    dtype=object
+filter_diagnostics["volume_condition_block_reason"]    dtype=object
+filter_diagnostics["volume_initial_direction"]         dtype=object
+```
+
+The duplicate key names are intentional. The contract is defined by
+`(container, key)`:
+
+```text
+VolumeRuntime.volume_regime          -> int8 code
+filter_diagnostics["volume_regime"]  -> string/object
+```
+
+Consumers such as signal events, Excel writers, summary builders and collectors
+read strings from `filter_diagnostics`. They never decode int8 codes.
+
+### 0.7 Snapshot Transport Contract
+
+`filter_config_snapshot` is independent from `filter_diagnostics`.
+
+It is transported end-to-end:
+
+```text
+VolumeRuntime.filter_config_snapshot
+  -> volume_only_filter.apply / zigzag_st_filter.apply result
+  -> RawBacktestArtifacts
+  -> BacktestResult
+  -> PeriodResult / StepResult
+  -> exporters / fingerprint
+```
+
+Rules:
+
+- Never store snapshot inside `filter_diagnostics`.
+- Strip functions may remove per-bar diagnostics but must preserve snapshot.
+- If volume is disabled, no volume snapshot fields appear.
+- If trade_filter is disabled or absent, `filter_config_snapshot is None`.
+
+### 0.8 Per-Bar Diagnostics Retention Flag
+
+Do not introduce a root `diagnostics` block because it conflicts conceptually
+with `trade_filter.diagnostics`.
+
+Add this config field instead:
+
+```text
+export.retain_per_bar_filter_diagnostics: bool = False
+```
+
+Meaning:
+
+- `False`: per-bar filter diagnostics are stripped before `StepResult` storage.
+- `True`: per-bar filter diagnostics are retained and may be exported to
+  `WF_FilterDiagnostics`.
+
+The flag affects only `wf_grid`; tester keeps its existing per-run diagnostic
+export behavior.
+
+### 0.9 Test Discovery Contract
+
+All mandatory tests must live in pytest-discovered paths.
+
+Current default discovery covers:
+
+```text
+wf_grid/tests
+donor TESTER/tests
+```
+
+Therefore v5 places new default tests under these directories, or updates
+`pyproject.toml` explicitly before adding tests elsewhere.
+
+Rules:
+
+- Golden characterization tests must run in the default suite.
+- W3 100k performance smoke must run in the default suite.
+- Slow performance tests are marked `slow_perf` and skipped by normal commands
+  only if the project config explicitly supports that marker.
+
+### 0.10 Effort Estimate
+
+Senior engineer calendar estimate:
+
+```text
+W0     strict helpers + full call-site audit             3-4 d
+W1     lowercase collision + behavior-change tests       1-2 d
+W2.0   loader phase pipeline                             3-4 d
+W10    test inventory                                    1-2 d
+W2.A   soft zigzag.enabled                               2-3 d
+W2.B   volume schema                                     3-4 d
+W2.C1  validator split                                   3-5 d
+W2.C2  breaking legality migration                       4-6 d
+W3     metrics + VolumeRuntime + perf smoke              5-7 d
+W4.1   ZigZag characterization + refactor                8-12 d
+W4.2   ZigZag volume gate                                3-4 d
+W5     standalone volume filter                          5-7 d
+W6     diagnostics, snapshot, trade diagnostics          5-7 d
+W7     tester integration/export                         4-6 d
+W8     wf_grid integration/export/fingerprint            5-7 d
+W9     full regression matrix                            3-5 d
+```
+
+Total: approximately 58-83 working days, or 10-14 calendar weeks without major
+blockers.
+
+---
+
+## W0. Preflight: Strict Helpers and Call-Site Audit
+
+W0 ships as the first implementation PR.
+
+Goal:
+
+```text
+Remove the dangerous runtime coupling:
+trade_filter.enabled == ZigZag enabled
+```
+
+### W0.1 Add Helpers
+
+Add helpers in `donor/supertrend_optimizer/core/trade_filter_config.py`.
+
+Export them through `__all__`:
+
+```text
+is_trade_filter_enabled
+is_zigzag_enabled
+is_volume_enabled
+```
+
+Tests:
+
+- `tf is None` -> all helpers false;
+- `tf.enabled=False` -> all helpers false;
+- malformed raw strings are not treated as true in strict helpers;
+- pre-W2.A validated legacy object without `zigzag.enabled` resolves ZigZag as
+  enabled only through the compatibility path;
+- missing volume block resolves volume disabled.
+
+### W0.2 Mandatory Runtime Call Sites
+
+Replace direct runtime checks of `tf.enabled` / `trade_filter.enabled` with
+helpers.
+
+Mandatory files:
+
+- `wf_grid/pipeline/orchestrator.py`
+  - build ZigZag stats only when `is_zigzag_enabled(config.trade_filter)`;
+  - build VolumeRuntime only when `is_volume_enabled(config.trade_filter)`.
+- `wf_grid/wf/step_executor.py`
+  - forward `zigzag_global_stats` and `volume_runtime` independently.
+- `wf_grid/wf/runner.py`
+  - accept and pass `volume_runtime`.
+- `wf_grid/wf/_mp_helpers.py`
+  - worker state stores both full runtimes independently.
+- `donor/supertrend_optimizer/core/backtest.py`
+  - dispatcher uses subfilter helpers.
+- `donor/supertrend_optimizer/engine/run.py`
+  - forwards `volume_runtime` and snapshot.
+- `donor/supertrend_optimizer/testing/runner.py`
+  - `run_period`, `run_all_periods`, `run_all_periods_from_csv`;
+  - no ZigZag stats fallback unless `is_zigzag_enabled`.
+- `donor/supertrend_optimizer/testing/signal_events.py`
+  - optional keys guarded by active subfilter.
+- `donor/supertrend_optimizer/io/excel_tester.py`
+  - conditional ZigZag and volume sections.
+- `donor/supertrend_optimizer/cli/tester.py`
+  - builds runtimes independently.
+- `donor TESTER/run_batch_tester.py`
+  - helper replacement;
+  - no new business logic beyond build/forward runtimes.
+- `wf_grid/export/xlsx_writer.py`
+  - step-sheet filter columns are split by active subfilter.
+
+### W0.3 Acceptance
+
+- Baseline path remains bit-identical.
+- ZigZag-only path remains bit-identical.
+- No runtime branch treats root `trade_filter.enabled` as ZigZag enabled.
+
+---
+
+## W1. Lowercase Columns and Collision Observability
+
+Goal:
+
+```text
+Detect lowercase collisions before Volume and volume collapse into one column.
+```
+
+This is a data-contract behavior change for `wf_grid`: mixed-case OHLCV becomes
+accepted after normalization. It must be documented and tested as such.
+
+### W1.1 Shared Collision Helper
+
+In `donor/supertrend_optimizer/data/validator.py` add:
+
+```text
+_check_no_duplicate_lowercase_columns(columns, source, *, mode)
+```
+
+`mode`:
+
+- `raise`: raise `DataValidationError`;
+- `info`: emit INFO log and return.
+
+Message contains:
+
+```text
+duplicate lowercase columns
+```
+
+and lists the colliding original names.
+
+### W1.2 wf_grid Fail-Fast
+
+In `wf_grid/pipeline/orchestrator.py`, after CSV load and before lowercasing:
+
+```text
+_check_no_duplicate_lowercase_columns(list(df.columns), source, mode="raise")
+df.columns = df.columns.str.lower()
+validate_ohlc_data(...)
+```
+
+### W1.3 Tester Loader Observability
+
+In `donor/supertrend_optimizer/data/loader.py::load_ohlc_csv`, before existing
+lowercasing:
+
+```text
+_check_no_duplicate_lowercase_columns(list(df.columns), file_path, mode="info")
+```
+
+No parser/date/shape semantics change.
+
+### W1.4 Tests
+
+- wf_grid mixed-case OHLCV becomes valid after lowercase normalization.
+- wf_grid `Volume` + `volume` raises before overwrite.
+- tester loader emits INFO for the same collision and does not raise.
+- OHLC-only with disabled volume remains valid.
+- ZigZag-only parity survives lowercase normalization.
+
+---
+
+## W2. Config Loading, Schema and Migration
+
+W2 is split into four PRs:
+
+```text
+W2.0   phase pipeline
+W2.A   soft zigzag.enabled
+W2.B   volume schema
+W2.C1  behavior-preserving validator split
+W2.C2  explicit breaking legality migration
+```
+
+### W2.0 Loader Phase Pipeline
+
+Update `wf_grid/config/loader.py::load_grid_config` and active tester config
+path `donor/supertrend_optimizer/cli/tester.py` to follow this order:
+
+1. `_read_yaml(path)`;
+2. `_validate_strict_schema(raw)`;
+3. collect trade_filter unknown keys if the block exists;
+4. `raw_user_keys = collect_raw_user_keys(raw)`;
+5. `cfg = _build_config(raw)`;
+6. Phase 3 resolvers:
+   - `resolve_zigzag_enabled_in_place(cfg.trade_filter, raw_user_keys)`;
+   - `resolve_volume_enabled_in_place(cfg.trade_filter, raw_user_keys)`;
+7. Phase 4 validation:
+   - `_validate_config(cfg, raw_user_keys=raw_user_keys)`;
+8. Phase 5 defaults:
+   - `resolve_trade_filter_mode_in_place`;
+   - `resolve_exit_off_mode_in_place`;
+   - `resolve_exit_b_immediate_off_in_place`;
+   - `resolve_time_filter_in_place`;
+   - `resolve_volume_defaults_in_place`;
+9. optional `resolve_periods_per_year`.
+
+Resolver rules:
+
+- They do not raise on malformed bools.
+- They preserve malformed raw values for Phase 4 validation.
+- They do not call strict runtime helpers on malformed values.
+
+Data validation boundary:
+
+- Config loader never calls `validate_volume_filter_data`.
+- Volume data validation runs only after data load, OHLC validation and
+  lowercase normalization.
+
+### W2.0 Resolver Truth Table
+
+Add tests and PR documentation for this truth table:
+
+```text
+trade_filter absent
+  -> root=false, zigzag=false, volume=false, mode=baseline, valid
+
+trade_filter.enabled=false
+  -> root=false, zigzag=false, volume=false, mode=baseline, valid
+
+enabled=true + type=zigzag_st_mode + no explicit zigzag.enabled
+  -> root=true, zigzag=true, volume=false, mode=zigzag-only, valid
+
+enabled=true + non-enabled zigzag fields + no explicit zigzag.enabled
+  -> root=true, zigzag=true, volume=false, mode=zigzag-only, valid
+
+enabled=true + zigzag.enabled=true + volume absent
+  -> root=true, zigzag=true, volume=false, mode=zigzag-only, valid
+
+enabled=true + zigzag.enabled=false + volume.enabled=true
+  -> root=true, zigzag=false, volume=true, mode=standalone-volume, valid
+
+enabled=true + zigzag.enabled=true + volume.enabled=true
+  -> root=true, zigzag=true, volume=true, mode=zigzag+volume, valid
+
+enabled=true + zigzag.enabled=false + volume absent/disabled
+  -> invalid: at least one subfilter must be enabled
+
+enabled=true + volume.enabled malformed
+  -> invalid in Phase 4, no runtime mode selected
+
+enabled=true + zigzag.enabled malformed
+  -> invalid in Phase 4, no runtime mode selected
+```
+
+### W2.A Soft `zigzag.enabled`
+
+Add to `TradeFilterZigZagConfig`:
+
+```text
+enabled: Optional[bool] = None
+```
+
+Add `enabled` to allowed keys under `trade_filter.zigzag`.
+
+Compatibility resolver before W2.C2:
+
+```text
+if explicit zigzag.enabled:
+    preserve raw value for Phase 4 validation
+elif legacy ZigZag marker present:
+    set True
+elif tf.enabled is true:
+    set True
+else:
+    set False
+```
+
+Legacy ZigZag marker:
+
+```text
+trade_filter.type == "zigzag_st_mode"
+OR any non-enabled key exists under trade_filter.zigzag.*
+```
+
+Tests:
+
+- legacy YAML without `zigzag.enabled` resolves true;
+- explicit true resolves true;
+- explicit false without volume is rejected with migration hint;
+- empty `zigzag: {}` + enabled true remains compatible during W2.A;
+- ZigZag-only behavior is bit-identical.
+
+### W2.B Volume Schema
+
+Add:
+
+```text
+TradeFilterVolumeConfig
+TradeFilterConfig.volume: Optional[TradeFilterVolumeConfig] = None
+TRADE_FILTER_ALLOWED_KEYS["trade_filter.volume"]
+```
+
+Fields:
+
+```text
+enabled
+mode
+short_window
+baseline_window
+threshold_ratio
+regime_low_ratio
+regime_high_ratio
+direction_lookback_bars
+```
+
+Type policy:
+
+- raw values are stored as `object` / `Optional`;
+- strict typing happens in validator.
+
+Validation when `volume.enabled=true`:
+
+```text
+volume.enabled                 bool
+volume.mode                    volume_A | volume_B
+volume.short_window            int >= 1
+volume.baseline_window         int >= 1 and >= short_window
+volume.threshold_ratio         finite number > 0
+volume.regime_low_ratio        finite number > 0
+volume.regime_high_ratio       finite number > 0 and > regime_low_ratio
+volume.direction_lookback_bars int >= 1
+```
+
+Required when enabled:
+
+```text
+mode
+short_window
+baseline_window
+threshold_ratio
+```
+
+Defaults materialized after validation:
+
+```text
+regime_low_ratio        -> 0.8
+regime_high_ratio       -> 1.2
+direction_lookback_bars -> 3
+```
+
+Tests:
+
+- valid `volume_A`;
+- valid `volume_B`;
+- absent volume block;
+- `volume.enabled=false`;
+- malformed `volume.enabled`;
+- invalid mode/window/ratios/lookback;
+- unknown key under `trade_filter.volume`;
+- defaults materialize only after validation.
+
+### W2.C1 Behavior-Preserving Validator Split
+
+Refactor `validate_trade_filter` without changing behavior.
+
+Extract:
+
+```text
+_validate_root_enabled_and_type(...)
+_validate_zigzag_block(...)
+_validate_lifecycle_block(...)
+_validate_triggers_block(...)
+_validate_time_filter_block(...)
+_validate_volume_block(...)
+_validate_caller_pipeline_gate(...)
+```
+
+Acceptance:
+
+- all existing tests pass;
+- no standalone-volume behavior is promised yet;
+- ZigZag-only remains bit-identical.
+
+### W2.C2 Explicit Breaking Legality Migration
+
+This PR intentionally changes config semantics.
+
+New final resolver:
+
+```text
+if explicit zigzag.enabled:
+    preserve raw value for Phase 4 validation
+elif legacy ZigZag marker present:
+    set True
+elif volume.enabled is true and no legacy marker:
+    set False
+elif tf.enabled is true:
+    set False
+else:
+    set False
+```
+
+Final legality dispatch:
+
+```text
+if not is_trade_filter_enabled(tf):
+    skip subfilter validation
+elif zigzag.enabled is True and volume.enabled is not True:
+    validate ZigZag path
+elif zigzag.enabled is True and volume.enabled is True:
+    validate ZigZag + volume path
+elif zigzag.enabled is not True and volume.enabled is True:
+    validate standalone volume path
+else:
+    error: at least one of zigzag.enabled, volume.enabled must be true
+```
+
+Standalone-volume rules:
+
+- volume block required and fully validated;
+- ZigZag fields other than `enabled` are rejected if present;
+- `trade_filter.type=zigzag_st_mode` is rejected when `zigzag.enabled=false`;
+- `trade_filter.triggers` is forbidden;
+- lifecycle block is optional, scalar-validated if present, and inert at
+  runtime;
+- time_filter is optional and active as standalone reset.
+
+ZigZag+volume rules:
+
+- ZigZag block required and fully validated;
+- volume block required and fully validated;
+- lifecycle required and fully validated;
+- triggers optional for legacy ZigZag path.
+
+Migration notes:
+
+- `empty zigzag: {}` + `trade_filter.enabled=true` with no volume becomes
+  invalid.
+- Existing users should add `zigzag.enabled: true` or remove the empty block
+  and use a canonical legacy ZigZag marker.
+- PR description must include before/after YAML examples.
+
+Tests:
+
+- standalone volume without ZigZag block is valid;
+- standalone volume with `type=zigzag_st_mode` is invalid;
+- standalone volume with triggers block is invalid;
+- both subfilters disabled is invalid;
+- migration error messages include actionable hints;
+- ZigZag-only behavior remains bit-identical.
+
+---
+
+## W10. Test Inventory and Migration Artifact
+
+Create before W2.A merge:
+
+```text
+docs/volume_filter_test_inventory.md
+```
+
+Inventory commands:
+
+```text
+rg -n "TradeFilterZigZagConfig\(" -- wf_grid donor 'donor TESTER'
+rg -n "validate_trade_filter|_validate_trade_filter|trade_filter\.enabled" -- wf_grid donor 'donor TESTER'
+rg -n "zigzag_st_filter\.apply|from.*zigzag_st_filter.*apply" -- wf_grid donor 'donor TESTER'
+```
+
+Classify each match:
+
+```text
+PRESERVED
+UPDATE
+REMOVE
+NEW_VOLUME
+```
+
+Acceptance:
+
+- file is committed before W2.A;
+- every following PR references it;
+- every following PR includes `Affected: <list>` in description.
+
+---
+
+## W3. Data Validation, Volume Metrics and VolumeRuntime
+
+### W3.1 Volume Data Validation
+
+In `donor/supertrend_optimizer/data/validator.py` add:
+
+```text
+validate_volume_filter_data(df, trade_filter_config) -> pd.DataFrame
+```
+
+No-op when volume is not enabled.
+
+When volume is enabled:
+
+- `volume` column required;
+- numeric dtype required;
+- no NaN;
+- no Inf;
+- `volume >= 0`;
+- input DataFrame is not mutated unexpectedly.
+
+Every error contains:
+
+```text
+trade_filter.volume
+```
+
+Call-sites:
+
+- `wf_grid/pipeline/orchestrator.py` after CSV load, collision check,
+  lowercase normalization and OHLC validation;
+- active tester runtime after `load_ohlc_csv` and OHLC validation.
+
+### W3.2 `volume_metrics.py`
+
+Create:
+
+```text
+donor/supertrend_optimizer/core/volume_metrics.py
+```
+
+Public API:
+
+```text
+build_volume_global_metrics(volume, close, volume_cfg) -> VolumeRuntime
+materialize_volume_regime(codes: np.ndarray) -> np.ndarray
+materialize_volume_block_reason(codes: np.ndarray) -> np.ndarray
+materialize_volume_initial_direction(codes: np.ndarray) -> np.ndarray
+```
+
+Rules:
+
+- validate `len(volume) == len(close)`;
+- rolling medians use `pandas.Series(...).rolling(window=W, min_periods=W).median()`;
+- calculations are causal and include decision bar `t`;
+- no numpy-loop, numba or bottleneck implementation in v5.
+
+### W3.3 Metrics and Edge Cases
+
+Metrics:
+
+```text
+short_median_volume
+baseline_median_volume
+median_relative_volume
+volume_regime
+volume_condition_allowed
+volume_condition_block_reason
+volume_initial_direction
+```
+
+Edge-case rules must be tested:
+
+- `baseline_median_volume == 0` -> regime/block reason `volume_baseline_zero`;
+- all-zero volume;
+- `len(data) < baseline_window`;
+- integer volume dtype;
+- very large finite volume values;
+- NaN/Inf rejected before metrics build;
+- equal close momentum produces `volume_initial_direction=unknown`;
+- close ties do not create fake direction;
+- timezone index works with reset helpers downstream.
+
+### W3.4 Int Codes
+
+Regime:
+
+```text
+0 = volume_warmup
+1 = volume_baseline_zero
+2 = low_volume
+3 = normal_volume
+4 = high_volume
+```
+
+Condition block reason:
+
+```text
+0 = none
+1 = volume_warmup
+2 = volume_baseline_zero
+3 = volume_below_baseline
+4 = volume_above_baseline
+```
+
+Initial direction:
+
+```text
+-1 = short
+ 0 = unknown
+ 1 = long
+```
+
+### W3.5 VolumeRuntime
+
+`@dataclass(frozen=True)` fields:
+
+```text
+short_median_volume: np.ndarray
+baseline_median_volume: np.ndarray
+median_relative_volume: np.ndarray
+volume_regime: np.ndarray
+volume_condition_allowed: np.ndarray
+volume_condition_block_reason: np.ndarray
+volume_initial_direction: np.ndarray
+absolute_offset: int
+reference_length: int
+filter_config_snapshot: dict
+```
+
+Prohibited fields:
+
+```text
+volume_allowed_per_bar
+volume_block_reason_per_bar
+*_code suffix fields
+```
+
+All per-bar arrays are marked read-only after construction:
+
+```text
+arr.setflags(write=False)
+```
+
+### W3.6 Snapshot Fields
+
+`filter_config_snapshot` contains exactly:
+
+```text
+volume_filter_enabled
+volume_filter_mode
+volume_short_window
+volume_baseline_window
+volume_threshold_ratio
+volume_regime_low_ratio
+volume_regime_high_ratio
+volume_direction_lookback_bars
+```
+
+### W3.7 Slicing
+
+`VolumeRuntime.slice(start, end)`:
+
+- validates `0 <= start <= end <= reference_length`;
+- returns a frozen `VolumeRuntime`;
+- slices per-bar arrays with NumPy views;
+- preserves read-only flags;
+- sets:
+
+  ```text
+  absolute_offset = parent.absolute_offset + start
+  reference_length = end - start
+  filter_config_snapshot is same object reference
+  ```
+
+Tests:
+
+- `np.shares_memory` for every per-bar array;
+- chained slices share memory with original parent;
+- empty slice is valid;
+- bounds violations raise `ValueError`;
+- snapshot identity is preserved.
+
+### W3.8 Baseline-Window Warning
+
+When volume is enabled and:
+
+```text
+baseline_window > 0.5 * len(data)
+```
+
+emit exactly one warning after data validation and before metrics build.
+
+Do not emit from config loader.
+
+### W3.9 Performance Tests
+
+Default-discovered smoke test:
+
+```text
+wf_grid/tests/test_volume_metrics_smoke.py
+```
+
+Rules:
+
+- 100k synthetic bars;
+- `baseline_window=500`;
+- wall-clock `< 3s` on commodity Linux CI;
+- no slow marker.
+
+Slow tests:
+
+```text
+wf_grid/tests/test_volume_metrics_perf.py
+wf_grid/tests/test_volume_runtime_pickle.py
+```
+
+Mark:
+
+```text
+pytest.mark.slow_perf
+```
+
+Update `pyproject.toml` marker list before committing these tests.
+
+---
+
+## W4. ZigZag Refactor and Volume Gate
+
+W4 is split into two PRs.
+
+### W4.1 Characterization and Behavior-Preserving Refactor
+
+Before refactoring, add default-discovered characterization tests under:
+
+```text
+wf_grid/tests/test_zigzag_apply_characterization.py
+wf_grid/tests/golden_snapshots/
+```
+
+Do not place mandatory tests under an undiscovered `tests/` tree unless
+`pyproject.toml` is updated first.
+
+Snapshots include:
+
+- positions;
+- selected per-bar diagnostics;
+- full filter diagnostics summary;
+- trades columns: `entry_index`, `exit_index`, `net_pnl_pct`.
+
+Minimum fixtures:
+
+```text
+F1  Mode A,   no reset, 200 bars, warm trend
+F2  Mode B,   no reset, 200 bars, sideways
+F3  Mode C,   no reset, 200 bars, sharp flips
+F4  Mode A+B, no reset, 200 bars, mixed triggers
+F5  Mode C+B, no reset, 200 bars, immediate + B rescue
+F6  Mode A,   daily_reset=true, 500 bars, 3 days
+F7  Mode A+B, time_filter 09:00-12:00, 500 bars
+F8  Mode C,   exit_off_mode="exit B" + immediate_off
+F9  anonymised production CSV slice, >=1k bars, recommended
+```
+
+Refactor target:
+
+```text
+donor/supertrend_optimizer/core/zigzag_st_filter.py::apply
+```
+
+Extract:
+
+```text
+_try_lifecycle_start_from_off(...)
+```
+
+This helper owns only current `OFF -> non-OFF` lifecycle-start logic.
+
+It is called from:
+
+- candidate-threshold start;
+- confirmed-median start;
+- immediate-entry C/C+B start;
+- reset-return-to-OFF re-entry paths;
+- defensive OFF re-entry paths.
+
+It is not called for:
+
+```text
+WAIT_FIRST_ST_FLIP -> ACTIVE_*
+```
+
+Merge gate:
+
+- positions equal;
+- returns/equity equal;
+- filter diagnostics summary equal;
+- selected per-bar arrays equal;
+- trade diagnostics equal;
+- all snapshots bit-identical.
+
+### W4.2 Volume Gate in ZigZag
+
+Add kwarg:
+
+```text
+volume_runtime: Optional[VolumeRuntime] = None
+```
+
+Inside `_try_lifecycle_start_from_off`:
+
+```text
+cycle_start_allowed =
+    zigzag_cycle_start_allowed
+    AND volume_runtime.volume_condition_allowed[t]
+```
+
+If volume blocks:
+
+- FSM remains OFF;
+- ZigZag lifecycle is not created;
+- common block reason priority selects `filter_block_reason[t]`;
+- volume diagnostics record the volume reason independently.
+
+Volume must not:
+
+- close active ZigZag lifecycle;
+- reset ZigZag lifecycle;
+- alter exit logic;
+- alter SuperTrend;
+- alter ZigZag calculations;
+- gate `WAIT_FIRST_ST_FLIP -> ACTIVE_*`.
+
+Tests:
+
+- AND logic;
+- blocks OFF starts in A/B/C/A+B/C+B;
+- blocks after daily/time reset returns to OFF;
+- no gate on WAIT-first-flip activation;
+- direction attribution uses actual trigger source;
+- volume categorical diagnostics are strings, not int8.
+
+---
+
+## W5. Standalone Volume Filter and Backtest Dispatcher
+
+### W5.1 `volume_only_filter.py`
+
+Create:
+
+```text
+donor/supertrend_optimizer/core/volume_only_filter.py
+```
+
+Public API:
+
+```text
+apply(
+    *,
+    open_prices: np.ndarray,
+    close: np.ndarray,
+    trend: np.ndarray,
+    trade_mode: str,
+    trade_filter_config,
+    volume_runtime: VolumeRuntime,
+    execution_model=ExecutionModel.OPEN_TO_OPEN,
+    index: Optional[pd.Index] = None,
+    daily_reset_event: Optional[np.ndarray] = None,
+    time_filter_events: Optional[tuple[np.ndarray, np.ndarray]] = None,
+) -> VolumeOnlyFilterResult
+```
+
+Result:
+
+```text
+VolumeOnlyFilterResult(
+    positions,
+    filter_diagnostics,
+    filter_config_snapshot,
+)
+```
+
+States:
+
+```text
+OFF
+ACTIVE_LONG
+ACTIVE_SHORT
+```
+
+Do not reuse ZigZag FSM state constants.
+
+### W5.2 Standalone Semantics
+
+Event priority:
+
+1. daily reset;
+2. time filter reset;
+3. volume reversal;
+4. trade-mode forced exit on ST flip;
+5. ST flip with reversal allowed;
+6. continuation;
+7. direction warmup block;
+8. unknown direction block;
+9. trade-mode disallowed direction block;
+10. volume condition fail;
+11. start;
+12. idle.
+
+Trade mode:
+
+```text
+long   -> only long starts
+short  -> only short starts
+both   -> long and short
+revers -> long and short
+```
+
+Reversal:
+
+```text
+volume_A: median_relative_volume < threshold_ratio
+volume_B: median_relative_volume > threshold_ratio
+```
+
+Equality does not reverse.
+
+### W5.3 Backtest Dispatcher
+
+In `donor/supertrend_optimizer/core/backtest.py`:
+
+```text
+if is_zigzag_enabled(tf):
+    zigzag_st_filter.apply(
+        ...,
+        volume_runtime=volume_runtime if is_volume_enabled(tf) else None,
+    )
+elif is_volume_enabled(tf):
+    volume_only_filter.apply(...)
+else:
+    generate_positions(...)
+```
+
+If a required runtime is missing, raise a clear internal error:
+
+```text
+volume_runtime required when trade_filter.volume.enabled=true
+zigzag_global_stats required when trade_filter.zigzag.enabled=true
+```
+
+### W5.4 Tests
+
+- standalone start by volume + direction + trade_mode;
+- reverse exit in both volume modes;
+- direction warmup vs equal close momentum;
+- trade_mode disallows direction;
+- ST flip switch in `both`/`revers`;
+- ST flip exit in `long`/`short`;
+- reset priority over reversal/start;
+- lifecycle exit-off keys inert;
+- baseline disabled paths bit-identical across at least three datasets;
+- volume categorical diagnostics are strings, not int8.
+
+---
+
+## W6. Diagnostics, Snapshot, Summaries and Trade Diagnostics
+
+### W6.1 Transport Fields
+
+Add:
+
+```text
+filter_config_snapshot: Optional[dict] = None
+```
+
+To:
+
+- `RawBacktestArtifacts`;
+- `BacktestResult`;
+- `StepResult`;
+- `PeriodResult`.
+
+Add invariant tests for every hop.
+
+### W6.2 Filter Result Contracts
+
+Both apply functions return snapshot:
+
+```text
+ZigZagSTFilterResult(..., filter_config_snapshot=None | dict)
+VolumeOnlyFilterResult(..., filter_config_snapshot=dict)
+```
+
+ZigZag-only snapshot is `None` unless a future ZigZag snapshot is explicitly
+introduced. ZigZag+volume carries the volume snapshot.
+
+### W6.3 Common Block Reason Utility
+
+Create:
+
+```text
+donor/supertrend_optimizer/core/_block_reason.py
+```
+
+Priority:
+
+```text
+1. daily_reset
+2. time_filter_reset
+3. local_median_unavailable
+4. volume_direction_warmup
+5. volume_unknown_direction
+6. volume_trade_mode_disallowed_direction
+7. volume_warmup
+8. volume_baseline_zero
+9. volume_below_baseline
+10. volume_above_baseline
+11. trade_mode_disallowed_flip
+12. stopping_mode_no_new_entries
+13. filter_off
+```
+
+Use in ZigZag+volume and standalone-volume.
+
+### W6.4 State Names
+
+In `donor/supertrend_optimizer/core/_fsm_state_names.py` keep existing ZigZag
+constants and add standalone constants:
+
+```text
+STANDALONE_VOLUME_STATE_NAMES
+STANDALONE_VOLUME_ACTIVE_STATES
+```
+
+Do not merge standalone states into the ZigZag tuple.
+
+### W6.5 Summary Counters
+
+Add volume counters:
+
+```text
+n_volume_blocked_start_attempts
+n_volume_blocked_start_attempts_long
+n_volume_blocked_start_attempts_short
+n_volume_blocked_start_attempts_unknown_direction
+n_volume_warmup_blocked_start_attempts
+n_volume_below_baseline_blocked_start_attempts
+n_volume_above_baseline_blocked_start_attempts
+n_volume_baseline_zero_blocked_start_attempts
+n_volume_direction_warmup_blocked_start_attempts
+n_volume_unknown_direction_blocked_start_attempts
+n_volume_trade_mode_disallowed_direction_blocked_start_attempts
+n_volume_low_regime_bars
+n_volume_normal_regime_bars
+n_volume_high_regime_bars
+avg_median_relative_volume
+n_volume_started_cycles
+```
+
+Compute only when volume diagnostics are present.
+
+Implement in:
+
+- `wf_grid/wf/step_executor.py::_compute_filter_diagnostics_summary`;
+- `donor/supertrend_optimizer/testing/runner.py::_build_filter_diagnostics_summary`.
+
+### W6.6 Trade-Level Diagnostics Refactor
+
+Create:
+
+```text
+donor/supertrend_optimizer/core/filter_trade_diagnostics.py
+```
+
+Move generic trade diagnostic attachment out of `zigzag_st_filter.py`.
+
+Rules:
+
+- mandatory input key: `trade_filter_state`;
+- ZigZag-specific exit reason map is used only when ZigZag keys are present;
+- volume-specific exit/start reason map is used only when volume keys are
+  present;
+- standalone-volume never requires `ST_STOPPING`,
+  `exit_b_immediate_off_triggered` or `trade_filter_trigger_source`.
+
+`donor/supertrend_optimizer/engine/run.py` imports the generic helper, not the
+ZigZag module helper.
+
+### W6.7 Step Collector Columns
+
+In `wf_grid/collect/step_collector.py` split:
+
+```text
+_ZIGZAG_FILTER_SUMMARY_COLUMNS
+_VOLUME_FILTER_SUMMARY_COLUMNS
+```
+
+Final column behavior:
+
+- baseline: no filter columns;
+- ZigZag-only: ZigZag columns only;
+- standalone-volume: volume columns only;
+- ZigZag+volume: ZigZag columns followed by volume columns.
+
+### W6.8 Export Schema Updates
+
+Update:
+
+- `wf_grid/export/xlsx_writer.py::_write_step_sheet`;
+- `wf_grid/export/summary_builder.py`;
+- `wf_grid/collect/step_collector.py`;
+- `donor/supertrend_optimizer/io/excel_tester.py`.
+
+Tests:
+
+- baseline export shape unchanged;
+- ZigZag-only export shape unchanged versus pre-volume;
+- standalone-volume has volume columns and no ZigZag-only columns;
+- ZigZag+volume has both groups in deterministic order.
+
+---
+
+## W7. Tester Integration and Export
+
+### W7.1 Runtime Wiring
+
+Active tester CLI path:
+
+```text
+load config
+load_ohlc_csv
+validate_ohlc_data
+validate_volume_filter_data if volume enabled
+build_zigzag_global_stats if ZigZag enabled
+build_volume_global_metrics if volume enabled
+run_all_periods(...)
+```
+
+Forward chain:
+
+```text
+run_all_periods(..., volume_runtime=full_runtime)
+  -> run_period(..., volume_runtime=volume_runtime.slice(...))
+    -> run_single_backtest(..., volume_runtime=sliced_runtime)
+      -> run_backtest_fast(..., volume_runtime=sliced_runtime)
+```
+
+No auto-build ZigZag fallback may run unless `is_zigzag_enabled(tf)`.
+
+### W7.2 Equal Blocks Guard
+
+When tester segmentation is:
+
+```text
+equal_blocks
+```
+
+and:
+
+```text
+trade_filter.enabled=true
+```
+
+raise `ConfigError` before runtime for every enabled subfilter combination.
+
+Baseline/no-filter equal_blocks remains valid.
+
+### W7.3 Export
+
+In `donor/supertrend_optimizer/io/excel_tester.py`:
+
+- `Tester_Config` appends volume snapshot fields only when volume enabled;
+- `Summary` appends volume counters only when volume enabled;
+- `FilterDiagnostics_100` contains volume arrays only when diagnostics are
+  available;
+- ZigZag-only workbook remains shape-compatible;
+- standalone-volume workbook contains no ZigZag-only sheets/fields.
+
+### W7.4 donor TESTER Scope
+
+Allowed changes in `donor TESTER/run_batch_tester.py`:
+
+- helper replacement;
+- build of `VolumeRuntime`;
+- forwarding of `volume_runtime`;
+- no new business logic.
+
+Do not edit:
+
+```text
+donor TESTER/supertrend_optimizer/*
+```
+
+---
+
+## W8. wf_grid Integration, Export, Fingerprint and Retention
+
+### W8.1 Orchestrator Build
+
+In `wf_grid/pipeline/orchestrator.py`:
+
+- read CSV;
+- check lowercase collisions;
+- lowercase columns;
+- validate OHLC;
+- validate volume data if volume enabled;
+- resolve periods_per_year;
+- build ZigZag stats if ZigZag enabled;
+- build full `VolumeRuntime` if volume enabled;
+- emit baseline-window warning if applicable.
+
+### W8.2 Step Slicing
+
+In:
+
+- `wf_grid/wf/step_executor.py::execute_oos_step`;
+- `wf_grid/wf/step_executor.py::execute_train_step`;
+
+add:
+
+```text
+volume_runtime: Optional[VolumeRuntime] = None
+```
+
+OOS:
+
+```text
+volume_runtime.slice(ext_start, test_end)
+```
+
+Train:
+
+```text
+volume_runtime.slice(train_start, train_end)
+```
+
+Pass sliced runtime to `run_single_backtest`.
+
+### W8.3 Multiprocessing Transport
+
+In `wf_grid/wf/_mp_helpers.py::_init_worker`, add `volume_runtime` to initargs.
+
+Worker state stores:
+
+```text
+_WORKER_STATE["volume_runtime"]
+```
+
+Per-task payload remains `GridPoint` only.
+
+### W8.4 Retention-Aware Strip
+
+API:
+
+```text
+_strip_filter_diagnostics_arrays(
+    step_results,
+    *,
+    retain_per_bar_filter_diagnostics: bool,
+)
+```
+
+Behavior:
+
+- if retain is false: set per-bar `filter_diagnostics_oos` to `None`;
+- if retain is true: no-op;
+- always preserve `filter_diagnostics_summary`;
+- always preserve `filter_config_snapshot`.
+
+Call sites:
+
+- parallel worker post-task;
+- sequential orchestrator path.
+
+Both pass:
+
+```text
+config.export.retain_per_bar_filter_diagnostics
+```
+
+### W8.5 Config Schema
+
+Add:
+
+```text
+ExportConfig(retain_per_bar_filter_diagnostics: bool = False)
+GridConfig.export: ExportConfig
+```
+
+Update:
+
+- `wf_grid/config/schema.py`;
+- `wf_grid/config/loader.py`;
+- `_ALLOWED_KEYS`;
+- type validation.
+
+Warn when true:
+
+```text
+retain_per_bar_filter_diagnostics=true may increase memory and IPC usage
+```
+
+### W8.6 XLSX Export
+
+In `wf_grid/export/xlsx_writer.py`:
+
+- `_config_to_dict` filters volume subtree unless volume is enabled;
+- `WF_Config` includes volume snapshot only when volume enabled;
+- summary includes volume counters only when volume enabled;
+- `WF_FilterDiagnostics` is emitted only when:
+
+  ```text
+  export.retain_per_bar_filter_diagnostics=true
+  AND retained diagnostics exist
+  ```
+
+### W8.7 Summary Builder
+
+In `wf_grid/export/summary_builder.py`:
+
+- aggregate volume counters only if volume columns exist;
+- do not create volume columns in baseline or ZigZag-only mode;
+- preserve existing Block A/B order.
+
+### W8.8 Baseline Fingerprint
+
+In `wf_grid/baseline/fingerprint.py`:
+
+- fingerprint is built from `PipelineResult`;
+- include `volume_filter_*` snapshot only when volume enabled;
+- never add volume params to `grid_point_id`.
+
+Tests:
+
+- baseline fingerprint unchanged when filter disabled;
+- ZigZag-only fingerprint unchanged versus pre-volume;
+- volume-enabled fingerprint includes the 8 snapshot fields.
+
+---
+
+## W9. Final Regression Matrix
+
+Run and document:
+
+```text
+| Mode              | Sequential                       | Parallel                         | Tester legacy                    | Tester equal_blocks |
+|-------------------|----------------------------------|----------------------------------|----------------------------------|---------------------|
+| baseline          | bit-identical                    | bit-identical                    | bit-identical                    | OK                  |
+| ZigZag-only       | golden diff vs pre-volume ZigZag | golden diff vs pre-volume ZigZag | golden diff vs pre-volume ZigZag | ConfigError         |
+| standalone-volume | new fixture                      | new fixture                      | new fixture                      | ConfigError         |
+| ZigZag+volume     | new fixture                      | new fixture                      | new fixture                      | ConfigError         |
+```
+
+Required checks:
+
+- no volume columns when volume disabled;
+- no volume snapshot when volume disabled;
+- no ZigZag columns in standalone-volume;
+- `filter_config_snapshot` survives sequential and parallel paths;
+- parallel and sequential volume summaries match;
+- volume counters satisfy invariants;
+- existing ZigZag suite remains green;
+- mandatory golden and smoke tests are actually discovered by pytest.
+
+---
+
+## File Change Map
+
+### Create
+
+- `docs/volume_filter_implementation_plan_tz_v5.txt`
+- `docs/volume_filter_test_inventory.md`
+- `donor/supertrend_optimizer/core/volume_metrics.py`
+- `donor/supertrend_optimizer/core/volume_only_filter.py`
+- `donor/supertrend_optimizer/core/_block_reason.py`
+- `donor/supertrend_optimizer/core/filter_trade_diagnostics.py`
+- `wf_grid/tests/test_volume_metrics_smoke.py`
+- `wf_grid/tests/test_volume_metrics_perf.py`
+- `wf_grid/tests/test_volume_runtime_pickle.py`
+- `wf_grid/tests/test_zigzag_apply_characterization.py`
+- `wf_grid/tests/golden_snapshots/*.json`
+- volume tests under `wf_grid/tests/`
+- tester-path tests under `donor TESTER/tests/`
+
+### Modify
+
+- `pyproject.toml`
+  - add `slow_perf` marker;
+  - update testpaths only if new mandatory tests are placed outside existing
+    discovery roots.
+- `donor/supertrend_optimizer/core/trade_filter_config.py`
+  - strict helpers;
+  - ZigZag `enabled`;
+  - volume dataclass;
+  - resolvers;
+  - validation matrix.
+- `donor/supertrend_optimizer/core/_fsm_state_names.py`
+  - standalone-volume state constants.
+- `donor/supertrend_optimizer/core/zigzag_st_filter.py`
+  - W4.1 refactor;
+  - volume gate;
+  - optional volume diagnostics;
+  - remove ownership of generic trade diagnostics.
+- `donor/supertrend_optimizer/core/backtest.py`
+  - `volume_runtime`;
+  - helper-based dispatcher;
+  - snapshot in `RawBacktestArtifacts`.
+- `donor/supertrend_optimizer/engine/run.py`
+  - forward `volume_runtime`;
+  - use generic trade diagnostics helper;
+  - propagate snapshot.
+- `donor/supertrend_optimizer/engine/result.py`
+  - `BacktestResult.filter_config_snapshot`.
+- `donor/supertrend_optimizer/data/validator.py`
+  - lowercase collision helper;
+  - `validate_volume_filter_data`.
+- `donor/supertrend_optimizer/data/loader.py`
+  - INFO-only lowercase collision observability.
+- `donor/supertrend_optimizer/testing/runner.py`
+  - helper-based branching;
+  - build/slice VolumeRuntime;
+  - snapshot in `PeriodResult`;
+  - volume summaries.
+- `donor/supertrend_optimizer/testing/signal_events.py`
+  - optional-key consumers.
+- `donor/supertrend_optimizer/io/excel_tester.py`
+  - separated ZigZag/volume sections.
+- `donor/supertrend_optimizer/cli/tester.py`
+  - phase order;
+  - runtime builds.
+- `donor TESTER/run_batch_tester.py`
+  - helper replacement;
+  - VolumeRuntime build/forward.
+- `wf_grid/config/schema.py`
+  - re-export volume config symbols;
+  - add `ExportConfig`.
+- `wf_grid/config/loader.py`
+  - phase pipeline;
+  - allowed keys;
+  - validation.
+- `wf_grid/pipeline/orchestrator.py`
+  - collision check;
+  - volume validation;
+  - runtime build;
+  - retention-aware strip call.
+- `wf_grid/wf/runner.py`
+  - accept/pass volume runtime.
+- `wf_grid/wf/step_executor.py`
+  - slice runtime;
+  - pass to backtest;
+  - attach snapshot;
+  - volume summary counters.
+- `wf_grid/wf/_mp_helpers.py`
+  - worker transport;
+  - retention-aware strip.
+- `wf_grid/collect/step_collector.py`
+  - split filter summary column groups.
+- `wf_grid/export/xlsx_writer.py`
+  - conditional config;
+  - conditional step-sheet columns;
+  - optional `WF_FilterDiagnostics`.
+- `wf_grid/export/summary_builder.py`
+  - conditional volume aggregation.
+- `wf_grid/baseline/fingerprint.py`
+  - snapshot-only volume fingerprint fields.
+
+### Do Not Modify
+
+- `donor TESTER/supertrend_optimizer/*`
+- `grid_point_id` builder
+- `donor/supertrend_optimizer/data/loader.py` parsing semantics
+
+Allowed exception:
+
+- `load_ohlc_csv` may add INFO-only lowercase collision logging before
+  lowercasing.
+
+---
+
+## Merge Order
+
+1. Plan v5 document.
+2. W0: strict helpers and complete call-site audit.
+3. W1: lowercase collision and explicit behavior-change tests.
+4. W2.0: loader phase pipeline.
+5. W10: test inventory.
+6. W2.A: soft `zigzag.enabled`.
+7. W2.B: volume schema.
+8. W2.C1: behavior-preserving validator split.
+9. W2.C2: explicit breaking legality migration.
+10. W3: volume data validation, metrics, runtime, perf smoke.
+11. W4.1: ZigZag characterization and refactor.
+12. W4.2: ZigZag+volume gate.
+13. W5: standalone volume filter and dispatcher.
+14. W6: diagnostics, snapshot and trade diagnostics.
+15. W7: tester integration/export.
+16. W8: wf_grid integration/export/fingerprint/retention.
+17. W9: full regression matrix.
+
+---
+
+## Acceptance Checklist
+
+- v4 remains untouched for history.
+- `trade_filter.enabled` no longer controls ZigZag dispatch directly.
+- Runtime helpers use strict post-validation semantics.
+- Resolvers preserve malformed raw values for validation.
+- `trade_filter.type` is legacy ZigZag marker only.
+- W2.C2 is documented as a breaking migration.
+- Loader follows phase order in wf_grid and tester.
+- Config loader does not validate volume data.
+- Baseline/no-filter path is bit-identical.
+- ZigZag-only path is bit-identical to current ZigZag runtime.
+- Standalone volume does not build/use ZigZag stats.
+- ZigZag+volume gates only lifecycle starts from OFF.
+- Volume params do not enter grid search or `grid_point_id`.
+- `VolumeRuntime` arrays use TZ-aligned names without `_code`.
+- `VolumeRuntime` categorical arrays are int8.
+- `filter_diagnostics["volume_*"]` categorical arrays are strings.
+- `VolumeRuntime` per-bar arrays are read-only.
+- `VolumeRuntime.slice()` uses views and passes memory-sharing tests.
+- W4.1 golden snapshots run in default pytest discovery.
+- W3 100k performance smoke runs in default pytest discovery.
+- Slow perf tests are marked `slow_perf`.
+- Per-bar diagnostics are retained in wf_grid only behind
+  `export.retain_per_bar_filter_diagnostics`.
+- Strip preserves `filter_diagnostics_summary` and `filter_config_snapshot`.
+- Export/fingerprint/collectors do not leak inactive subfilter fields.
+- Generic trade diagnostics helper supports ZigZag, standalone-volume and
+  ZigZag+volume.
+- Tester standalone-volume path does not require ZigZag diagnostics.
+- Tester loader logs lowercase collision without raising.
+- wf_grid raises on lowercase collision before lowercasing.
+- `equal_blocks + trade_filter.enabled=true` is rejected for all enabled
+  subfilter modes.
+- Full regression matrix is documented.
+
+---
+
+## Out of Scope
+
+- Grid search across volume parameters.
+- Cycle-level diagnostics table.
+- Exposing `direction_source` / `threshold_type` config.
+- Supporting `equal_blocks` with any enabled trade filter.
+- Migrating wf_grid to shared `load_ohlc_csv`.
+- numba or bottleneck rolling-median acceleration.

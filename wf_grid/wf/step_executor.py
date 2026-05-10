@@ -16,6 +16,8 @@ import pandas as pd
 from supertrend_optimizer.core._fsm_state_names import (
     FSM_STATE_NAMES as _ALL_FSM_STATES,
     ACTIVE_LIFECYCLE_STATES as _ACTIVE_LIFECYCLE_STATES,
+    STANDALONE_VOLUME_ACTIVE_STATES as _VOLUME_ACTIVE_STATES,
+    STANDALONE_VOLUME_STATE_NAMES as _VOLUME_STATES,
 )
 from supertrend_optimizer.engine.run import run_single_backtest
 from supertrend_optimizer.core.metrics import calculate_all_metrics
@@ -28,6 +30,7 @@ from wf_grid.config.loader import ConfigError
 if TYPE_CHECKING:
     from wf_grid.config.schema import GridConfig
     from wf_grid.grid.enumeration import GridPoint
+    from supertrend_optimizer.core.volume_metrics import VolumeRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +92,7 @@ class StepResult:
     # median_stop_triggered_count, stopping_started_count.
     # None when trade_filter is disabled or absent.
     filter_diagnostics_summary: Optional[Dict[str, Any]] = None
+    filter_config_snapshot: Optional[dict] = None
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +140,8 @@ def _compute_filter_diagnostics_summary(
         summary["n_bars_in_stopping"] = int(np.sum(state_np == "ST_STOPPING"))
 
         # filter_states_visited: comma-joined sorted list of observed states
-        visited = sorted(s for s in _ALL_FSM_STATES if np.any(state_np == s))
+        known_states = tuple(dict.fromkeys(_ALL_FSM_STATES + _VOLUME_STATES))
+        visited = sorted(s for s in known_states if np.any(state_np == s))
         summary["filter_states_visited"] = ",".join(visited) if visited else ""
 
         # lifecycle_starts_count: transitions INTO active lifecycle states.
@@ -144,6 +149,8 @@ def _compute_filter_diagnostics_summary(
         # only requires one edit (in shared) — plan §7.4.
         lifecycle_active = np.zeros(n, dtype=bool)
         for _s in _ACTIVE_LIFECYCLE_STATES:
+            lifecycle_active |= (state_np == _s)
+        for _s in _VOLUME_ACTIVE_STATES:
             lifecycle_active |= (state_np == _s)
         lifecycle_starts = int(n > 0 and lifecycle_active[0])
         if n > 1:
@@ -263,7 +270,71 @@ def _compute_filter_diagnostics_summary(
         arr = np.asarray(gate_mb_arr_raw)
         summary["candidate_duration_max_bars"] = int(arr[0]) if len(arr) > 0 else -1
 
+    if "volume_regime" in filter_diagnostics:
+        summary.update(_compute_volume_diagnostics_summary(filter_diagnostics))
+
     return summary
+
+
+def _compute_volume_diagnostics_summary(
+    filter_diagnostics: Dict[str, Any],
+) -> Dict[str, Any]:
+    state = np.asarray(filter_diagnostics.get("trade_filter_state", []))
+    block = np.asarray(filter_diagnostics.get("filter_block_reason", []))
+    regime = np.asarray(filter_diagnostics.get("volume_regime", []))
+    direction = np.asarray(filter_diagnostics.get("volume_initial_direction", []))
+    median_relative = np.asarray(
+        filter_diagnostics.get("median_relative_volume", []), dtype=np.float64
+    )
+
+    volume_reasons = {
+        "volume_direction_warmup",
+        "volume_unknown_direction",
+        "volume_trade_mode_disallowed_direction",
+        "volume_warmup",
+        "volume_baseline_zero",
+        "volume_below_baseline",
+        "volume_above_baseline",
+    }
+    blocked_mask = np.isin(block, list(volume_reasons)) if len(block) else np.array([], dtype=bool)
+    active = np.isin(state, list(_VOLUME_ACTIVE_STATES)) if len(state) else np.array([], dtype=bool)
+    starts = int(len(active) > 0 and bool(active[0]))
+    if len(active) > 1:
+        starts += int(np.sum(active[1:] & ~active[:-1]))
+
+    finite = median_relative[np.isfinite(median_relative)] if len(median_relative) else []
+    return {
+        "n_volume_blocked_start_attempts": int(np.sum(blocked_mask)),
+        "n_volume_blocked_start_attempts_long": int(
+            np.sum(blocked_mask & (direction == "long"))
+        ) if len(direction) == len(blocked_mask) else 0,
+        "n_volume_blocked_start_attempts_short": int(
+            np.sum(blocked_mask & (direction == "short"))
+        ) if len(direction) == len(blocked_mask) else 0,
+        "n_volume_blocked_start_attempts_unknown_direction": int(
+            np.sum(blocked_mask & (direction == "unknown"))
+        ) if len(direction) == len(blocked_mask) else 0,
+        "n_volume_warmup_blocked_start_attempts": int(
+            np.sum(block == "volume_warmup")
+        ) if len(block) else 0,
+        "n_volume_below_baseline_blocked_start_attempts": int(np.sum(block == "volume_below_baseline")) if len(block) else 0,
+        "n_volume_above_baseline_blocked_start_attempts": int(np.sum(block == "volume_above_baseline")) if len(block) else 0,
+        "n_volume_baseline_zero_blocked_start_attempts": int(np.sum(block == "volume_baseline_zero")) if len(block) else 0,
+        "n_volume_direction_warmup_blocked_start_attempts": int(
+            np.sum(block == "volume_direction_warmup")
+        ) if len(block) else 0,
+        "n_volume_unknown_direction_blocked_start_attempts": int(np.sum(block == "volume_unknown_direction")) if len(block) else 0,
+        "n_volume_trade_mode_disallowed_direction_blocked_start_attempts": int(
+            np.sum(block == "volume_trade_mode_disallowed_direction")
+        ) if len(block) else 0,
+        "n_volume_low_regime_bars": int(np.sum(regime == "low_volume")) if len(regime) else 0,
+        "n_volume_normal_regime_bars": int(np.sum(regime == "normal_volume")) if len(regime) else 0,
+        "n_volume_high_regime_bars": int(np.sum(regime == "high_volume")) if len(regime) else 0,
+        "avg_median_relative_volume": (
+            float(np.mean(finite)) if len(finite) else None
+        ),
+        "n_volume_started_cycles": starts,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +352,7 @@ def execute_oos_step(
     config: "GridConfig",
     prepend_bars_requested: int,
     zigzag_global_stats: Any = None,
+    volume_runtime: "Optional[VolumeRuntime]" = None,
 ) -> StepResult:
     """
     Execute one OOS WF step with canonical prepend path (§W.4.2).
@@ -307,6 +379,11 @@ def execute_oos_step(
     ext_low = full_low[ext_start:test_end]
     ext_close = full_close[ext_start:test_end]
     ext_index = full_index[ext_start:test_end]
+    sliced_volume_runtime = (
+        volume_runtime.slice(ext_start, test_end)
+        if volume_runtime is not None
+        else None
+    )
 
     # --- Step 4: run backtest on extended slice ---
     # early_exit is hardcoded False for OOS steps regardless of config.
@@ -338,6 +415,7 @@ def execute_oos_step(
         execution_model=ExecutionModel.OPEN_TO_OPEN,
         trade_filter_config=trade_filter_config,
         zigzag_global_stats=zigzag_global_stats,
+        volume_runtime=sliced_volume_runtime,
         global_offset=ext_start,
     )
     if ext_result.early_exit:
@@ -452,6 +530,7 @@ def execute_oos_step(
         early_exit=ext_result.early_exit,
         filter_diagnostics_oos=filter_diagnostics_oos,
         filter_diagnostics_summary=_compute_filter_diagnostics_summary(filter_diagnostics_oos),
+        filter_config_snapshot=ext_result.filter_config_snapshot,
     )
 
 
@@ -469,6 +548,7 @@ def execute_train_step(
     full_index: pd.Index,
     config: "GridConfig",
     zigzag_global_stats: Any = None,
+    volume_runtime: "Optional[VolumeRuntime]" = None,
 ) -> StepResult:
     """Execute one train WF step (§W.6). No prepend."""
     train_start = wf_slice.train_start_idx
@@ -485,6 +565,11 @@ def execute_train_step(
     train_low = full_low[train_start:train_end]
     train_close = full_close[train_start:train_end]
     train_index = full_index[train_start:train_end]
+    sliced_volume_runtime = (
+        volume_runtime.slice(train_start, train_end)
+        if volume_runtime is not None
+        else None
+    )
 
     trade_filter_config = getattr(config, "trade_filter", None)
     result = run_single_backtest(
@@ -506,6 +591,7 @@ def execute_train_step(
         execution_model=ExecutionModel.OPEN_TO_OPEN,
         trade_filter_config=trade_filter_config,
         zigzag_global_stats=zigzag_global_stats,
+        volume_runtime=sliced_volume_runtime,
         global_offset=train_start,
     )
 
@@ -534,6 +620,7 @@ def execute_train_step(
         early_exit=False,
         filter_diagnostics_oos=train_filter_diag,
         filter_diagnostics_summary=_compute_filter_diagnostics_summary(train_filter_diag),
+        filter_config_snapshot=result.filter_config_snapshot,
     )
 
 
@@ -770,4 +857,5 @@ def _defensive_fallback(
         early_exit=ext_result.early_exit,
         filter_diagnostics_oos=None,
         filter_diagnostics_summary=None,
+        filter_config_snapshot=getattr(ext_result, "filter_config_snapshot", None),
     )

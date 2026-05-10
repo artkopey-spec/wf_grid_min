@@ -196,6 +196,7 @@ class TestV39ModeABParity:
             enabled=True,
             type="zigzag_st_mode",
             zigzag=TradeFilterZigZagConfig(
+                enabled=True,
                 reversal_threshold=0.01,
                 candidate_trigger_threshold=0.05,
                 mode=None,
@@ -214,6 +215,7 @@ class TestV39ModeABParity:
             enabled=True,
             type="zigzag_st_mode",
             zigzag=TradeFilterZigZagConfig(
+                enabled=True,
                 reversal_threshold=0.01,
                 candidate_trigger_threshold=0.05,
                 mode=expected_mode,
@@ -304,6 +306,7 @@ class TestV39ModeABParity:
             enabled=True,
             type="zigzag_st_mode",
             zigzag=TradeFilterZigZagConfig(
+                enabled=True,
                 reversal_threshold=0.01,
                 candidate_trigger_threshold=0.05,
                 mode=None,

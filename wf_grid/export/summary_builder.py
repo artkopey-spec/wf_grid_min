@@ -157,6 +157,16 @@ _SEGMENT_METRICS: List[str] = [
     "prepend_bars_applied",
     "effective_oos_bars",
     "used_defensive_fallback",
+    "n_volume_blocked_start_attempts",
+    "n_volume_warmup_blocked_start_attempts",
+    "n_volume_below_baseline_blocked_start_attempts",
+    "n_volume_above_baseline_blocked_start_attempts",
+    "n_volume_baseline_zero_blocked_start_attempts",
+    "n_volume_direction_warmup_blocked_start_attempts",
+    "n_volume_unknown_direction_blocked_start_attempts",
+    "n_volume_trade_mode_disallowed_direction_blocked_start_attempts",
+    "avg_median_relative_volume",
+    "n_volume_started_cycles",
 ]
 
 # Desired metric order within each Sx_* segment block
@@ -174,9 +184,32 @@ _SEGMENT_METRIC_ORDER: List[str] = [
     "effective_oos_bars",
     "prepend_bars_applied",
     "used_defensive_fallback",
+    "n_volume_blocked_start_attempts",
+    "n_volume_warmup_blocked_start_attempts",
+    "n_volume_below_baseline_blocked_start_attempts",
+    "n_volume_above_baseline_blocked_start_attempts",
+    "n_volume_baseline_zero_blocked_start_attempts",
+    "n_volume_direction_warmup_blocked_start_attempts",
+    "n_volume_unknown_direction_blocked_start_attempts",
+    "n_volume_trade_mode_disallowed_direction_blocked_start_attempts",
+    "avg_median_relative_volume",
+    "n_volume_started_cycles",
     "segment_label",
     "wf_step",
 ]
+
+_VOLUME_SEGMENT_METRICS: frozenset[str] = frozenset({
+    "n_volume_blocked_start_attempts",
+    "n_volume_warmup_blocked_start_attempts",
+    "n_volume_below_baseline_blocked_start_attempts",
+    "n_volume_above_baseline_blocked_start_attempts",
+    "n_volume_baseline_zero_blocked_start_attempts",
+    "n_volume_direction_warmup_blocked_start_attempts",
+    "n_volume_unknown_direction_blocked_start_attempts",
+    "n_volume_trade_mode_disallowed_direction_blocked_start_attempts",
+    "avg_median_relative_volume",
+    "n_volume_started_cycles",
+})
 
 
 def build_summary_wide(
@@ -397,7 +430,7 @@ def _build_segment_columns(step_oos_long: pd.DataFrame) -> pd.DataFrame:
         if gp_id not in rows:
             rows[gp_id] = {"grid_point_id": gp_id}
 
-        for metric in _SEGMENT_METRICS:
+        for metric in _segment_metrics_for(step_oos_long):
             if metric in row.index:
                 rows[gp_id][f"{label}_{metric}"] = row[metric]
 
@@ -409,6 +442,12 @@ def _build_segment_columns(step_oos_long: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=["grid_point_id"])
 
     return pd.DataFrame(list(rows.values()))
+
+
+def _segment_metrics_for(step_oos_long: pd.DataFrame) -> List[str]:
+    if any(c in step_oos_long.columns for c in _VOLUME_SEGMENT_METRICS):
+        return list(_SEGMENT_METRICS)
+    return [m for m in _SEGMENT_METRICS if m not in _VOLUME_SEGMENT_METRICS]
 
 
 # ---------------------------------------------------------------------------

@@ -14,6 +14,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from supertrend_optimizer.core.trade_filter_config import (
+    is_volume_enabled,
+    is_zigzag_enabled,
+)
+
 from supertrend_optimizer.testing.runner import PeriodResult, SegmentResult
 from supertrend_optimizer.utils.constants import INVALID_METRIC_VALUE
 from supertrend_optimizer.io.excel_format_helpers import format_excel_export_df
@@ -146,6 +151,12 @@ FILTER_DIAGNOSTICS_100_DISPLAY_NAMES: Dict[str, str] = {
     "time_filter_enabled":          "Time Filter Enabled",
     "time_filter_in_window":        "Time Filter In Window",
     "time_filter_reset_event":      "Time Filter Reset Event",
+    # W7 volume diagnostics.
+    "volume_regime":                    "Volume Regime",
+    "volume_condition_allowed":         "Volume Condition Allowed",
+    "volume_condition_block_reason":    "Volume Condition Block Reason",
+    "volume_initial_direction":         "Volume Initial Direction",
+    "median_relative_volume":           "Median Relative Volume",
 }
 
 # ZigZag_Trigger_Events sheet column order (plan §9.2, extended by WP-V3-8 §11.2)
@@ -948,39 +959,102 @@ def _build_filter_summary_block_df(period_results: List[PeriodResult]) -> Option
     Returns None if no period has filter_diagnostics_summary (disabled path).
     """
     rows = []
+    has_zigzag = any(
+        pr.filter_diagnostics_summary is not None
+        and pr.filter_diagnostics_summary.get("mode") != "volume_only"
+        for pr in period_results
+    )
+    has_volume = any(
+        pr.filter_diagnostics_summary is not None
+        and (
+            "n_volume_blocked_start_attempts" in pr.filter_diagnostics_summary
+            or "volume_regime" in (pr.filter_diagnostics or {})
+        )
+        for pr in period_results
+    )
     for pr in period_results:
         s = pr.filter_diagnostics_summary
         if s is None:
             return None
         ctr = s.get("counters", {})
         bis = s.get("bars_in_state", {})
-        rows.append({
+        row = {
             "Period":              pr.period_label,
-            "ZigZag Mode":         s.get("zigzag_mode", s.get("mode", "")),
-            "Candidate Duration Gate Enabled": s.get("candidate_duration_gate_enabled", ""),
-            "Candidate Duration Max Bars": s.get("candidate_duration_max_bars", ""),
             "Bars OFF":            bis.get("OFF", 0),
-            "Bars WAIT":           bis.get("WAIT_FIRST_ST_FLIP", 0),
-            "Bars FREEZE":         bis.get("ST_ACTIVE_FREEZE", 0),
-            "Bars MONITORING":     bis.get("ST_ACTIVE_MONITORING", 0),
-            "Bars COUNTING ZZ":    bis.get("ST_COUNTING_ZZ_LEGS", 0),
-            "Bars STOPPING":       bis.get("ST_STOPPING", 0),
-            "Lifecycle Starts":    ctr.get("lifecycle_starts", s.get("lifecycle_starts_count", 0)),
-            "Median Stop Events":  ctr.get("median_stop_triggered", s.get("median_stop_triggered_count", 0)),
-            "ZZ Leg Stop Events":  ctr.get("zz_leg_stop_triggered", s.get("zz_leg_stop_triggered_count", 0)),
-            "Raw ST Flips":        ctr.get("raw_st_flips", 0),
-            "Entries Allowed":     ctr.get("passed_entry_signals", 0),
-            "Entries Blocked":     ctr.get("blocked_entry_signals", 0),
-            "Exits Opposite Flip": ctr.get("exits_opposite_flip", 0),
-            "Immediate Entries Count": s.get(
-                "immediate_entries_count",
-                ctr.get("immediate_entries_count", 0),
-            ),
-            "Immediate Entries Blocked Count": s.get(
-                "immediate_entries_blocked_count",
-                ctr.get("immediate_entries_blocked_count", 0),
-            ),
-        })
+        }
+        if has_zigzag:
+            row.update({
+                "ZigZag Mode":         s.get("zigzag_mode", s.get("mode", "")),
+                "Candidate Duration Gate Enabled": s.get("candidate_duration_gate_enabled", ""),
+                "Candidate Duration Max Bars": s.get("candidate_duration_max_bars", ""),
+                "Bars WAIT":           bis.get("WAIT_FIRST_ST_FLIP", 0),
+                "Bars FREEZE":         bis.get("ST_ACTIVE_FREEZE", 0),
+                "Bars MONITORING":     bis.get("ST_ACTIVE_MONITORING", 0),
+                "Bars COUNTING ZZ":    bis.get("ST_COUNTING_ZZ_LEGS", 0),
+                "Bars STOPPING":       bis.get("ST_STOPPING", 0),
+                "Lifecycle Starts":    ctr.get("lifecycle_starts", s.get("lifecycle_starts_count", 0)),
+                "Median Stop Events":  ctr.get("median_stop_triggered", s.get("median_stop_triggered_count", 0)),
+                "ZZ Leg Stop Events":  ctr.get("zz_leg_stop_triggered", s.get("zz_leg_stop_triggered_count", 0)),
+                "Raw ST Flips":        ctr.get("raw_st_flips", 0),
+                "Entries Allowed":     ctr.get("passed_entry_signals", 0),
+                "Entries Blocked":     ctr.get("blocked_entry_signals", 0),
+                "Exits Opposite Flip": ctr.get("exits_opposite_flip", 0),
+                "Immediate Entries Count": s.get(
+                    "immediate_entries_count",
+                    ctr.get("immediate_entries_count", 0),
+                ),
+                "Immediate Entries Blocked Count": s.get(
+                    "immediate_entries_blocked_count",
+                    ctr.get("immediate_entries_blocked_count", 0),
+                ),
+            })
+        if has_volume:
+            row.update({
+                "Volume Blocked Starts": ctr.get(
+                    "n_volume_blocked_start_attempts",
+                    s.get("n_volume_blocked_start_attempts", 0),
+                ),
+                "Volume Warmup Blocks": ctr.get(
+                    "n_volume_warmup_blocked_start_attempts",
+                    s.get("n_volume_warmup_blocked_start_attempts", 0),
+                ),
+                "Volume Below Baseline": ctr.get(
+                    "n_volume_below_baseline_blocked_start_attempts",
+                    s.get("n_volume_below_baseline_blocked_start_attempts", 0),
+                ),
+                "Volume Above Baseline": ctr.get(
+                    "n_volume_above_baseline_blocked_start_attempts",
+                    s.get("n_volume_above_baseline_blocked_start_attempts", 0),
+                ),
+                "Volume Baseline Zero": ctr.get(
+                    "n_volume_baseline_zero_blocked_start_attempts",
+                    s.get("n_volume_baseline_zero_blocked_start_attempts", 0),
+                ),
+                "Volume Direction Warmup Blocks": ctr.get(
+                    "n_volume_direction_warmup_blocked_start_attempts",
+                    s.get("n_volume_direction_warmup_blocked_start_attempts", 0),
+                ),
+                "Volume Unknown Direction Blocks": ctr.get(
+                    "n_volume_unknown_direction_blocked_start_attempts",
+                    s.get("n_volume_unknown_direction_blocked_start_attempts", 0),
+                ),
+                "Volume Trade Mode Direction Blocks": ctr.get(
+                    "n_volume_trade_mode_disallowed_direction_blocked_start_attempts",
+                    s.get(
+                        "n_volume_trade_mode_disallowed_direction_blocked_start_attempts",
+                        0,
+                    ),
+                ),
+                "Volume Started Cycles": ctr.get(
+                    "n_volume_started_cycles",
+                    s.get("n_volume_started_cycles", 0),
+                ),
+                "Avg Median Relative Volume": ctr.get(
+                    "avg_median_relative_volume",
+                    s.get("avg_median_relative_volume", None),
+                ),
+            })
+        rows.append(row)
     if not rows:
         return None
     return pd.DataFrame(rows)
@@ -1288,6 +1362,16 @@ def _build_filters_summary_df(period_results: List[PeriodResult]) -> Optional[pd
             "Time Filter Reset Count":         s.get("time_filter_reset_count", ctr.get("time_filter_reset_count", 0)),
             "Time Filter Bars In Window":      s.get("time_filter_bars_in_window", ctr.get("time_filter_bars_in_window", 0)),
             "Time Filter Bars Out Window":     s.get("time_filter_bars_out_window", ctr.get("time_filter_bars_out_window", 0)),
+            "Volume Blocked Starts":           s.get("n_volume_blocked_start_attempts", ctr.get("n_volume_blocked_start_attempts", 0)),
+            "Volume Warmup Blocks":            s.get("n_volume_warmup_blocked_start_attempts", ctr.get("n_volume_warmup_blocked_start_attempts", 0)),
+            "Volume Below Baseline":           s.get("n_volume_below_baseline_blocked_start_attempts", ctr.get("n_volume_below_baseline_blocked_start_attempts", 0)),
+            "Volume Above Baseline":           s.get("n_volume_above_baseline_blocked_start_attempts", ctr.get("n_volume_above_baseline_blocked_start_attempts", 0)),
+            "Volume Baseline Zero":            s.get("n_volume_baseline_zero_blocked_start_attempts", ctr.get("n_volume_baseline_zero_blocked_start_attempts", 0)),
+            "Volume Direction Warmup Blocks":  s.get("n_volume_direction_warmup_blocked_start_attempts", ctr.get("n_volume_direction_warmup_blocked_start_attempts", 0)),
+            "Volume Unknown Direction Blocks": s.get("n_volume_unknown_direction_blocked_start_attempts", ctr.get("n_volume_unknown_direction_blocked_start_attempts", 0)),
+            "Volume Trade Mode Direction Blocks": s.get("n_volume_trade_mode_disallowed_direction_blocked_start_attempts", ctr.get("n_volume_trade_mode_disallowed_direction_blocked_start_attempts", 0)),
+            "Volume Started Cycles":           s.get("n_volume_started_cycles", ctr.get("n_volume_started_cycles", 0)),
+            "Avg Median Relative Volume":      s.get("avg_median_relative_volume", ctr.get("avg_median_relative_volume", None)),
         })
     period_df = pd.DataFrame(period_rows)
     return (params_df, period_df)  # type: ignore[return-value]
@@ -1660,14 +1744,29 @@ def export_tester_results(
     # exports of the same data remain cell-identical in Tester_Config.
 
     # Determine filter mode (plan §9.1)
-    filter_enabled = (trade_filter_config is not None and trade_filter_config.enabled)
+    zigzag_enabled = is_zigzag_enabled(trade_filter_config)
+    volume_enabled = is_volume_enabled(trade_filter_config)
+    filter_enabled = zigzag_enabled or volume_enabled
+    snapshot = next(
+        (
+            pr.filter_config_snapshot
+            for pr in period_results
+            if getattr(pr, "filter_config_snapshot", None) is not None
+        ),
+        None,
+    )
+    if volume_enabled and snapshot is not None:
+        run_metadata_payload.setdefault("filter_config_snapshot", snapshot)
     export_state_cols = (
-        filter_enabled
-        and trade_filter_config.diagnostics is not None
-        and trade_filter_config.diagnostics.export_state_columns
+        volume_enabled
+        or (
+            zigzag_enabled
+            and trade_filter_config.diagnostics is not None
+            and trade_filter_config.diagnostics.export_state_columns
+        )
     )
     export_trigger_cols = (
-        filter_enabled
+        zigzag_enabled
         and trade_filter_config.diagnostics is not None
         and trade_filter_config.diagnostics.export_trigger_columns
     )
@@ -1767,7 +1866,7 @@ def export_tester_results(
                 _write_filter_diagnostics_100_sheet(writer, fd_100)
 
             # ZigZag_Trigger_Events (gated: export_trigger_columns=True)
-            if export_trigger_cols and fd_100 is not None:
+            if zigzag_enabled and export_trigger_cols and fd_100 is not None:
                 df_index = df.index if df is not None else None
                 trigger_df = _build_zigzag_trigger_events_df(
                     filter_diagnostics=fd_100,
@@ -1778,11 +1877,11 @@ def export_tester_results(
                 _write_zigzag_trigger_events_sheet(writer, trigger_df)
 
             # filters_summary (gated: export_state_columns=True)
-            if export_state_cols:
+            if zigzag_enabled and export_state_cols:
                 _write_filters_summary_sheet(writer, period_results)
 
-            # cycle (independent of diagnostic export flags; requires enabled + diagnostics)
-            if fd_100 is not None:
+            # cycle (independent of diagnostic export flags; requires ZigZag diagnostics)
+            if zigzag_enabled and fd_100 is not None:
                 cycle_df = _build_cycle_sheet_df(fd_100, df, trades_100_raw)
                 _write_cycle_sheet(writer, cycle_df)
 

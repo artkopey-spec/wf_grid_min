@@ -33,12 +33,18 @@ import pandas as pd
 from supertrend_optimizer.core._fsm_state_names import (
     FSM_STATE_NAMES as _FSM_STATES,
     ACTIVE_LIFECYCLE_STATES as _ACTIVE_LIFECYCLE_STATES,
+    STANDALONE_VOLUME_ACTIVE_STATES as _VOLUME_ACTIVE_STATES,
+    STANDALONE_VOLUME_STATE_NAMES as _VOLUME_STATES,
 )
 from supertrend_optimizer.core.backtest import generate_positions
 from supertrend_optimizer.core.metrics import calculate_all_metrics
 from supertrend_optimizer.core.trade_filter_config import (
+    is_trade_filter_enabled,
+    is_volume_enabled,
+    is_zigzag_enabled,
     resolve_trade_filter_mode_in_place,
 )
+from supertrend_optimizer.core.volume_metrics import VolumeRuntime
 from supertrend_optimizer.core.zigzag_st_filter import build_zigzag_global_stats
 from supertrend_optimizer.data.loader import load_ohlc_csv
 from supertrend_optimizer.data.validator import validate_ohlc_data
@@ -79,6 +85,7 @@ class PeriodResult:
     # Both are None on the disabled path (plan §3.3.3).
     filter_diagnostics: Optional[Dict[str, np.ndarray]] = field(default=None)
     filter_diagnostics_summary: Optional[Dict[str, Any]] = field(default=None)
+    filter_config_snapshot: Optional[dict] = None
 
     # Convenience accessors (delegate to result)
     @property
@@ -187,7 +194,10 @@ def _bars_in_state_histogram(
     Plan reference: §3.3.2 (bars_in_state; sanity invariant 6).
     """
     state_arr = filter_diagnostics["trade_filter_state"]
-    return {s: int(np.sum(state_arr == s)) for s in _FSM_STATES}
+    states = list(_FSM_STATES)
+    if any(np.any(state_arr == s) for s in _VOLUME_STATES if s != "OFF"):
+        states.extend(s for s in _VOLUME_STATES if s not in states)
+    return {s: int(np.sum(state_arr == s)) for s in states}
 
 
 def _compute_summary_counters(
@@ -252,6 +262,8 @@ def _compute_summary_counters(
     state_arr = filter_diagnostics["trade_filter_state"]
     lifecycle_active = np.zeros(len(state_arr), dtype=bool)
     for _s in _ACTIVE_LIFECYCLE_STATES:
+        lifecycle_active |= (state_arr == _s)
+    for _s in _VOLUME_ACTIVE_STATES:
         lifecycle_active |= (state_arr == _s)
     lifecycle_starts = int(len(state_arr) > 0 and lifecycle_active[0])
     if len(state_arr) > 1:
@@ -345,6 +357,51 @@ def _compute_summary_counters(
     }
 
 
+def _compute_volume_summary_counters(
+    filter_diagnostics: Dict[str, np.ndarray],
+) -> Dict[str, Any]:
+    state = np.asarray(filter_diagnostics.get("trade_filter_state", []))
+    block = np.asarray(filter_diagnostics.get("filter_block_reason", []))
+    regime = np.asarray(filter_diagnostics.get("volume_regime", []))
+    direction = np.asarray(filter_diagnostics.get("volume_initial_direction", []))
+    median_relative = np.asarray(
+        filter_diagnostics.get("median_relative_volume", []), dtype=np.float64
+    )
+    volume_reasons = {
+        "volume_direction_warmup",
+        "volume_unknown_direction",
+        "volume_trade_mode_disallowed_direction",
+        "volume_warmup",
+        "volume_baseline_zero",
+        "volume_below_baseline",
+        "volume_above_baseline",
+    }
+    blocked = np.isin(block, list(volume_reasons)) if len(block) else np.array([], dtype=bool)
+    active = np.isin(state, list(_VOLUME_ACTIVE_STATES)) if len(state) else np.array([], dtype=bool)
+    starts = int(len(active) > 0 and bool(active[0]))
+    if len(active) > 1:
+        starts += int(np.sum(active[1:] & ~active[:-1]))
+    finite = median_relative[np.isfinite(median_relative)] if len(median_relative) else []
+    return {
+        "n_volume_blocked_start_attempts": int(np.sum(blocked)),
+        "n_volume_blocked_start_attempts_long": int(np.sum(blocked & (direction == "long"))) if len(direction) == len(blocked) else 0,
+        "n_volume_blocked_start_attempts_short": int(np.sum(blocked & (direction == "short"))) if len(direction) == len(blocked) else 0,
+        "n_volume_blocked_start_attempts_unknown_direction": int(np.sum(blocked & (direction == "unknown"))) if len(direction) == len(blocked) else 0,
+        "n_volume_warmup_blocked_start_attempts": int(np.sum(block == "volume_warmup")) if len(block) else 0,
+        "n_volume_below_baseline_blocked_start_attempts": int(np.sum(block == "volume_below_baseline")) if len(block) else 0,
+        "n_volume_above_baseline_blocked_start_attempts": int(np.sum(block == "volume_above_baseline")) if len(block) else 0,
+        "n_volume_baseline_zero_blocked_start_attempts": int(np.sum(block == "volume_baseline_zero")) if len(block) else 0,
+        "n_volume_direction_warmup_blocked_start_attempts": int(np.sum(block == "volume_direction_warmup")) if len(block) else 0,
+        "n_volume_unknown_direction_blocked_start_attempts": int(np.sum(block == "volume_unknown_direction")) if len(block) else 0,
+        "n_volume_trade_mode_disallowed_direction_blocked_start_attempts": int(np.sum(block == "volume_trade_mode_disallowed_direction")) if len(block) else 0,
+        "n_volume_low_regime_bars": int(np.sum(regime == "low_volume")) if len(regime) else 0,
+        "n_volume_normal_regime_bars": int(np.sum(regime == "normal_volume")) if len(regime) else 0,
+        "n_volume_high_regime_bars": int(np.sum(regime == "high_volume")) if len(regime) else 0,
+        "avg_median_relative_volume": float(np.mean(finite)) if len(finite) else None,
+        "n_volume_started_cycles": starts,
+    }
+
+
 def _build_filter_diagnostics_summary(
     result: BacktestResult,
     trade_filter_config: Any,
@@ -363,11 +420,23 @@ def _build_filter_diagnostics_summary(
 
     Plan reference: §3.3.2, §6.3
     """
-    if trade_filter_config is None or not trade_filter_config.enabled:
+    if not is_trade_filter_enabled(trade_filter_config):
         return None
     if result.filter_diagnostics is None:
         # Should not happen on the enabled path; guard defensively.
         return None
+    volume_counters = (
+        _compute_volume_summary_counters(result.filter_diagnostics)
+        if "volume_regime" in result.filter_diagnostics else {}
+    )
+    if not is_zigzag_enabled(trade_filter_config):
+        return {
+            "mode": "volume_only",
+            "global_offset": global_offset,
+            "counters": volume_counters,
+            "bars_in_state": _bars_in_state_histogram(result.filter_diagnostics),
+            **volume_counters,
+        }
 
     # Regenerate pre-filter positions locally (deterministic; plan §3.3.5).
     positions_raw = generate_positions(
@@ -383,6 +452,7 @@ def _build_filter_diagnostics_summary(
         filter_diagnostics=result.filter_diagnostics,
         trades_df=result.trades_df,
     )
+    counters.update(volume_counters)
     bars_in_state = _bars_in_state_histogram(result.filter_diagnostics)
 
     zigzag_mode = str(getattr(zigzag_global_stats, "zigzag_mode", "") or "")
@@ -414,7 +484,21 @@ def _build_filter_diagnostics_summary(
         "global_offset": global_offset,
         "counters": counters,
         "bars_in_state": bars_in_state,
+        **volume_counters,
     }
+
+
+def _slice_volume_runtime_for_period(
+    volume_runtime: Optional[VolumeRuntime],
+    *,
+    global_offset: int,
+    n_bars: int,
+) -> Optional[VolumeRuntime]:
+    if volume_runtime is None:
+        return None
+    if volume_runtime.reference_length == n_bars:
+        return volume_runtime
+    return volume_runtime.slice(global_offset, global_offset + n_bars)
 
 
 def run_period(
@@ -435,6 +519,7 @@ def run_period(
     # WP-T4 (Phase 2) — ZigZag ST filter integration (plan §6.1)
     trade_filter_config: Any = None,
     zigzag_global_stats: Any = None,
+    volume_runtime: Optional[VolumeRuntime] = None,
     global_offset: int = 0,
 ) -> PeriodResult:
     """
@@ -475,10 +560,10 @@ def run_period(
             ``zigzag_global_stats`` is ``None`` (plan §7.2 fail-closed rule).
     """
     # WP-T4 fail-fast: enabled filter requires pre-materialised stats (plan §7.2).
-    filter_enabled = (
-        trade_filter_config is not None and trade_filter_config.enabled
-    )
-    if filter_enabled and zigzag_global_stats is None:
+    zigzag_enabled = is_zigzag_enabled(trade_filter_config)
+    volume_enabled = is_volume_enabled(trade_filter_config)
+    filter_enabled = zigzag_enabled or volume_enabled
+    if zigzag_enabled and zigzag_global_stats is None:
         raise ConfigError(
             "zigzag_global_stats required when trade_filter is enabled; "
             "materialise stats with build_zigzag_global_stats(close, config) "
@@ -493,6 +578,11 @@ def run_period(
     index = df.index
 
     n_bars = len(df)
+    period_volume_runtime = _slice_volume_runtime_for_period(
+        volume_runtime,
+        global_offset=global_offset,
+        n_bars=n_bars,
+    )
 
     # Run backtest using unified engine (no early exit for tester)
     result = run_single_backtest(
@@ -518,7 +608,8 @@ def run_period(
         auto_warmup=auto_warmup,
         # WP-T4 new params forwarded to engine (plan §6.1)
         trade_filter_config=trade_filter_config if filter_enabled else None,
-        zigzag_global_stats=zigzag_global_stats if filter_enabled else None,
+        zigzag_global_stats=zigzag_global_stats if zigzag_enabled else None,
+        volume_runtime=period_volume_runtime,
         global_offset=global_offset if filter_enabled else 0,
     )
 
@@ -543,6 +634,7 @@ def run_period(
         result=result,
         filter_diagnostics=result.filter_diagnostics,
         filter_diagnostics_summary=summary,
+        filter_config_snapshot=result.filter_config_snapshot,
     )
 
 
@@ -561,6 +653,7 @@ def run_all_periods(
     # WP-T4 (Phase 2) — ZigZag ST filter integration (plan §6.1 / §7.3)
     trade_filter_config: Any = None,
     zigzag_global_stats: Any = None,
+    volume_runtime: Optional[VolumeRuntime] = None,
 ) -> List[PeriodResult]:
     """
     Run backtest on all periods (100%, 75%, 50%, 33%, 25%).
@@ -603,10 +696,9 @@ def run_all_periods(
     n_total = len(df)
 
     # WP-T4 §7.3 — materialise stats once from the full df when not supplied.
-    filter_enabled = (
-        trade_filter_config is not None and trade_filter_config.enabled
-    )
-    if filter_enabled and zigzag_global_stats is None:
+    zigzag_enabled = is_zigzag_enabled(trade_filter_config)
+    filter_enabled = zigzag_enabled or is_volume_enabled(trade_filter_config)
+    if zigzag_enabled and zigzag_global_stats is None:
         triggers_marker = getattr(trade_filter_config, "_raw_triggers_present", None)
         raw_user_keys = (
             frozenset({("trade_filter", "triggers")})
@@ -629,6 +721,11 @@ def run_all_periods(
 
         # WP-T4 §4.1 — per-period global_offset for FSM diagnostics alignment.
         period_global_offset = n_total - n_period
+        period_volume_runtime = (
+            volume_runtime.slice(period_global_offset, period_global_offset + n_period)
+            if volume_runtime is not None
+            else None
+        )
 
         # Run period
         result = run_period(
@@ -645,6 +742,7 @@ def run_all_periods(
             min_trades_required=min_trades_required,
             trade_filter_config=trade_filter_config,
             zigzag_global_stats=zigzag_global_stats,
+            volume_runtime=period_volume_runtime,
             global_offset=period_global_offset,
         )
 
@@ -979,11 +1077,11 @@ def run_equal_blocks(
         ValueError: If n_parts < 2 or not enough bars.
     """
     # WP-T5 fail-fast gate — BEFORE any slicing or backtest (plan §4.2).
-    if trade_filter_config is not None and trade_filter_config.enabled:
+    if is_trade_filter_enabled(trade_filter_config):
         raise ConfigError(
-            "trade_filter.type=zigzag_st_mode is supported only with "
-            "segmentation.mode=legacy in Phase 2; "
-            "equal_blocks + enabled trade_filter is not allowed."
+            "equal_blocks segmentation is not supported with "
+            "trade_filter.enabled=true; use 'legacy' segmentation instead. "
+            "zigzag_st_mode is supported only with segmentation.mode=legacy."
         )
 
     n_total = len(df)

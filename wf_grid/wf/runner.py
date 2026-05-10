@@ -34,6 +34,7 @@ def run_wf_for_grid_point(
     config: "GridConfig",
     prepend_bars_requested: int,
     zigzag_global_stats: object = None,
+    volume_runtime: object = None,
 ) -> List[StepResult]:
     """
     Run walk-forward for one grid point across all WF slices.
@@ -85,6 +86,7 @@ def run_wf_for_grid_point(
                 config=config,
                 prepend_bars_requested=prepend_bars_requested,
                 zigzag_global_stats=zigzag_global_stats,
+                volume_runtime=volume_runtime,
             )
         except Exception as exc:
             logger.error(
@@ -108,6 +110,7 @@ def run_wf_train_for_grid_point(
     full_data: pd.DataFrame,
     config: "GridConfig",
     zigzag_global_stats: object = None,
+    volume_runtime: object = None,
 ) -> List[StepResult]:
     """
     Run walk-forward train execution for one grid point across all WF slices.
@@ -135,6 +138,7 @@ def run_wf_train_for_grid_point(
                 full_index=full_index,
                 config=config,
                 zigzag_global_stats=zigzag_global_stats,
+                volume_runtime=volume_runtime,
             )
         except Exception as exc:
             logger.error(

@@ -150,6 +150,7 @@ def _make_enabled_cfg(export_state_columns: bool = True, export_trigger_columns:
         enabled=True,
         type="zigzag_st_mode",
         zigzag=TradeFilterZigZagConfig(
+            enabled=True,
             reversal_threshold=0.04,
             local_window=20,
             candidate_trigger_threshold=0.4,

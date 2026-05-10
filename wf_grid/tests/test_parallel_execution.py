@@ -139,6 +139,7 @@ class TestPickleRoundTrip:
             enabled=True,
             type="zigzag_st",
             zigzag=TradeFilterZigZagConfig(
+                enabled=True,
                 global_stats_source="full_dataset",
                 leg_height_mode="pct",
                 reversal_threshold=0.02,
@@ -2424,6 +2425,7 @@ class TestWorkerLoggingViaStepResult:
             config=cfg,
             prepend_bars=0,
             zigzag_global_stats=None,
+            volume_runtime=None,
             n_workers=2,
         )
 

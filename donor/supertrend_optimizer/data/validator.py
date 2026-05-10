@@ -26,17 +26,50 @@ Strict mode vs default mode:
 """
 
 import logging
+from collections import defaultdict
 from typing import Optional
 
 import numpy as np
 import pandas as pd
 
 from supertrend_optimizer.utils.exceptions import DataValidationError
+from supertrend_optimizer.core.trade_filter_config import is_volume_enabled
 
 logger = logging.getLogger(__name__)
 
 # Maximum number of duplicate timestamps to show in the warning log.
 _MAX_DUPE_SAMPLES = 5
+
+
+def _check_no_duplicate_lowercase_columns(
+    columns,
+    source,
+    *,
+    mode: str,
+) -> None:
+    """Detect columns that collide after lowercase normalization."""
+    if mode not in {"raise", "info"}:
+        raise ValueError(f"mode must be 'raise' or 'info', got {mode!r}")
+
+    groups: dict[str, list[object]] = defaultdict(list)
+    for col in columns:
+        groups[str(col).lower()].append(col)
+
+    collisions = [
+        originals for originals in groups.values()
+        if len(set(map(str, originals))) > 1
+    ]
+    if not collisions:
+        return
+
+    rendered = ", ".join(str(group) for group in collisions)
+    message = (
+        f"duplicate lowercase columns in {source}: {rendered}. "
+        "Rename colliding columns before lowercase normalization."
+    )
+    if mode == "raise":
+        raise DataValidationError(message)
+    logger.info(message)
 
 
 def validate_ohlc_data(
@@ -209,5 +242,40 @@ def validate_ohlc_data(
             sample_str,
         )
         df = df[~df.index.duplicated(keep="last")]
+
+    return df
+
+
+def validate_volume_filter_data(
+    df: pd.DataFrame,
+    trade_filter_config,
+) -> pd.DataFrame:
+    """Validate the volume column required by enabled volume trade filters."""
+    if not is_volume_enabled(trade_filter_config):
+        return df
+
+    if "volume" not in df.columns:
+        raise DataValidationError(
+            "trade_filter.volume requires a 'volume' column in input data"
+        )
+
+    volume = df["volume"]
+    if not pd.api.types.is_numeric_dtype(volume):
+        raise DataValidationError(
+            "trade_filter.volume column 'volume' must be numeric, "
+            f"got dtype {volume.dtype}"
+        )
+    if volume.isna().any():
+        raise DataValidationError(
+            "trade_filter.volume column 'volume' contains NaN values"
+        )
+    if np.isinf(volume).any():
+        raise DataValidationError(
+            "trade_filter.volume column 'volume' contains inf values"
+        )
+    if (volume < 0).any():
+        raise DataValidationError(
+            "trade_filter.volume column 'volume' contains negative values"
+        )
 
     return df

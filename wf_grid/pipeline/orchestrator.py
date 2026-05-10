@@ -60,12 +60,32 @@ from wf_grid.ranking.ranker import rank_candidates
 from wf_grid.ranking.scoring import calculate_seed_score, compute_score_discrimination
 from wf_grid.wf.runner import run_wf_for_grid_point, run_wf_train_for_grid_point, compute_prepend_bars
 from supertrend_optimizer.core.zigzag_st_filter import build_zigzag_global_stats
+from supertrend_optimizer.core.trade_filter_config import is_zigzag_enabled, is_volume_enabled
+from supertrend_optimizer.core.volume_metrics import (
+    _warn_if_volume_baseline_window_large,
+    build_volume_global_metrics,
+)
 from wf_grid.wf.step_executor import StepResult
 
 from supertrend_optimizer.utils.time_utils import make_walk_forward_slices
-from supertrend_optimizer.data.validator import validate_ohlc_data
+from supertrend_optimizer.data.validator import (
+    _check_no_duplicate_lowercase_columns,
+    validate_ohlc_data,
+    validate_volume_filter_data,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _read_ohlc_csv(path: str | Path) -> pd.DataFrame:
+    data = pd.read_csv(path, index_col=0)
+    if pd.api.types.is_numeric_dtype(data.index):
+        return data
+    try:
+        data.index = pd.to_datetime(data.index, format="mixed", errors="raise")
+    except TypeError:
+        data.index = pd.to_datetime(data.index, errors="raise")
+    return data
 
 # WP-PAR: project-root anchors for Windows spawn import safety (plan §3.1)
 _PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
@@ -221,12 +241,21 @@ def run_grid_pipeline(
 
         # --- 2. Data load ---
         t0 = time.time()
-        data = pd.read_csv(config.data.file_path, parse_dates=True, index_col=0)
+        data = _read_ohlc_csv(config.data.file_path)
         timer.record("data_load", time.time() - t0)
 
         # --- 2b. Data validation ---
         t0 = time.time()
+        _check_no_duplicate_lowercase_columns(
+            list(data.columns), config.data.file_path, mode="raise"
+        )
+        data.columns = data.columns.str.lower()
         data = validate_ohlc_data(data, strict=True)
+        data = validate_volume_filter_data(data, config.trade_filter)
+        if is_volume_enabled(config.trade_filter):
+            _warn_if_volume_baseline_window_large(
+                config.trade_filter.volume, len(data)
+            )
         timer.record("data_validation", time.time() - t0)
 
         # --- 3. periods_per_year resolution ---
@@ -249,8 +278,9 @@ def run_grid_pipeline(
         # and the disabled baseline path remains bit-identical.
         t0 = time.time()
         zigzag_global_stats = None
+        volume_runtime = None
         _tf = config.trade_filter
-        if _tf is not None and bool(getattr(_tf, "enabled", False)):
+        if is_zigzag_enabled(_tf):
             full_close = data["close"].values
             zigzag_global_stats = build_zigzag_global_stats(
                 close=full_close,
@@ -262,6 +292,12 @@ def run_grid_pipeline(
                 float(zigzag_global_stats.global_median),
                 float(zigzag_global_stats.candidate_trigger_threshold),
                 int(zigzag_global_stats.n_legs_total),
+            )
+        if is_volume_enabled(_tf):
+            volume_runtime = build_volume_global_metrics(
+                data["volume"].to_numpy(),
+                data["close"].to_numpy(),
+                _tf.volume,
             )
         timer.record("zigzag_global_stats", time.time() - t0)
 
@@ -317,6 +353,7 @@ def run_grid_pipeline(
             config=config,
             prepend_bars=prepend_bars,
             zigzag_global_stats=zigzag_global_stats,
+            volume_runtime=volume_runtime,
             _result=result,
         )
         timer.record("wf_grid_execution", time.time() - t0)
@@ -443,6 +480,7 @@ def run_grid_pipeline(
             config=config,
             output_path=out_path,
             bucket_matrix_median=result.bucket_matrix_median,
+            step_results_oos=all_oos_results,
         )
         result.output_path = xlsx_path
         timer.record("xlsx_export", time.time() - t0)
@@ -490,6 +528,7 @@ def _execute_wf_grid(
     config,
     prepend_bars,
     zigzag_global_stats,
+    volume_runtime,
     *,
     _result: "PipelineResult",
 ):
@@ -517,7 +556,7 @@ def _execute_wf_grid(
         _result.execution_mode = "sequential"
         return _execute_wf_grid_sequential(
             grid_points, wf_slices, data, config,
-            prepend_bars, zigzag_global_stats,
+            prepend_bars, zigzag_global_stats, volume_runtime,
         )
 
     # C3-1 enter-then-mark: once this line runs, a later failure must still
@@ -528,7 +567,7 @@ def _execute_wf_grid(
     try:
         return _execute_wf_grid_parallel(
             grid_points, wf_slices, data, config,
-            prepend_bars, zigzag_global_stats, n_workers,
+            prepend_bars, zigzag_global_stats, volume_runtime, n_workers,
         )
     except _PARALLEL_INFRA_FAILURES as exc:
         if not config.execution.fallback_to_sequential:
@@ -541,7 +580,7 @@ def _execute_wf_grid(
         )
         out = _execute_wf_grid_sequential(
             grid_points, wf_slices, data, config,
-            prepend_bars, zigzag_global_stats,
+            prepend_bars, zigzag_global_stats, volume_runtime,
         )
         _result.execution_mode = "parallel_then_fallback"
         return out
@@ -554,6 +593,7 @@ def _execute_wf_grid_parallel(
     config,
     prepend_bars,
     zigzag_global_stats,
+    volume_runtime,
     n_workers,
 ):
     """Parallel OOS+Train execution via ProcessPoolExecutor (plan §3.8).
@@ -598,6 +638,8 @@ def _execute_wf_grid_parallel(
                 config,
                 prepend_bars,
                 zigzag_global_stats,
+                volume_runtime,
+                config.export.retain_per_bar_filter_diagnostics,
             ),
         )
     except TypeError as exc:
@@ -649,12 +691,14 @@ def _execute_wf_grid_sequential(
     config,
     prepend_bars,
     zigzag_global_stats,
+    volume_runtime,
 ):
     """Sequential OOS + Train WF execution over all grid points.
 
     Returns (all_oos_results, all_train_results) dicts keyed by grid_point_id.
     """
     from wf_grid.wf._mp_helpers import _strip_filter_diagnostics_arrays
+    retain_filter_diagnostics = config.export.retain_per_bar_filter_diagnostics
 
     all_oos: Dict[str, List[StepResult]] = {}
     for i, gp in enumerate(grid_points):
@@ -670,10 +714,12 @@ def _execute_wf_grid_sequential(
             config=config,
             prepend_bars_requested=prepend_bars,
             zigzag_global_stats=zigzag_global_stats,
+            volume_runtime=volume_runtime,
         )
-        # Drop per-bar filter_diagnostics_oos: only the small derived
-        # filter_diagnostics_summary is consumed downstream (DEBUG-A1813C).
-        _strip_filter_diagnostics_arrays(step_results)
+        _strip_filter_diagnostics_arrays(
+            step_results,
+            retain_per_bar_filter_diagnostics=retain_filter_diagnostics,
+        )
         all_oos[gp.grid_point_id] = step_results
 
     all_train: Dict[str, List[StepResult]] = {}
@@ -684,8 +730,12 @@ def _execute_wf_grid_sequential(
             full_data=data,
             config=config,
             zigzag_global_stats=zigzag_global_stats,
+            volume_runtime=volume_runtime,
         )
-        _strip_filter_diagnostics_arrays(train_results)
+        _strip_filter_diagnostics_arrays(
+            train_results,
+            retain_per_bar_filter_diagnostics=retain_filter_diagnostics,
+        )
         all_train[gp.grid_point_id] = train_results
 
     return all_oos, all_train

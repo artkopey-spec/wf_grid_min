@@ -168,8 +168,8 @@ class TestE2EPipelineCompletes:
         assert e2e_result.output_path.exists()
 
     def test_xlsx_has_expected_sheets(self, e2e_result):
-        xlsx = pd.ExcelFile(e2e_result.output_path)
-        sheet_names = xlsx.sheet_names
+        with pd.ExcelFile(e2e_result.output_path) as xlsx:
+            sheet_names = xlsx.sheet_names
         assert "WF_Config" in sheet_names
         assert "WF_Trades" in sheet_names
 

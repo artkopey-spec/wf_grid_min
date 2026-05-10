@@ -40,6 +40,17 @@ _BLOCK_REASON_TO_DECISION: Dict[str, str] = {
     "stopping_mode_no_new_entries": "entry_blocked_stopping",
     # docs/time_filter_plan_v1_final.txt §6.3
     "time_filter_reset":            "entry_blocked_time_filter_reset",
+    "time_filter_out_of_window":    "entry_blocked_time_filter_out_of_window",
+    "volume_direction_warmup":      "entry_blocked_volume_direction_warmup",
+    "volume_unknown_direction":     "entry_blocked_volume_unknown_direction",
+    "volume_trade_mode_disallowed_direction": (
+        "entry_blocked_volume_trade_mode_disallowed_direction"
+    ),
+    "volume_warmup":                "entry_blocked_volume_warmup",
+    "volume_baseline_zero":         "entry_blocked_volume_baseline_zero",
+    "volume_below_baseline":        "entry_blocked_volume_below_baseline",
+    "volume_above_baseline":        "entry_blocked_volume_above_baseline",
+    "volume_reversal":              "entry_blocked_volume_reversal",
 }
 
 
@@ -153,10 +164,15 @@ def build_signal_events(
     # WP-T6: pre-extract filter arrays for O(1) per-bar lookup inside the loop.
     filter_enabled = filter_diagnostics is not None
     if filter_enabled:
-        _fd_state   = filter_diagnostics["trade_filter_state"]
-        _fd_allowed = filter_diagnostics["filter_allowed_entry"]
-        _fd_reason  = filter_diagnostics["filter_block_reason"]
-        _fd_trigger = filter_diagnostics["trade_filter_trigger_source"]
+        _fd_state = filter_diagnostics["trade_filter_state"]
+        _fd_allowed = filter_diagnostics.get("filter_allowed_entry")
+        if _fd_allowed is None:
+            _fd_allowed = filter_diagnostics.get("volume_condition_allowed")
+        _fd_reason = filter_diagnostics["filter_block_reason"]
+        _fd_trigger = filter_diagnostics.get("trade_filter_trigger_source")
+        _default_trigger = (
+            "volume" if "volume_regime" in filter_diagnostics else "none"
+        )
 
     rows: List[dict] = []
 
@@ -214,7 +230,14 @@ def build_signal_events(
         # WP-T6: compute filter fields once per signal bar (shared by both revers rows).
         # Lookup is on decision bar t, not execution bar t+1 (plan §8.2 rule 3).
         if filter_enabled:
-            _open_fld = _lookup_open_filter_fields(_fd_state, _fd_allowed, _fd_reason, _fd_trigger, t)
+            _open_fld = _lookup_open_filter_fields(
+                _fd_state,
+                _fd_allowed,
+                _fd_reason,
+                _fd_trigger,
+                t,
+                default_trigger=_default_trigger,
+            )
             _close_fld = _na_filter_fields()
 
         if effective_mode == "long":
@@ -379,20 +402,23 @@ def _na_filter_fields() -> dict:
 
 def _lookup_open_filter_fields(
     fd_state: np.ndarray,
-    fd_allowed: np.ndarray,
+    fd_allowed: Optional[np.ndarray],
     fd_reason: np.ndarray,
-    fd_trigger: np.ndarray,
+    fd_trigger: Optional[np.ndarray],
     t: int,
+    *,
+    default_trigger: str = "none",
 ) -> dict:
     """Look up filter fields at bar t for an open/entry signal row (plan §8.2).
 
-    filter_decision is derived from filter_allowed_entry[t] (primary gate)
-    and filter_block_reason[t] (block category).
+    ZigZag diagnostics provide ``filter_allowed_entry`` and
+    ``trade_filter_trigger_source``. Standalone volume does not, so use
+    ``volume_condition_allowed`` when present and a stable trigger sentinel.
     """
-    state   = str(fd_state[t])
-    allowed = int(fd_allowed[t])
-    reason  = str(fd_reason[t])
-    trigger = str(fd_trigger[t])
+    state = str(fd_state[t])
+    reason = str(fd_reason[t])
+    allowed = int(fd_allowed[t]) if fd_allowed is not None else int(reason == "none")
+    trigger = str(fd_trigger[t]) if fd_trigger is not None else default_trigger
 
     if allowed == 1:
         decision = "entry_allowed"

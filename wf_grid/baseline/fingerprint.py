@@ -32,6 +32,8 @@ from typing import Any, Iterable, Mapping, Optional
 import numpy as np
 import pandas as pd
 
+from supertrend_optimizer.core.trade_filter_config import is_volume_enabled
+
 # Schema history:
 #   v1 — initial baseline format (frames + diagnostics only).
 #   v2 — added top-level `attributes` for scalar PipelineResult fields
@@ -290,6 +292,24 @@ def _data_fingerprint(data: Optional[pd.DataFrame]) -> dict[str, Any]:
     }
 
 
+def _volume_snapshot_from_result_config(result: Any) -> dict[str, Any]:
+    config = getattr(result, "config", None)
+    tf = getattr(config, "trade_filter", None)
+    if not is_volume_enabled(tf):
+        return {}
+    volume = tf.volume
+    return {
+        "volume_filter_enabled": True,
+        "volume_filter_mode": volume.mode,
+        "volume_short_window": volume.short_window,
+        "volume_baseline_window": volume.baseline_window,
+        "volume_threshold_ratio": volume.threshold_ratio,
+        "volume_regime_low_ratio": volume.regime_low_ratio,
+        "volume_regime_high_ratio": volume.regime_high_ratio,
+        "volume_direction_lookback_bars": volume.direction_lookback_bars,
+    }
+
+
 def compute_pipeline_fingerprint(
     result: Any,
     *,
@@ -321,6 +341,7 @@ def compute_pipeline_fingerprint(
     }
     if data is not None:
         metadata["data"] = _data_fingerprint(data)
+    metadata.update(_volume_snapshot_from_result_config(result))
     if extra_metadata:
         metadata.update(dict(extra_metadata))
 

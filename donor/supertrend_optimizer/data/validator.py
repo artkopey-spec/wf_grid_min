@@ -255,8 +255,11 @@ def validate_volume_filter_data(
         return df
 
     if "volume" not in df.columns:
+        _cols = [str(c) for c in df.columns]
         raise DataValidationError(
-            "trade_filter.volume requires a 'volume' column in input data"
+            "trade_filter.volume requires a 'volume' column in input data "
+            f"(names are normalised to lowercase by the CSV loader). "
+            f"Columns present: {_cols}"
         )
 
     volume = df["volume"]

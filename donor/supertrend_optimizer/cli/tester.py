@@ -46,6 +46,7 @@ from supertrend_optimizer.core.trade_filter_config import (
     resolve_exit_off_mode_in_place,
     resolve_exit_b_immediate_off_in_place,
     resolve_time_filter_in_place,
+    resolve_volume_baseline_session_in_place,
     resolve_volume_defaults_in_place,
     validate_trade_filter,
 )
@@ -409,6 +410,7 @@ def load_tester_config(
         resolve_exit_off_mode_in_place(tf_cfg, raw_user_keys)
         resolve_exit_b_immediate_off_in_place(tf_cfg, raw_user_keys)
         resolve_time_filter_in_place(tf_cfg, raw_user_keys)
+        resolve_volume_baseline_session_in_place(tf_cfg, raw_user_keys)
         resolve_volume_defaults_in_place(tf_cfg, raw_user_keys)
         config["trade_filter"] = tf_cfg
 
@@ -585,6 +587,7 @@ def run_backtest(args: argparse.Namespace) -> str:
             df["volume"].to_numpy(),
             df["close"].to_numpy(),
             tf_cfg.volume,
+            index=df.index,
         )
         _warn_if_volume_baseline_window_large(
             tf_cfg.volume, len(df)

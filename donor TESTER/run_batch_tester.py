@@ -240,6 +240,7 @@ def main() -> None:
                 df["volume"].to_numpy(),
                 df["close"].to_numpy(),
                 tf_cfg.volume,
+                index=df.index,
             )
             _warn_if_volume_baseline_window_large(tf_cfg.volume, len(df))
         except (ConfigError, ValueError) as e:

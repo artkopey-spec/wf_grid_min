@@ -710,8 +710,7 @@ trade_filter:
     global_stats_source: "full_dataset"
     leg_height_mode: "pct"
     reversal_threshold: 0.004
-    candidate_trigger_threshold: auto
-    candidate_trigger_quantile: 0.80
+    candidate_trigger_threshold: 0.012
     global_median: "auto"
     local_window: 5
   triggers:

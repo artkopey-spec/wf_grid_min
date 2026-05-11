@@ -1,111 +1,51 @@
-# =========================
-# SUPER TREND PARAMETERS
-# =========================
+# Tester-compatible config, aligned with the equivalent parameters in config.yaml.
+# WF-only sections from config.yaml (data.file_path, optimization ranges, gates,
+# ranking, scoring, status, bucket, execution) are intentionally not copied here:
+# Tester CLI rejects unknown root keys.
+
 supertrend:
-  atr_period:        60     # длина ATR; больше = плавнее, меньше = чувствительнее
-  multiplier:        1.0    # ширина каналов; меньше = агрессивнее сигналы
+  # Tester needs one fixed ATR/multiplier. The main config has grid ranges:
+  # optimization.atr_period_range: [20, 90]
+  # optimization.multiplier_range: [1.0, 9.0]
+  atr_period: 55
+  multiplier: 7.3
 
+trade_mode: revers
 
-# =========================
-# TRADING MODE
-# =========================
-trade_mode:          revers  # режим: long | short | revers (long+short)
+commission: 0.0000
 
+warmup_period: 0
+warmup_period_auto: true
 
-# =========================
-# COSTS
-# =========================
-commission:          0.0000    # комиссия за операцию (0.0003 = 0.03%)
+periods_per_year: 252
+annualization_basis: trading
+execution_model: open_to_open
+min_trades_required: 3
 
-
-# =========================
-# WARMUP (INDICATOR STABILIZATION)
-# =========================
-warmup_period:       0         # фиксированный warmup (игнорируется если auto=true)
-warmup_period_auto:  true      # авто: ~10% данных, clamp 100–400, >= atr_period
-
-
-# =========================
-# METRICS SETTINGS
-# =========================
-# auto: periods_per_year считается по индексу CSV (дневной / интрадей).
-# market: stocks → торговый календарь (~252 дня/год); crypto → календарь (~365.25).
-# Для крипты замените на: market: crypto
-# Явное число вместо auto — если нужно зафиксировать нормализацию вручную.
-periods_per_year:    auto
-market:              stocks
-annualization_basis: trading      # calendar | trading (можно omit — тогда только market/ppy)
-execution_model:     open_to_open # единственный поддерживаемый литерал; можно omit (= null)
-min_trades_required: 5         # минимум сделок для валидных Sharpe/Sortino/CAGR
-
-
-# =========================
-# EARLY EXIT (DISABLED)
-# =========================
-# NB: ключи ниже не читаются SuperTrend Tester CLI / run_batch_tester.py
-# (early exit в тестере всегда выключен в коде движка). Секция для других
-# инструментов / единого шаблона конфига.
 early_exit:
-  enabled:           false     # отключено: полный бэктест без ранней остановки
-  max_drawdown:      0.5       # порог DD для выхода (0.5 = -50%)
-  check_bars:        1440      # для минуток: ~1 календарный день, если early exit включить
+  enabled: false
+  max_drawdown: 0.50
+  check_bars: 50
 
-
-# =========================
-# SEGMENTATION MODE
-# =========================
 segmentation:
-  mode:              legacy    # legacy (100/75/50/33/25%) | equal_blocks (равные сегменты)
-  n_parts:           7         # кол-во сегментов для equal_blocks (>= 2)
+  mode: legacy
+  n_parts: 7
 
-# Экспорт legacy Excel (лист false start): сделки с bars_held < N; по умолчанию N=4
 export:
   false_start_max_bars: 4
 
-
-
-# =========================
-# TRADE FILTER (Phase 2, ZigZag SuperTrend mode)
-# =========================
-# Документирует контракт фильтра. Отсутствие блока ИЛИ enabled: false =>
-# baseline-bit-identical поведение (Appendix A v1.1 §11.1).
-# Включённый фильтр (enabled: true) поддерживается только при segmentation.mode: legacy
-# (Phase 2 v0.4 не поддерживает enabled-фильтр в equal_blocks — конфигурация
-# отвергается до backtest, см. Phase 2 plan §5.5).
-#
-# Spec reference: docs/zigzag_st_trade_filter_spec_v1_1.txt §11
-#
-# Полный набор ключей trade_filter (как в WF config): volume оставлен выключенным,
-# чтобы типовой CSV без колонки volume не ломал запуск; включите volume.enabled: true
-# и убедитесь, что в данных есть столбец volume.
-#
 trade_filter:
   enabled: true
-  type: zigzag_st_mode
 
   zigzag:
-    enabled: true                          # явно; при отсутствии ключа резолвится по маркерам
-    global_stats_source: full_dataset      # only full_dataset supported in v1
-    leg_height_mode: pct                   # fractions of price (NOT 0–100)
-    reversal_threshold: 0.0005              # 0.1% доли цены; required when enabled
-    candidate_trigger_threshold: auto      # numeric fraction (e.g. 0.012) | auto
-    candidate_trigger_quantile: 0.80       # required only when threshold is auto
-    global_median: auto
-    local_window: 5                        # rolling N for local_median_N
-
-    daily_reset: true                      # reset ZigZag/FSM on calendar day boundary
-    mode: "C"                                # v3 mode: A | B | C | A+B | C+B
-    candidate_duration_gate:
-      enabled: true
-      max_bars: 30
+    enabled: false
 
   lifecycle:
-    freeze_confirmed_legs: 5               # # confirmed legs after lifecycle start
-    stop_check: confirm_bar_only           # only literal supported in v1
-    stopping_exit: opposite_st_flip        # only literal supported in v1
-    exit_off_mode: "exit B"              # «exit B» + exit_off_zz_leg_count (int >= 1); при «exit A» count не указывать
-    exit_off_zz_leg_count: 5             # подтверждённых ZZ-ног до ST_STOPPING (exit B)
-    exit_b_immediate_off: true          # при достижении порога exit B: немедленный OFF без ST_STOPPING (только exit B)
+    freeze_confirmed_legs: 5
+    stop_check: confirm_bar_only
+    stopping_exit: opposite_st_flip
+    exit_off_mode: "exit B"
+    exit_off_zz_leg_count: 5
 
   diagnostics:
     export_state_columns: true
@@ -116,11 +56,15 @@ trade_filter:
     window: "09:00-19:00"
 
   volume:
-    enabled: false                       # true — нужен столбец volume в CSV
-    mode: volume_A                       # volume_A | volume_B
-    short_window: 5
-    baseline_window: 20
-    threshold_ratio: 1.05
+    enabled: true
+    mode: volume_A
+    aggregation: mean
+    short_window: 30
+    baseline_window: 600
+    threshold_ratio: 2.0
     regime_low_ratio: 0.8
     regime_high_ratio: 1.2
-    direction_lookback_bars: 3
+    direction_lookback_bars: 10
+    baseline_session:
+      enabled: true
+      window: "09:00-19:00"

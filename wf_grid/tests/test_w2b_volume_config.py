@@ -4,16 +4,47 @@ from textwrap import dedent
 import pytest
 
 from supertrend_optimizer.core.trade_filter_config import (
+    TradeFilterBaselineSessionConfig,
+    TradeFilterVolumeConfig,
     build_trade_filter_config_from_raw,
     collect_raw_user_keys,
     collect_trade_filter_unknown_keys,
     is_volume_enabled,
     resolve_volume_defaults_in_place,
     resolve_volume_enabled_in_place,
+    resolve_volume_baseline_session_in_place,
     resolve_zigzag_enabled_in_place,
     validate_trade_filter,
 )
 from wf_grid.config.loader import ConfigError, load_grid_config
+
+
+def test_volume_config_defaults_include_aggregation_and_baseline_session():
+    first = TradeFilterVolumeConfig()
+    second = TradeFilterVolumeConfig()
+
+    assert first.aggregation == "median"
+    assert isinstance(first.baseline_session, TradeFilterBaselineSessionConfig)
+    assert first.baseline_session.enabled is False
+    assert first.baseline_session.window is None
+    assert first.baseline_session is not second.baseline_session
+
+
+def test_build_trade_filter_config_materializes_volume_aggregation_and_baseline_session():
+    volume = _valid_volume()
+    volume.update({
+        "aggregation": "mean",
+        "baseline_session": {
+            "enabled": True,
+            "window": "09:00-19:00",
+        },
+    })
+
+    cfg = build_trade_filter_config_from_raw(_base_filter(volume))
+
+    assert cfg.volume.aggregation == "mean"
+    assert cfg.volume.baseline_session.enabled is True
+    assert cfg.volume.baseline_session.window == "09:00-19:00"
 
 
 def _base_filter(volume=None):
@@ -59,6 +90,7 @@ def test_valid_volume_a_config_passes_validation():
     assert errors == []
     assert is_volume_enabled(cfg) is True
     assert cfg.volume.mode == "volume_A"
+    assert cfg.volume.aggregation == "median"
 
 
 def test_valid_volume_b_config_passes_validation_with_explicit_optional_values():
@@ -132,6 +164,116 @@ def test_invalid_volume_fields_are_rejected(patch, expected):
     assert any(expected in error for error in errors)
 
 
+@pytest.mark.parametrize("aggregation", ["median", "mean"])
+def test_volume_aggregation_valid_literals_pass_validation(aggregation):
+    volume = _valid_volume()
+    volume["aggregation"] = aggregation
+
+    cfg, errors, _keys = _build_and_validate(_base_filter(volume))
+
+    assert errors == []
+    assert cfg.volume.aggregation == aggregation
+
+
+@pytest.mark.parametrize(
+    ("aggregation", "expected"),
+    [
+        (None, "trade_filter.volume.aggregation must be 'median' or 'mean', got null"),
+        ("ema", "trade_filter.volume.aggregation must be 'median' or 'mean'"),
+        (123, "trade_filter.volume.aggregation must be 'median' or 'mean'"),
+    ],
+)
+def test_invalid_volume_aggregation_is_rejected(aggregation, expected):
+    volume = _valid_volume()
+    volume["aggregation"] = aggregation
+
+    _cfg, errors, _keys = _build_and_validate(_base_filter(volume))
+
+    assert any(expected in error for error in errors)
+
+
+def test_volume_baseline_session_enabled_with_valid_window_passes_validation():
+    volume = _valid_volume()
+    volume["baseline_session"] = {
+        "enabled": True,
+        "window": "09:00-19:00",
+    }
+
+    cfg, errors, _keys = _build_and_validate(_base_filter(volume))
+
+    assert errors == []
+    assert cfg.volume.baseline_session.enabled is True
+    assert cfg.volume.baseline_session.window == "09:00-19:00"
+
+
+def test_resolve_volume_baseline_session_materializes_window_fields():
+    volume = _valid_volume()
+    volume["baseline_session"] = {
+        "enabled": True,
+        "window": "09:00-19:00",
+    }
+    cfg, errors, raw_user_keys = _build_and_validate(_base_filter(volume))
+
+    assert errors == []
+
+    resolve_volume_baseline_session_in_place(cfg, raw_user_keys)
+
+    assert cfg.volume.baseline_session._start_hour == 9
+    assert cfg.volume.baseline_session._start_minute == 0
+    assert cfg.volume.baseline_session._end_hour == 19
+    assert cfg.volume.baseline_session._end_minute == 0
+
+
+def test_volume_baseline_session_enabled_must_be_bool():
+    volume = _valid_volume()
+    volume["baseline_session"] = {
+        "enabled": "true",
+        "window": "09:00-19:00",
+    }
+
+    _cfg, errors, _keys = _build_and_validate(_base_filter(volume))
+
+    assert any(
+        "trade_filter.volume.baseline_session.enabled must be bool" in error
+        for error in errors
+    )
+
+
+def test_volume_baseline_session_enabled_true_requires_window():
+    volume = _valid_volume()
+    volume["baseline_session"] = {"enabled": True}
+
+    _cfg, errors, _keys = _build_and_validate(_base_filter(volume))
+
+    assert any(
+        "trade_filter.volume.baseline_session.window is required" in error
+        for error in errors
+    )
+
+
+@pytest.mark.parametrize(
+    ("window", "expected"),
+    [
+        ("bad", "must be in HH:MM-HH:MM format"),
+        ("09:00", "must be in HH:MM-HH:MM format"),
+        ("25:00-26:00", "hours must be in 0-23"),
+        ("09:60-10:00", "minutes must be in 0-59"),
+        ("09:00-09:00", "must have non-zero length"),
+        ("19:00-09:00", "wrap-around"),
+    ],
+)
+def test_invalid_volume_baseline_session_windows_are_rejected(window, expected):
+    volume = _valid_volume()
+    volume["baseline_session"] = {
+        "enabled": True,
+        "window": window,
+    }
+
+    _cfg, errors, _keys = _build_and_validate(_base_filter(volume))
+
+    assert any(expected in error for error in errors)
+
+
 @pytest.mark.parametrize(
     "missing_key",
     ["mode", "short_window", "baseline_window", "threshold_ratio"],
@@ -157,6 +299,40 @@ def test_unknown_key_under_volume_is_reported_by_strict_schema():
     assert errors == ["unknown config key: 'trade_filter.volume.surprise'"]
 
 
+def test_volume_aggregation_and_baseline_session_are_allowed_by_strict_schema():
+    errors = collect_trade_filter_unknown_keys({
+        "enabled": True,
+        "volume": {
+            "enabled": True,
+            "aggregation": "mean",
+            "baseline_session": {
+                "enabled": True,
+                "window": "09:00-19:00",
+            },
+        },
+    })
+
+    assert errors == []
+
+
+def test_unknown_key_under_volume_baseline_session_is_reported_by_strict_schema():
+    errors = collect_trade_filter_unknown_keys({
+        "enabled": True,
+        "volume": {
+            "enabled": True,
+            "baseline_session": {
+                "enabled": True,
+                "window": "09:00-19:00",
+                "surprise": 1,
+            },
+        },
+    })
+
+    assert errors == [
+        "unknown config key: 'trade_filter.volume.baseline_session.surprise'"
+    ]
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
@@ -171,6 +347,10 @@ def test_unknown_key_under_volume_is_reported_by_strict_schema():
         (
             {"enabled": True, "triggers": {"candidate_threshold": True}},
             "trade_filter.triggers.candidate_threshold must be a YAML mapping",
+        ),
+        (
+            {"enabled": True, "volume": {"baseline_session": True}},
+            "trade_filter.volume.baseline_session must be a YAML mapping",
         ),
     ],
 )
@@ -201,6 +381,93 @@ def test_wf_grid_loader_rejects_non_mapping_volume_block(tmp_path: Path):
 
     with pytest.raises(ConfigError, match="trade_filter.volume must be a YAML mapping"):
         load_grid_config(str(path))
+
+
+def test_wf_grid_loader_strict_schema_allows_volume_aggregation_and_baseline_session(tmp_path: Path):
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        dedent(
+            """\
+            data:
+              file_path: data.csv
+            validation:
+              walk_forward:
+                train_size: "90D"
+                test_size: "30D"
+            trade_filter:
+              enabled: false
+              volume:
+                enabled: false
+                aggregation: mean
+                baseline_session:
+                  enabled: false
+                  window: "09:00-19:00"
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = load_grid_config(str(path))
+
+    assert cfg.trade_filter.volume.aggregation == "mean"
+    assert cfg.trade_filter.volume.baseline_session.window == "09:00-19:00"
+
+
+def test_wf_grid_loader_resolves_volume_baseline_session_window_fields(tmp_path: Path):
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        dedent(
+            """\
+            data:
+              file_path: data.csv
+            validation:
+              walk_forward:
+                train_size: "90D"
+                test_size: "30D"
+            trade_filter:
+              enabled: true
+              type: zigzag_st_mode
+              zigzag:
+                enabled: true
+                reversal_threshold: 0.005
+                candidate_trigger_threshold: 0.012
+                local_window: 5
+              lifecycle:
+                freeze_confirmed_legs: 3
+                stop_check: confirm_bar_only
+                stopping_exit: opposite_st_flip
+              volume:
+                enabled: true
+                mode: volume_A
+                aggregation: mean
+                short_window: 5
+                baseline_window: 20
+                threshold_ratio: 1.1
+                baseline_session:
+                  enabled: true
+                  window: "09:00-19:00"
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = load_grid_config(str(path))
+
+    baseline_session = cfg.trade_filter.volume.baseline_session
+    assert baseline_session._start_hour == 9
+    assert baseline_session._start_minute == 0
+    assert baseline_session._end_hour == 19
+    assert baseline_session._end_minute == 0
+
+
+def test_repo_config_yaml_keeps_trade_filter_safe_default_disabled():
+    cfg = load_grid_config("config.yaml")
+
+    assert cfg.trade_filter.enabled is False
+    assert cfg.trade_filter.volume.enabled is False
+    assert cfg.trade_filter.volume.aggregation == "median"
+    assert cfg.trade_filter.volume.baseline_session.enabled is False
+    assert cfg.trade_filter.volume.baseline_session.window is None
 
 
 def test_volume_defaults_materialize_only_after_validation():

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import ast
+from pathlib import Path
+
 import numpy as np
 import openpyxl
 import pandas as pd
@@ -26,6 +29,34 @@ from supertrend_optimizer.testing import runner
 from supertrend_optimizer.testing.runner import run_all_periods, run_period
 from supertrend_optimizer.utils.enums import ExecutionModel
 from supertrend_optimizer.utils.exceptions import ConfigError
+
+
+def test_run_batch_tester_passes_index_to_volume_metrics():
+    path = Path(__file__).resolve().parents[1] / "run_batch_tester.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "build_volume_global_metrics"
+    ]
+
+    assert calls
+    assert all(any(keyword.arg == "index" for keyword in call.keywords) for call in calls)
+
+
+def test_repo_config_tester_yaml_loads_volume_aggregation_and_baseline_session():
+    path = Path(__file__).resolve().parents[2] / "config_tester.yaml"
+
+    cfg = load_tester_config(str(path))
+
+    volume = cfg["trade_filter"].volume
+    assert volume.aggregation == "mean"
+    assert volume.baseline_session.enabled is True
+    assert volume.baseline_session.window == "09:00-19:00"
+    assert volume.baseline_session._start_hour == 9
+    assert volume.baseline_session._end_hour == 19
 
 
 def _df(n: int = 80) -> pd.DataFrame:

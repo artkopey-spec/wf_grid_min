@@ -41,6 +41,12 @@ _PER_BAR_ARRAY_FIELDS = (
 
 @dataclass(frozen=True)
 class VolumeRuntime:
+    """Per-bar volume-filter runtime arrays.
+
+    The ``*_median_*`` field names are historical API names. When
+    ``volume.aggregation == "mean"``, these arrays contain mean-derived values;
+    the effective method is recorded separately in the filter-config snapshot.
+    """
     short_median_volume: np.ndarray
     baseline_median_volume: np.ndarray
     median_relative_volume: np.ndarray
@@ -92,7 +98,38 @@ class VolumeRuntime:
         )
 
 
-def build_volume_global_metrics(volume, close, volume_cfg) -> VolumeRuntime:
+def _rolling_aggregate(values, window: int, aggregation: str) -> np.ndarray:
+    rolling = pd.Series(values).rolling(window=window, min_periods=window)
+    if aggregation == "median":
+        return rolling.median().to_numpy(dtype=np.float64)
+    if aggregation == "mean":
+        return rolling.mean().to_numpy(dtype=np.float64)
+    raise ValueError(
+        "unsupported volume aggregation: "
+        f"{aggregation!r}; expected 'median' or 'mean'"
+    )
+
+
+def _build_baseline_session_mask(
+    index: pd.DatetimeIndex,
+    baseline_session,
+) -> np.ndarray:
+    start_hour = getattr(baseline_session, "_start_hour", None)
+    start_minute = getattr(baseline_session, "_start_minute", None)
+    end_hour = getattr(baseline_session, "_end_hour", None)
+    end_minute = getattr(baseline_session, "_end_minute", None)
+    if None in (start_hour, start_minute, end_hour, end_minute):
+        raise ValueError(
+            "baseline_session.enabled=true requires resolved window fields"
+        )
+
+    minutes = index.hour * 60 + index.minute
+    start_total = int(start_hour) * 60 + int(start_minute)
+    end_total = int(end_hour) * 60 + int(end_minute)
+    return np.asarray((minutes >= start_total) & (minutes < end_total), dtype=bool)
+
+
+def build_volume_global_metrics(volume, close, volume_cfg, index=None) -> VolumeRuntime:
     volume_arr = np.asarray(volume)
     close_arr = np.asarray(close, dtype=np.float64)
     if len(volume_arr) != len(close_arr):
@@ -107,24 +144,38 @@ def build_volume_global_metrics(volume, close, volume_cfg) -> VolumeRuntime:
     regime_high_ratio = float(volume_cfg.regime_high_ratio)
     lookback_bars = int(volume_cfg.direction_lookback_bars)
     mode = volume_cfg.mode
+    aggregation = getattr(volume_cfg, "aggregation", "median")
+    baseline_session = getattr(volume_cfg, "baseline_session", None)
+    baseline_session_enabled = bool(getattr(baseline_session, "enabled", False))
     if mode not in ("volume_A", "volume_B"):
         raise ValueError(f"unsupported volume filter mode: {mode!r}")
     if short_window < 1 or baseline_window < 1 or lookback_bars < 1:
         raise ValueError("volume windows and direction lookback must be >= 1")
 
     volume_f = volume_arr.astype(np.float64, copy=False)
-    short_median = (
-        pd.Series(volume_f)
-        .rolling(window=short_window, min_periods=short_window)
-        .median()
-        .to_numpy(dtype=np.float64)
-    )
-    baseline_median = (
-        pd.Series(volume_f)
-        .rolling(window=baseline_window, min_periods=baseline_window)
-        .median()
-        .to_numpy(dtype=np.float64)
-    )
+    short_median = _rolling_aggregate(volume_f, short_window, aggregation)
+    if baseline_session_enabled:
+        if index is None or not isinstance(index, pd.DatetimeIndex):
+            raise ValueError("baseline_session.enabled=true requires DatetimeIndex")
+        if len(index) != len(volume_f):
+            raise ValueError(
+                f"index and volume length mismatch: {len(index)} != {len(volume_f)}"
+            )
+        mask = _build_baseline_session_mask(index, baseline_session)
+        active_volume = volume_f[mask]
+        active_baseline = _rolling_aggregate(
+            active_volume,
+            baseline_window,
+            aggregation,
+        )
+        baseline_median = np.full(len(volume_f), np.nan, dtype=np.float64)
+        baseline_median[mask] = active_baseline
+    else:
+        baseline_median = _rolling_aggregate(
+            volume_f,
+            baseline_window,
+            aggregation,
+        )
 
     relative = np.full(len(volume_f), np.nan, dtype=np.float64)
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -170,8 +221,11 @@ def build_volume_global_metrics(volume, close, volume_cfg) -> VolumeRuntime:
     snapshot = {
         "volume_filter_enabled": True,
         "volume_filter_mode": mode,
+        "volume_aggregation": aggregation,
         "volume_short_window": volume_cfg.short_window,
         "volume_baseline_window": volume_cfg.baseline_window,
+        "volume_baseline_session_enabled": baseline_session_enabled,
+        "volume_baseline_session_window": getattr(baseline_session, "window", None),
         "volume_threshold_ratio": volume_cfg.threshold_ratio,
         "volume_regime_low_ratio": volume_cfg.regime_low_ratio,
         "volume_regime_high_ratio": volume_cfg.regime_high_ratio,

@@ -197,15 +197,29 @@ class TradeFilterDiagnosticsConfig:
 
 
 @dataclass
+class TradeFilterBaselineSessionConfig:
+    enabled: object = False
+    window: object = None
+    _start_hour: int | None = None
+    _start_minute: int | None = None
+    _end_hour: int | None = None
+    _end_minute: int | None = None
+
+
+@dataclass
 class TradeFilterVolumeConfig:
     enabled: object = None
     mode: object = None
+    aggregation: object = "median"
     short_window: object = None
     baseline_window: object = None
     threshold_ratio: object = None
     regime_low_ratio: object = None
     regime_high_ratio: object = None
     direction_lookback_bars: object = None
+    baseline_session: TradeFilterBaselineSessionConfig = field(
+        default_factory=TradeFilterBaselineSessionConfig
+    )
 
 
 @dataclass
@@ -368,7 +382,10 @@ TRADE_FILTER_ALLOWED_KEYS: dict[str, frozenset[str]] = {
     "trade_filter.volume": frozenset({
         "enabled", "mode", "short_window", "baseline_window",
         "threshold_ratio", "regime_low_ratio", "regime_high_ratio",
-        "direction_lookback_bars",
+        "direction_lookback_bars", "aggregation", "baseline_session",
+    }),
+    "trade_filter.volume.baseline_session": frozenset({
+        "enabled", "window",
     }),
 }
 
@@ -512,15 +529,22 @@ def build_trade_filter_config_from_raw(tf_raw: dict) -> TradeFilterConfig:
     )
 
     vol_raw: dict = tf_raw.get("volume") or {}
+    baseline_session_raw = vol_raw.get("baseline_session") or {}
+    baseline_session = TradeFilterBaselineSessionConfig(
+        enabled=baseline_session_raw.get("enabled", False),
+        window=baseline_session_raw.get("window", None),
+    )
     volume = TradeFilterVolumeConfig(
         enabled=vol_raw.get("enabled", None),
         mode=vol_raw.get("mode", None),
+        aggregation=vol_raw.get("aggregation", "median"),
         short_window=vol_raw.get("short_window", None),
         baseline_window=vol_raw.get("baseline_window", None),
         threshold_ratio=vol_raw.get("threshold_ratio", None),
         regime_low_ratio=vol_raw.get("regime_low_ratio", None),
         regime_high_ratio=vol_raw.get("regime_high_ratio", None),
         direction_lookback_bars=vol_raw.get("direction_lookback_bars", None),
+        baseline_session=baseline_session,
     ) if "volume" in tf_raw else None
 
     return TradeFilterConfig(
@@ -580,6 +604,73 @@ def _validate_positive_finite(
     return value_f
 
 
+def _validate_volume_baseline_session(
+    vol: TradeFilterVolumeConfig,
+    errors: list[str],
+    raw_user_keys: frozenset[tuple[str, ...]],
+) -> None:
+    block_key = ("trade_filter", "volume", "baseline_session")
+    if block_key not in raw_user_keys:
+        return
+
+    baseline_session = getattr(vol, "baseline_session", None)
+    enabled = getattr(baseline_session, "enabled", False)
+    if not isinstance(enabled, bool):
+        errors.append(
+            "trade_filter.volume.baseline_session.enabled must be bool "
+            f"(true/false), got {type(enabled).__name__!r} ({enabled!r})"
+        )
+        return
+    if not enabled:
+        return
+
+    window_key = ("trade_filter", "volume", "baseline_session", "window")
+    window = getattr(baseline_session, "window", None)
+    if window_key not in raw_user_keys or window is None:
+        errors.append(
+            "trade_filter.volume.baseline_session.window is required when "
+            "trade_filter.volume.baseline_session.enabled is true"
+        )
+        return
+    if not isinstance(window, str) or not _TF_WINDOW_RE.match(window):
+        errors.append(
+            "trade_filter.volume.baseline_session.window must be in "
+            f"HH:MM-HH:MM format, got {window!r}"
+        )
+        return
+
+    start_str, end_str = window[:5], window[6:]
+    sh, sm = int(start_str[:2]), int(start_str[3:])
+    eh, em = int(end_str[:2]), int(end_str[3:])
+    hours_ok = (0 <= sh <= 23) and (0 <= eh <= 23)
+    mins_ok = (0 <= sm <= 59) and (0 <= em <= 59)
+    if not hours_ok:
+        errors.append(
+            "trade_filter.volume.baseline_session.window hours must be in "
+            f"0-23, got {window!r}"
+        )
+        return
+    if not mins_ok:
+        errors.append(
+            "trade_filter.volume.baseline_session.window minutes must be in "
+            f"0-59, got {window!r}"
+        )
+        return
+
+    start_total = sh * 60 + sm
+    end_total = eh * 60 + em
+    if start_total == end_total:
+        errors.append(
+            "trade_filter.volume.baseline_session.window must have non-zero "
+            f"length (start == end is not allowed), got {window!r}"
+        )
+    elif start_total > end_total:
+        errors.append(
+            "trade_filter.volume.baseline_session.window wrap-around "
+            f"(start > end) is not supported in v1, got {window!r}"
+        )
+
+
 def _validate_volume_block(
     tf: TradeFilterConfig,
     errors: list[str],
@@ -608,6 +699,25 @@ def _validate_volume_block(
         return
     if not vol.enabled:
         return
+
+    aggregation_key = ("trade_filter", "volume", "aggregation")
+    if aggregation_key in raw_user_keys:
+        if vol.aggregation is None:
+            errors.append(
+                "trade_filter.volume.aggregation must be 'median' or 'mean', got null"
+            )
+        elif not isinstance(vol.aggregation, str):
+            errors.append(
+                "trade_filter.volume.aggregation must be 'median' or 'mean', "
+                f"got {type(vol.aggregation).__name__!r} ({vol.aggregation!r})"
+            )
+        elif vol.aggregation not in ("median", "mean"):
+            errors.append(
+                "trade_filter.volume.aggregation must be 'median' or 'mean', "
+                f"got {vol.aggregation!r}"
+            )
+
+    _validate_volume_baseline_session(vol, errors, raw_user_keys)
 
     mode_key = ("trade_filter", "volume", "mode")
     if mode_key not in raw_user_keys or vol.mode is None:
@@ -1614,6 +1724,39 @@ def resolve_time_filter_in_place(
     tfl._end_minute = int(end_str[3:])
 
 
+def resolve_volume_baseline_session_in_place(
+    trade_filter_config: Optional[TradeFilterConfig],
+    raw_user_keys: frozenset[tuple[str, ...]],
+) -> None:
+    """Materialise parsed volume baseline-session window fields after validation.
+
+    When ``trade_filter.volume.baseline_session.enabled=True``, parses the
+    validated ``window`` string (format ``HH:MM-HH:MM``) and stores
+    ``_start_hour``, ``_start_minute``, ``_end_hour``, ``_end_minute`` on the
+    baseline-session config object.
+
+    Must be called after ``validate_trade_filter``.
+    """
+    if trade_filter_config is None or not trade_filter_config.enabled:
+        return
+    volume = trade_filter_config.volume
+    if volume is None or not isinstance(volume.enabled, bool) or not volume.enabled:
+        return
+    baseline_session = volume.baseline_session
+    if (
+        not isinstance(baseline_session.enabled, bool)
+        or not baseline_session.enabled
+    ):
+        return
+    # Validator guarantees window is non-None and matches HH:MM-HH:MM
+    w: str = baseline_session.window  # type: ignore[assignment]
+    start_str, end_str = w[:5], w[6:]
+    baseline_session._start_hour = int(start_str[:2])
+    baseline_session._start_minute = int(start_str[3:])
+    baseline_session._end_hour = int(end_str[:2])
+    baseline_session._end_minute = int(end_str[3:])
+
+
 __all__ = [
     "TradeFilterConfig",
     "TradeFilterZigZagConfig",
@@ -1623,6 +1766,7 @@ __all__ = [
     "TradeFilterLifecycleConfig",
     "TradeFilterDiagnosticsConfig",
     "TradeFilterTimeFilterConfig",
+    "TradeFilterBaselineSessionConfig",
     "TradeFilterVolumeConfig",
     "validate_trade_filter",
     "collect_raw_user_keys",
@@ -1640,6 +1784,7 @@ __all__ = [
     "resolve_exit_off_mode_in_place",
     "resolve_exit_b_immediate_off_in_place",
     "resolve_time_filter_in_place",
+    "resolve_volume_baseline_session_in_place",
     # Constant whitelists exported for tests / CLI gate logic
     "_LIFECYCLE_STOP_CHECK_VALUES",
     "_LIFECYCLE_STOPPING_EXIT_VALUES",

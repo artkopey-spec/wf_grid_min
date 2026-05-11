@@ -1009,8 +1009,15 @@ def _config_to_dict(config: GridConfig) -> dict:
         config_dict["filter_config_snapshot"] = {
             "volume_filter_enabled": True,
             "volume_filter_mode": volume.mode,
+            "volume_aggregation": getattr(volume, "aggregation", "median"),
             "volume_short_window": volume.short_window,
             "volume_baseline_window": volume.baseline_window,
+            "volume_baseline_session_enabled": bool(
+                getattr(getattr(volume, "baseline_session", None), "enabled", False)
+            ),
+            "volume_baseline_session_window": getattr(
+                getattr(volume, "baseline_session", None), "window", None
+            ),
             "volume_threshold_ratio": volume.threshold_ratio,
             "volume_regime_low_ratio": volume.regime_low_ratio,
             "volume_regime_high_ratio": volume.regime_high_ratio,

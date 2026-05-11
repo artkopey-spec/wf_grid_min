@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import time
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from supertrend_optimizer.core.volume_metrics import (
@@ -51,6 +52,8 @@ def _cfg(**overrides):
         "regime_low_ratio": 0.8,
         "regime_high_ratio": 1.2,
         "direction_lookback_bars": 2,
+        "aggregation": "median",
+        "baseline_session": SimpleNamespace(enabled=False, window=None),
     }
     data.update(overrides)
     return SimpleNamespace(**data)
@@ -119,6 +122,191 @@ def test_integer_volume_dtype_builds_float_medians():
     assert rt.short_median_volume.dtype == np.float64
     assert rt.baseline_median_volume.dtype == np.float64
     assert rt.median_relative_volume.dtype == np.float64
+
+
+def test_missing_aggregation_field_preserves_median_behavior():
+    cfg = SimpleNamespace(
+        mode="volume_A",
+        short_window=2,
+        baseline_window=3,
+        threshold_ratio=1.1,
+        regime_low_ratio=0.8,
+        regime_high_ratio=1.2,
+        direction_lookback_bars=2,
+    )
+
+    rt = build_volume_global_metrics(
+        [1, 10, 100, 1000],
+        [1, 2, 3, 4],
+        cfg,
+    )
+
+    np.testing.assert_allclose(
+        rt.short_median_volume,
+        [np.nan, 5.5, 55.0, 550.0],
+        equal_nan=True,
+    )
+    np.testing.assert_allclose(
+        rt.baseline_median_volume,
+        [np.nan, np.nan, 10.0, 100.0],
+        equal_nan=True,
+    )
+
+
+def test_volume_aggregation_mean_uses_rolling_mean():
+    rt = _runtime(
+        [1, 10, 100, 1000],
+        close=[1, 2, 3, 4],
+        short_window=2,
+        baseline_window=3,
+        aggregation="mean",
+    )
+
+    np.testing.assert_allclose(
+        rt.short_median_volume,
+        [np.nan, 5.5, 55.0, 550.0],
+        equal_nan=True,
+    )
+    np.testing.assert_allclose(
+        rt.baseline_median_volume,
+        [np.nan, np.nan, 37.0, 370.0],
+        equal_nan=True,
+    )
+    assert rt.median_relative_volume[2] == pytest.approx(55.0 / 37.0)
+
+
+def test_volume_aggregation_median_uses_rolling_median():
+    rt = _runtime(
+        [1, 10, 100, 1000],
+        close=[1, 2, 3, 4],
+        short_window=2,
+        baseline_window=3,
+        aggregation="median",
+    )
+
+    np.testing.assert_allclose(
+        rt.short_median_volume,
+        [np.nan, 5.5, 55.0, 550.0],
+        equal_nan=True,
+    )
+    np.testing.assert_allclose(
+        rt.baseline_median_volume,
+        [np.nan, np.nan, 10.0, 100.0],
+        equal_nan=True,
+    )
+
+
+def test_tradingview_sma_volume_regression_without_baseline_session():
+    volume = np.arange(1.0, 621.0, dtype=np.float64)
+    close = np.linspace(100.0, 120.0, len(volume), dtype=np.float64)
+    pos = 599
+
+    rt = build_volume_global_metrics(
+        volume,
+        close,
+        _cfg(
+            short_window=30,
+            baseline_window=600,
+            aggregation="mean",
+            baseline_session=SimpleNamespace(enabled=False, window=None),
+        ),
+    )
+
+    assert rt.short_median_volume[pos] == pytest.approx(585.5, abs=1e-12)
+    assert rt.baseline_median_volume[pos] == pytest.approx(300.5, abs=1e-12)
+    assert rt.median_relative_volume[pos] == pytest.approx(585.5 / 300.5)
+
+
+def test_volume_baseline_session_requires_datetime_index():
+    baseline_session = SimpleNamespace(
+        enabled=True,
+        window="09:00-19:00",
+        _start_hour=9,
+        _start_minute=0,
+        _end_hour=19,
+        _end_minute=0,
+    )
+
+    with pytest.raises(ValueError, match="requires DatetimeIndex"):
+        build_volume_global_metrics(
+            [1, 2, 3],
+            [1, 2, 3],
+            _cfg(baseline_window=2, baseline_session=baseline_session),
+        )
+
+
+def test_volume_baseline_session_rolls_over_compressed_active_only_bars():
+    baseline_session = SimpleNamespace(
+        enabled=True,
+        window="09:00-19:00",
+        _start_hour=9,
+        _start_minute=0,
+        _end_hour=19,
+        _end_minute=0,
+    )
+    index = pd.DatetimeIndex([
+        "2026-01-01T08:59:00+03:00",
+        "2026-01-01T09:00:00+03:00",
+        "2026-01-01T09:01:00+03:00",
+        "2026-01-01T19:00:00+03:00",
+        "2026-01-02T09:00:00+03:00",
+    ])
+
+    rt = build_volume_global_metrics(
+        [10, 1, 2, 100, 3],
+        [1, 2, 3, 4, 5],
+        _cfg(
+            short_window=1,
+            baseline_window=3,
+            threshold_ratio=1.0,
+            baseline_session=baseline_session,
+        ),
+        index=index,
+    )
+
+    np.testing.assert_allclose(
+        rt.baseline_median_volume,
+        [np.nan, np.nan, np.nan, np.nan, 2.0],
+        equal_nan=True,
+    )
+    assert rt.volume_condition_block_reason[:4].tolist() == [BLOCK_WARMUP] * 4
+    assert rt.volume_condition_block_reason[4] == BLOCK_NONE
+
+
+def test_volume_baseline_session_uses_mean_on_compressed_active_only_bars():
+    baseline_session = SimpleNamespace(
+        enabled=True,
+        window="09:00-19:00",
+        _start_hour=9,
+        _start_minute=0,
+        _end_hour=19,
+        _end_minute=0,
+    )
+    index = pd.DatetimeIndex([
+        "2026-01-01T09:00:00+03:00",
+        "2026-01-01T09:01:00+03:00",
+        "2026-01-01T19:00:00+03:00",
+        "2026-01-02T09:00:00+03:00",
+    ])
+
+    rt = build_volume_global_metrics(
+        [1, 10, 1000, 100],
+        [1, 2, 3, 4],
+        _cfg(
+            short_window=1,
+            baseline_window=3,
+            aggregation="mean",
+            baseline_session=baseline_session,
+        ),
+        index=index,
+    )
+
+    np.testing.assert_allclose(
+        rt.baseline_median_volume,
+        [np.nan, np.nan, np.nan, 37.0],
+        equal_nan=True,
+    )
+    assert rt.filter_config_snapshot["volume_aggregation"] == "mean"
 
 
 def test_very_large_finite_values_do_not_overflow_relative_volume():
@@ -274,8 +462,11 @@ def test_filter_config_snapshot_has_exact_keys_and_values():
     assert rt.filter_config_snapshot == {
         "volume_filter_enabled": True,
         "volume_filter_mode": "volume_B",
+        "volume_aggregation": "median",
         "volume_short_window": 3,
         "volume_baseline_window": 5,
+        "volume_baseline_session_enabled": False,
+        "volume_baseline_session_window": None,
         "volume_threshold_ratio": 0.9,
         "volume_regime_low_ratio": 0.7,
         "volume_regime_high_ratio": 1.3,

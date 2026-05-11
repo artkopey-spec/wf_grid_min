@@ -298,6 +298,7 @@ def run_grid_pipeline(
                 data["volume"].to_numpy(),
                 data["close"].to_numpy(),
                 _tf.volume,
+                index=data.index,
             )
         timer.record("zigzag_global_stats", time.time() - t0)
 

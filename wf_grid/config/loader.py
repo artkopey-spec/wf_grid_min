@@ -220,12 +220,18 @@ _ALLOWED_KEYS: dict[str, set[str]] = {
     "trade_filter.volume": {
         "enabled",
         "mode",
+        "aggregation",
         "short_window",
         "baseline_window",
         "threshold_ratio",
         "regime_low_ratio",
         "regime_high_ratio",
         "direction_lookback_bars",
+        "baseline_session",
+    },
+    "trade_filter.volume.baseline_session": {
+        "enabled",
+        "window",
     },
 }
 
@@ -326,6 +332,7 @@ def load_grid_config(path: str, ohlc_data: Optional[pd.DataFrame] = None) -> Gri
     _resolve_exit_off_mode_in_place(cfg, raw_user_keys)
     _resolve_exit_b_immediate_off_in_place(cfg, raw_user_keys)
     _resolve_time_filter_in_place(cfg, raw_user_keys)
+    _resolve_volume_baseline_session_in_place(cfg, raw_user_keys)
     _resolve_volume_defaults_in_place(cfg, raw_user_keys)
 
     if ohlc_data is not None:
@@ -642,6 +649,7 @@ from supertrend_optimizer.core.trade_filter_config import (  # noqa: E402
     resolve_exit_off_mode_in_place as _resolve_exit_off_mode_shared,
     resolve_exit_b_immediate_off_in_place as _resolve_exit_b_immediate_off_shared,
     resolve_time_filter_in_place as _resolve_time_filter_shared,
+    resolve_volume_baseline_session_in_place as _resolve_volume_baseline_session_shared,
     resolve_zigzag_enabled_in_place as _resolve_zigzag_enabled_shared,
     resolve_volume_enabled_in_place as _resolve_volume_enabled_shared,
     resolve_volume_defaults_in_place as _resolve_volume_defaults_shared,
@@ -709,6 +717,15 @@ def _resolve_time_filter_in_place(
 ) -> None:
     """Materialise parsed time-window fields when time_filter.enabled=True."""
     _resolve_time_filter_shared(cfg.trade_filter, raw_user_keys)
+    return
+
+
+def _resolve_volume_baseline_session_in_place(
+    cfg: GridConfig,
+    raw_user_keys: frozenset[tuple[str, ...]],
+) -> None:
+    """Materialise parsed volume baseline-session window fields."""
+    _resolve_volume_baseline_session_shared(cfg.trade_filter, raw_user_keys)
     return
 
 

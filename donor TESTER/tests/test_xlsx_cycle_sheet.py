@@ -102,6 +102,28 @@ def _diagnostics(
     }
 
 
+def _volume_diagnostics(
+    states: list[str],
+    *,
+    daily_reset_event: list[int] | np.ndarray | None = None,
+    time_filter_reset_event: list[int] | np.ndarray | None = None,
+    volume_regime: list[object] | np.ndarray | None = None,
+    median_relative_volume: list[float] | np.ndarray | None = None,
+) -> dict[str, np.ndarray]:
+    diag: dict[str, np.ndarray] = {
+        "trade_filter_state": np.asarray(states, dtype=object),
+    }
+    if daily_reset_event is not None:
+        diag["daily_reset_event"] = np.asarray(daily_reset_event)
+    if time_filter_reset_event is not None:
+        diag["time_filter_reset_event"] = np.asarray(time_filter_reset_event)
+    if volume_regime is not None:
+        diag["volume_regime"] = np.asarray(volume_regime, dtype=object)
+    if median_relative_volume is not None:
+        diag["median_relative_volume"] = np.asarray(median_relative_volume, dtype=np.float64)
+    return diag
+
+
 def _patch_no_legs(monkeypatch, excel_tester):
     n_holder: dict[str, int] = {}
 
@@ -682,6 +704,41 @@ def test_acceptance_alignment_mismatch_uses_aligned_prefix(monkeypatch):
     assert len(result) == 1
     assert result.iloc[0]["Start bar index"] == 1
     assert result.iloc[0]["Начало цикла"] == df.index[1]
+
+
+def test_volume_cycle_alignment_uses_shortest_optional_arrays_without_index_errors():
+    excel_tester = _excel_tester_module()
+    df = _df(6)
+    diag = _volume_diagnostics(
+        ["OFF", "ACTIVE_LONG", "ACTIVE_LONG", "OFF", "ACTIVE_SHORT", "OFF"],
+        daily_reset_event=[0, 0, 0, 0, 0, 0],
+        time_filter_reset_event=[0, 0, 0, 1],
+        volume_regime=[np.nan, "HIGH", "LOW", "MID"],
+        median_relative_volume=[np.nan, 1.0, 2.0, np.nan],
+    )
+
+    result = excel_tester._build_volume_cycle_sheet_df(diag, df)
+
+    assert list(result["Start bar index"]) == [1]
+    assert list(result["End bar index"]) == [2]
+    assert result.iloc[0]["Причина завершения"] == "time_filter_reset"
+    assert result.iloc[0]["Режим объёма (старт)"] == "HIGH"
+    assert result.iloc[0]["Ср. медиана объёма"] == pytest.approx(1.5)
+
+
+def test_volume_cycle_volume_regime_nan_is_not_string_nan():
+    excel_tester = _excel_tester_module()
+    diag = _volume_diagnostics(
+        ["OFF", "ACTIVE_LONG", "OFF"],
+        daily_reset_event=[0, 0, 0],
+        volume_regime=[np.nan, np.nan, np.nan],
+        median_relative_volume=[1.0, np.nan, 2.0],
+    )
+
+    result = excel_tester._build_volume_cycle_sheet_df(diag, _df(3))
+
+    assert len(result) == 1
+    assert pd.isna(result.iloc[0]["Режим объёма (старт)"])
 
 
 def test_acceptance_daily_reset_inside_cycle_does_not_end_cycle(monkeypatch):

@@ -250,7 +250,19 @@ def test_standalone_volume_full_run_and_workbook_export(tmp_path):
         assert "FilterDiagnostics_100" in wb.sheetnames
         assert "ZigZag_Trigger_Events" not in wb.sheetnames
         assert "filters_summary" not in wb.sheetnames
-        assert "cycle" not in wb.sheetnames
+        # volume-only produces a cycle sheet (informational artifact)
+        assert "cycle" in wb.sheetnames
+        from supertrend_optimizer.io.excel_tester import VOLUME_CYCLE_SHEET_COLUMNS
+        cycle_headers = [
+            cell.value
+            for cell in next(wb["cycle"].iter_rows(max_row=1))
+            if cell.value is not None
+        ]
+        assert cycle_headers == list(VOLUME_CYCLE_SHEET_COLUMNS), (
+            f"cycle sheet header contract mismatch.\n"
+            f"  Expected: {list(VOLUME_CYCLE_SHEET_COLUMNS)}\n"
+            f"  Got:      {cycle_headers}"
+        )
 
         fd_headers = [cell.value for cell in next(wb["FilterDiagnostics_100"].iter_rows(max_row=1))]
         assert "Volume Regime" in fd_headers

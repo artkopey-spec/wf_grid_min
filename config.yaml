@@ -1,24 +1,24 @@
-schema_version: 1                      # Обязательна для strict-validator (Этап 2)
-# Полный перечень ключей схемы WF Grid. trade_filter.enabled=false — безопасный дефолт (WP11);
-# для активации фильтра поставьте trade_filter.enabled: true (и при exit B при необходимости
-# добавьте trade_filter.lifecycle.exit_b_immediate_off: true|false).
+schema_version: 1
+# General WF Grid profile: trade_filter + time_filter + volume (mean) +
+# baseline_session активны. Для production-safe дефолта репозитория см. config.yaml (WP11).
+# Запуск: python run.py --config config_general.yaml (или ваш эквивалент флага конфига).
 
-data:                                  # Данные и годовая нормализация
-  file_path: "data.csv"                # Путь к CSV от каталога запуска run.py
-  periods_per_year: 252                 # Положительное число или "auto"
-  annualization_basis: "trading"        # null (как в доноре) | "calendar" | "trading"
+data:
+  file_path: "data.csv"
+  periods_per_year: 252
+  annualization_basis: "trading"
 
-optimization:                          # Сетка перебора
-  atr_period_range: [50, 60]
-  multiplier_range: [6.0, 9.0]
+optimization:
+  atr_period_range: [20, 90]
+  multiplier_range: [1.0, 9.0]
   multiplier_step: 0.2
-  atr_period_step: 1                   # Целое >= 1; шаг по ATR period в сетке
-  trade_mode: "revers"                 # both | revers | long | short
+  atr_period_step: 3
+  trade_mode: "revers"
 
 backtest:
   commission: 0.0000
   min_trades_required: 3
-  early_exit_enabled: false            # Для WF-сетки всегда false (искажение горизонта OOS)
+  early_exit_enabled: false
   early_exit_max_drawdown: 0.50
   early_exit_check_bars: 50
 
@@ -28,32 +28,32 @@ validation:
   walk_forward:
     train_size: "90d"
     test_size: "30d"
-    step_size: "30d"                   # null = как test_size в движке
-    scheme: "rolling"                  # rolling | expanding
-    anchor: "start"                    # start | end
+    step_size: "30d"
+    scheme: "rolling"
+    anchor: "start"
     min_train_bars: 50
     min_test_bars: 15
 
 gates:
   step:
-    min_trades: 0                      # null = брать из backtest.min_trades_required
+    min_trades: 0
     max_drawdown_threshold: -10.0
   candidate:
     positive_median_threshold: -1000.0
     min_trades_median: 0.0
-    worst_segment_pnl_threshold: null  # null — гейт выключен
+    worst_segment_pnl_threshold: null
     max_drawdown_threshold: -10.0
     min_total_trades: 0
     min_ok_ratio: 0.0
 
 ranking:
-  mode: "gates_score"                  # legacy | gates_score
-  min_segments_for_ranking: null       # null — авто
+  mode: "gates_score"
+  min_segments_for_ranking: null
   sort_by: "sum_pnl_pct_Median"
   tiebreaker: "sum_pnl_pct_Min"
 
 scoring:
-  normalization_mode: "rank"           # minmax | rank
+  normalization_mode: "rank"
   min_passed_for_discrimination: 1
   low_spread_threshold: 1.0e-6
   score_weights:
@@ -63,64 +63,67 @@ scoring:
     abs_max_drawdown_Min:      0.12
 
 status:
-  min_meaningful_bars: 1               # Целое > 0
+  min_meaningful_bars: 1
 
 bucket:
-  atr_bucket_step: 2
+  atr_bucket_step: 3
   mult_bucket_step: 0.2
   min_buckets_for_median: 1
 
-execution:                             # WP-PAR — параллельный запуск сетки
+execution:
   parallel_enabled: true
-  max_workers: null                    # null → os.cpu_count() с кэпами
-  chunksize: null                      # Зарезервировано
+  max_workers: null
+  chunksize: null
   fallback_to_sequential: false
 
-export:                                # Экспорт / сбор метрик пайплайна
+export:
   retain_per_bar_filter_diagnostics: false
 
 trade_filter:
-  enabled: false                       # WP11: должно оставаться false в репозитории по умолчанию
-  type: "zigzag_st_mode"
+  enabled: true
+  # type: "zigzag_st_mode"  # раскомментировать при включении zigzag
 
   zigzag:
-    enabled: true
-    global_stats_source: "full_dataset"
-    leg_height_mode: "pct"
-    reversal_threshold: 0.002
-    candidate_trigger_threshold: auto
-    candidate_trigger_quantile: 0.80   # Обязательно при threshold: auto (не смешивать с числовым threshold)
-    global_median: "auto"
-    local_window: 5
-    daily_reset: true
-    mode: "A+B"                         # Явный режим v3 (A | B | C | A+B | C+B); не используйте вместе с triggers
-    candidate_duration_gate:
-      enabled: true
-      max_bars: 30
+    enabled: false
+    # global_stats_source: "full_dataset"
+    # leg_height_mode: "pct"
+    # reversal_threshold: 0.002
+    # candidate_trigger_threshold: auto
+    # candidate_trigger_quantile: 0.80
+    # global_median: "auto"
+    # local_window: 5
+    # daily_reset: true
+    # mode: "A+B"
+    # candidate_duration_gate:
+    #   enabled: true
+    #   max_bars: 30
 
-  lifecycle:
-    freeze_confirmed_legs: 5
-    stop_check: "confirm_bar_only"
-    stopping_exit: "opposite_st_flip"
-    exit_off_mode: "exit B"
-    exit_off_zz_leg_count: 5
-    # exit_b_immediate_off: недопустим при trade_filter.enabled: false;
-    # при включении фильтра и exit B можно задать true или false.
+  # lifecycle:                        # нужен только при zigzag.enabled: true
+  #   freeze_confirmed_legs: 5
+  #   stop_check: "confirm_bar_only"
+  #   stopping_exit: "opposite_st_flip"
+  #   exit_off_mode: "exit B"
+  #   exit_off_zz_leg_count: 5
+  #   exit_b_immediate_off: false
 
-  diagnostics:
-    export_state_columns: true
-    export_trigger_columns: true
+  # diagnostics:                      # нужен только при zigzag.enabled: true
+  #   export_state_columns: true
+  #   export_trigger_columns: true
 
   time_filter:
-    enabled: false
+    enabled: true
     window: "09:00-19:00"
 
   volume:
-    enabled: false
-    mode: "volume_A"                    # volume_A | volume_B (актуально при volume.enabled: true)
-    short_window: 5
-    baseline_window: 20
-    threshold_ratio: 1.05
+    enabled: true
+    mode: "volume_A"
+    aggregation: mean
+    short_window: 24
+    baseline_window: 1000
+    threshold_ratio: 2.0
     regime_low_ratio: 0.8
     regime_high_ratio: 1.2
-    direction_lookback_bars: 3
+    direction_lookback_bars: 10
+    baseline_session:
+      enabled: true
+      window: "09:00-19:00"

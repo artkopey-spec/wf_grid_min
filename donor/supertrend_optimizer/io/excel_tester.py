@@ -209,6 +209,31 @@ CYCLE_SHEET_COLUMNS: Tuple[str, ...] = (
     "% сделок с положительным фин результатом в цикле",
 )
 
+# Cycle sheet contract for volume-only mode (volume_enabled=True, zigzag_enabled=False).
+# ZigZag-specific fields (legs, medians, thresholds) are intentionally excluded.
+VOLUME_CYCLE_SHEET_COLUMNS: Tuple[str, ...] = (
+    "Начало цикла",
+    "Конец цикла",
+    "Направление цикла",
+    "Баров в цикле",
+    "Размер цикла, %",
+    "ID цикла",
+    "Start bar index",
+    "End bar index",
+    "Цена начала",
+    "Цена конца",
+    "High цикла",
+    "Low цикла",
+    "Макс. движение по циклу, %",
+    "Макс. просадка внутри цикла, %",
+    "Причина завершения",
+    "Режим объёма (старт)",
+    "Ср. медиана объёма",
+    "Сделок в цикле",
+    "Фин результат цикла, %",
+    "% сделок с положительным фин результатом в цикле",
+)
+
 # Legacy export: diagnostic sheet for very short trades (100% slice only)
 FALSE_START_SHEET_NAME = "false start"
 
@@ -348,6 +373,10 @@ def _resolve_cycle_direction(
 
 def _empty_cycle_sheet_df() -> pd.DataFrame:
     return pd.DataFrame(columns=CYCLE_SHEET_COLUMNS)
+
+
+def _empty_volume_cycle_sheet_df() -> pd.DataFrame:
+    return pd.DataFrame(columns=VOLUME_CYCLE_SHEET_COLUMNS)
 
 
 def _completed_cycle_segments(state_arr: np.ndarray) -> List[Tuple[int, int]]:
@@ -625,6 +654,207 @@ def _build_cycle_sheet_df(
     result = result.sort_values("Start bar index", kind="stable").reset_index(drop=True)
     result["ID цикла"] = np.arange(1, len(result) + 1, dtype=np.int64)
     return result.loc[:, list(CYCLE_SHEET_COLUMNS)]
+
+
+def _build_volume_cycle_sheet_df(
+    filter_diagnostics: Dict[str, np.ndarray],
+    df: Optional[pd.DataFrame],
+    trades_df: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
+    """Build cycle sheet DataFrame for volume-only mode.
+
+    Informational artifact only — does not affect backtest results, signals,
+    trades, or any trading metrics.  Read-only with respect to all inputs.
+
+    Direction is derived from FSM state at cycle start bar:
+      ACTIVE_LONG  -> "+"
+      ACTIVE_SHORT -> "-"
+      otherwise    -> ""
+
+    Volume fields (volume_regime, median_relative_volume) are optional:
+    absent arrays produce NaN/empty without raising.
+    """
+    result_empty = _empty_volume_cycle_sheet_df()
+
+    if not isinstance(filter_diagnostics, dict):
+        return result_empty
+    if "trade_filter_state" not in filter_diagnostics:
+        return result_empty
+    if df is None or not {"close", "high", "low"}.issubset(df.columns):
+        return result_empty
+
+    try:
+        close = np.asarray(df["close"].to_numpy(), dtype=np.float64)
+        high = np.asarray(df["high"].to_numpy(), dtype=np.float64)
+        low = np.asarray(df["low"].to_numpy(), dtype=np.float64)
+    except (TypeError, ValueError):
+        return result_empty
+
+    state_arr = np.asarray(filter_diagnostics["trade_filter_state"])
+
+    daily_reset_raw = filter_diagnostics.get("daily_reset_event")
+    time_filter_reset_raw = filter_diagnostics.get("time_filter_reset_event")
+    volume_regime_raw = filter_diagnostics.get("volume_regime")
+    median_rel_vol_raw = filter_diagnostics.get("median_relative_volume")
+
+    daily_reset_arr_raw: Optional[np.ndarray] = None
+    time_filter_reset_arr_raw: Optional[np.ndarray] = None
+    volume_regime_arr_raw: Optional[np.ndarray] = None
+    median_rel_vol_arr_raw: Optional[np.ndarray] = None
+    if daily_reset_raw is not None:
+        daily_reset_arr_raw = np.asarray(daily_reset_raw)
+        if daily_reset_arr_raw.ndim == 0:
+            daily_reset_arr_raw = daily_reset_arr_raw.reshape(1)
+    if time_filter_reset_raw is not None:
+        time_filter_reset_arr_raw = np.asarray(time_filter_reset_raw)
+        if time_filter_reset_arr_raw.ndim == 0:
+            time_filter_reset_arr_raw = time_filter_reset_arr_raw.reshape(1)
+    if volume_regime_raw is not None:
+        volume_regime_arr_raw = np.asarray(volume_regime_raw, dtype=object)
+        if volume_regime_arr_raw.ndim == 0:
+            volume_regime_arr_raw = volume_regime_arr_raw.reshape(1)
+    if median_rel_vol_raw is not None:
+        median_rel_vol_arr_raw = np.asarray(median_rel_vol_raw)
+        if median_rel_vol_arr_raw.ndim == 0:
+            median_rel_vol_arr_raw = median_rel_vol_arr_raw.reshape(1)
+
+    n = min(len(df), len(state_arr), len(close), len(high), len(low))
+    if daily_reset_arr_raw is not None:
+        n = min(n, len(daily_reset_arr_raw))
+    if time_filter_reset_arr_raw is not None:
+        n = min(n, len(time_filter_reset_arr_raw))
+    if volume_regime_arr_raw is not None:
+        n = min(n, len(volume_regime_arr_raw))
+    if median_rel_vol_arr_raw is not None:
+        n = min(n, len(median_rel_vol_arr_raw))
+    if n == 0:
+        return result_empty
+
+    close = close[:n]
+    high = high[:n]
+    low = low[:n]
+    state_arr = state_arr[:n]
+
+    daily_reset_arr = daily_reset_arr_raw[:n] if daily_reset_arr_raw is not None else None
+    time_filter_reset_arr = (
+        time_filter_reset_arr_raw[:n] if time_filter_reset_arr_raw is not None else None
+    )
+    volume_regime_arr = volume_regime_arr_raw[:n] if volume_regime_arr_raw is not None else None
+    if median_rel_vol_arr_raw is not None:
+        try:
+            median_rel_vol_arr: Optional[np.ndarray] = np.asarray(
+                median_rel_vol_arr_raw[:n], dtype=np.float64
+            )[:n]
+        except (TypeError, ValueError):
+            median_rel_vol_arr = None
+    else:
+        median_rel_vol_arr = None
+
+    index = df.iloc[:n].index
+    rows: List[Dict[str, Any]] = []
+
+    for start_bar, end_bar in _completed_cycle_segments(state_arr):
+        state_at_start = str(state_arr[start_bar])
+        if state_at_start == "ACTIVE_LONG":
+            direction = "+"
+        elif state_at_start == "ACTIVE_SHORT":
+            direction = "-"
+        else:
+            direction = ""
+
+        interval = slice(start_bar, end_bar + 1)
+        interval_close = close[interval]
+        interval_high = high[interval]
+        interval_low = low[interval]
+        ohlc_valid = bool(
+            np.all(np.isfinite(interval_close))
+            and np.all(np.isfinite(interval_high))
+            and np.all(np.isfinite(interval_low))
+        )
+        close_start = float(close[start_bar]) if ohlc_valid else float("nan")
+        close_end = float(close[end_bar]) if ohlc_valid else float("nan")
+        high_cycle = float(np.max(interval_high)) if ohlc_valid else float("nan")
+        low_cycle = float(np.min(interval_low)) if ohlc_valid else float("nan")
+
+        if ohlc_valid and close_start > 0.0:
+            cycle_size_pct = (close_end - close_start) / close_start * 100.0
+            if direction == "+":
+                max_move_pct = (high_cycle - close_start) / close_start * 100.0
+                max_drawdown_pct = (close_start - low_cycle) / close_start * 100.0
+            elif direction == "-":
+                max_move_pct = (close_start - low_cycle) / close_start * 100.0
+                max_drawdown_pct = (high_cycle - close_start) / close_start * 100.0
+            else:
+                max_move_pct = float("nan")
+                max_drawdown_pct = float("nan")
+        else:
+            cycle_size_pct = float("nan")
+            max_move_pct = float("nan")
+            max_drawdown_pct = float("nan")
+
+        off_bar = end_bar + 1
+        if (
+            daily_reset_arr is not None
+            and off_bar < len(daily_reset_arr)
+            and int(daily_reset_arr[off_bar]) == 1
+        ):
+            end_reason = "daily_reset"
+        elif (
+            time_filter_reset_arr is not None
+            and off_bar < len(time_filter_reset_arr)
+            and int(time_filter_reset_arr[off_bar]) == 1
+        ):
+            end_reason = "time_filter_reset"
+        else:
+            end_reason = "FSM_OFF"
+
+        vol_regime_start: Any = float("nan")
+        if volume_regime_arr is not None and start_bar < len(volume_regime_arr):
+            regime_value = volume_regime_arr[start_bar]
+            if not pd.isna(regime_value):
+                vol_regime_start = str(regime_value)
+
+        if median_rel_vol_arr is not None:
+            interval_mrv = median_rel_vol_arr[interval]
+            finite_mrv = interval_mrv[np.isfinite(interval_mrv)]
+            avg_median_vol: float = float(np.mean(finite_mrv)) if len(finite_mrv) > 0 else float("nan")
+        else:
+            avg_median_vol = float("nan")
+
+        cycle_trades = _cycle_trades_for_segment(trades_df, start_bar, end_bar)
+
+        rows.append({
+            "Начало цикла": _excel_safe_datetime_value(index[start_bar]),
+            "Конец цикла": _excel_safe_datetime_value(index[end_bar]),
+            "Направление цикла": direction,
+            "Баров в цикле": end_bar - start_bar + 1,
+            "Размер цикла, %": cycle_size_pct,
+            "ID цикла": 0,
+            "Start bar index": start_bar,
+            "End bar index": end_bar,
+            "Цена начала": close_start,
+            "Цена конца": close_end,
+            "High цикла": high_cycle,
+            "Low цикла": low_cycle,
+            "Макс. движение по циклу, %": max_move_pct,
+            "Макс. просадка внутри цикла, %": max_drawdown_pct,
+            "Причина завершения": end_reason,
+            "Режим объёма (старт)": vol_regime_start,
+            "Ср. медиана объёма": avg_median_vol,
+            "Сделок в цикле": len(cycle_trades),
+            "Фин результат цикла, %": _cycle_final_result_pct(trades_df, cycle_trades),
+            "% сделок с положительным фин результатом в цикле": (
+                _cycle_positive_trades_pct(trades_df, cycle_trades)
+            ),
+        })
+
+    if not rows:
+        return result_empty
+
+    result = pd.DataFrame(rows, columns=VOLUME_CYCLE_SHEET_COLUMNS)
+    result = result.sort_values("Start bar index", kind="stable").reset_index(drop=True)
+    result["ID цикла"] = np.arange(1, len(result) + 1, dtype=np.int64)
+    return result.loc[:, list(VOLUME_CYCLE_SHEET_COLUMNS)]
 
 
 def _write_cycle_sheet(writer: pd.ExcelWriter, cycle_df: pd.DataFrame) -> None:
@@ -1880,10 +2110,14 @@ def export_tester_results(
             if zigzag_enabled and export_state_cols:
                 _write_filters_summary_sheet(writer, period_results)
 
-            # cycle (independent of diagnostic export flags; requires ZigZag diagnostics)
+            # cycle — ZigZag path
             if zigzag_enabled and fd_100 is not None:
                 cycle_df = _build_cycle_sheet_df(fd_100, df, trades_100_raw)
                 _write_cycle_sheet(writer, cycle_df)
+            # cycle — volume-only path (mutually exclusive with ZigZag path above)
+            elif volume_enabled and not zigzag_enabled and fd_100 is not None:
+                vol_cycle_df = _build_volume_cycle_sheet_df(fd_100, df, trades_100_raw)
+                _write_cycle_sheet(writer, vol_cycle_df)
 
     return output_path
 

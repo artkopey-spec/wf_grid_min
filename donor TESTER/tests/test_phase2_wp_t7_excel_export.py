@@ -1098,3 +1098,248 @@ class TestImmediateOffExcelDisplayContract:
             "'Exit-B Immediate OFF' must be present even when False (§6.2 always-present)."
         )
         assert row.iloc[0]["Value"] is False
+
+
+# ---------------------------------------------------------------------------
+# Group 8: Volume-only cycle sheet (volume_enabled=True, zigzag_enabled=False)
+# ---------------------------------------------------------------------------
+
+def _make_synthetic_ohlc_with_volume(n: int = 80) -> pd.DataFrame:
+    """Synthetic OHLC with a constant volume column for volume-filter tests."""
+    df = _make_synthetic_ohlc(n=n)
+    df["volume"] = np.full(n, 100.0)
+    return df
+
+
+def _make_volume_only_cfg():
+    """Build a fully resolved volume-only TradeFilterConfig (zigzag_enabled=False)."""
+    from supertrend_optimizer.core.trade_filter_config import (
+        build_trade_filter_config_from_raw,
+        collect_raw_user_keys,
+        resolve_exit_b_immediate_off_in_place,
+        resolve_exit_off_mode_in_place,
+        resolve_time_filter_in_place,
+        resolve_trade_filter_mode_in_place,
+        resolve_volume_defaults_in_place,
+        resolve_volume_enabled_in_place,
+        resolve_zigzag_enabled_in_place,
+        validate_trade_filter,
+    )
+
+    raw = {
+        "enabled": True,
+        "volume": {
+            "enabled": True,
+            "mode": "volume_A",
+            "short_window": 2,
+            "baseline_window": 3,
+            "threshold_ratio": 1.0,
+            "regime_low_ratio": 0.8,
+            "regime_high_ratio": 1.2,
+            "direction_lookback_bars": 1,
+        },
+    }
+    raw_user_keys = collect_raw_user_keys({"trade_filter": raw})
+    tf_cfg = build_trade_filter_config_from_raw(raw)
+    resolve_zigzag_enabled_in_place(tf_cfg, raw_user_keys)
+    resolve_volume_enabled_in_place(tf_cfg, raw_user_keys)
+    errors: List[str] = []
+    validate_trade_filter(tf_cfg, errors, raw_user_keys, caller_pipeline="tester")
+    assert errors == [], f"Config validation errors: {errors}"
+    resolve_trade_filter_mode_in_place(tf_cfg, raw_user_keys)
+    resolve_exit_off_mode_in_place(tf_cfg, raw_user_keys)
+    resolve_exit_b_immediate_off_in_place(tf_cfg, raw_user_keys)
+    resolve_time_filter_in_place(tf_cfg, raw_user_keys)
+    resolve_volume_defaults_in_place(tf_cfg, raw_user_keys)
+    return tf_cfg
+
+
+def _run_volume_only(df: pd.DataFrame, tf_cfg, runtime):
+    """Run volume-only tester and return (results, signals_df)."""
+    from supertrend_optimizer.testing.runner import run_all_periods
+    from supertrend_optimizer.testing.signal_events import build_signal_events
+    from supertrend_optimizer.utils.enums import ExecutionModel
+
+    results = run_all_periods(
+        df=df,
+        atr_period=5,
+        multiplier=2.0,
+        trade_mode="revers",
+        commission=0.0,
+        execution_model=ExecutionModel.OPEN_TO_OPEN,
+        trade_filter_config=tf_cfg,
+        volume_runtime=runtime,
+    )
+    signals_df = build_signal_events(
+        df=df,
+        trend=results[0].result.trend,
+        atr_period=5,
+        trade_mode="revers",
+        execution_model=ExecutionModel.OPEN_TO_OPEN,
+        filter_diagnostics=results[0].filter_diagnostics,
+    )
+    return results, signals_df
+
+
+class TestVolumeCycleSheet:
+    """Volume-only cycle sheet: presence and column contract.
+
+    Contracts verified:
+    1. cycle sheet is present when volume_enabled=True, zigzag_enabled=False.
+    2. cycle sheet headers == VOLUME_CYCLE_SHEET_COLUMNS (exact order).
+    3. disabled path: cycle sheet absent (covered by TestDisabledLegacyGolden).
+    4. Informational isolation: trading metrics identical regardless of cycle sheet content.
+    """
+
+    def test_volume_only_cycle_sheet_present_and_headers(self) -> None:
+        """cycle sheet present with exact VOLUME_CYCLE_SHEET_COLUMNS header order."""
+        from supertrend_optimizer.core.volume_metrics import build_volume_global_metrics
+        from supertrend_optimizer.io.excel_tester import VOLUME_CYCLE_SHEET_COLUMNS
+
+        df = _make_synthetic_ohlc_with_volume()
+        tf_cfg = _make_volume_only_cfg()
+        runtime = build_volume_global_metrics(
+            df["volume"].to_numpy(),
+            df["close"].to_numpy(),
+            tf_cfg.volume,
+        )
+        results, signals_df = _run_volume_only(df, tf_cfg, runtime)
+        wb = _export_and_load(results, signals_df, tf_cfg=tf_cfg, df=df)
+
+        assert "cycle" in wb.sheetnames, (
+            "cycle sheet must be present for volume-only run "
+            f"(volume_enabled=True, zigzag_enabled=False). Sheets: {wb.sheetnames}"
+        )
+        headers = _sheet_headers(wb, "cycle")
+        assert headers == list(VOLUME_CYCLE_SHEET_COLUMNS), (
+            f"cycle sheet header contract mismatch.\n"
+            f"  Expected: {list(VOLUME_CYCLE_SHEET_COLUMNS)}\n"
+            f"  Got:      {headers}"
+        )
+
+    def test_volume_only_cycle_sheet_no_zigzag_columns(self) -> None:
+        """cycle sheet in volume-only mode must not contain ZigZag-specific columns."""
+        from supertrend_optimizer.core.volume_metrics import build_volume_global_metrics
+
+        df = _make_synthetic_ohlc_with_volume()
+        tf_cfg = _make_volume_only_cfg()
+        runtime = build_volume_global_metrics(
+            df["volume"].to_numpy(),
+            df["close"].to_numpy(),
+            tf_cfg.volume,
+        )
+        results, signals_df = _run_volume_only(df, tf_cfg, runtime)
+        wb = _export_and_load(results, signals_df, tf_cfg=tf_cfg, df=df)
+
+        if "cycle" not in wb.sheetnames:
+            pytest.skip("cycle sheet absent — checked in sibling test")
+        headers = _sheet_headers(wb, "cycle")
+        zigzag_only_cols = {
+            "Ног ZigZag в цикле",
+            "Медиана ног",
+            "Ног выше порога триггера кандидата",
+            "Макс. высота ноги",
+            "Доля ног выше порога, %",
+        }
+        present = zigzag_only_cols & set(headers)
+        assert not present, (
+            f"ZigZag-specific columns must not appear in volume-only cycle sheet: {present}"
+        )
+
+    def test_volume_only_cycle_informational_isolation(self, monkeypatch) -> None:
+        """Trading metrics must be identical regardless of cycle sheet presence.
+
+        Verifies the informational isolation invariant: cycle sheet is a
+        post-factum diagnostic artifact that does not affect backtest results.
+        """
+        import tempfile
+        import openpyxl
+        import supertrend_optimizer.io.excel_tester as excel_tester
+        from supertrend_optimizer.core.volume_metrics import build_volume_global_metrics
+        from supertrend_optimizer.testing.runner import run_all_periods
+        from supertrend_optimizer.testing.signal_events import build_signal_events
+        from supertrend_optimizer.utils.enums import ExecutionModel
+
+        df = _make_synthetic_ohlc_with_volume()
+        tf_cfg = _make_volume_only_cfg()
+        runtime = build_volume_global_metrics(
+            df["volume"].to_numpy(),
+            df["close"].to_numpy(),
+            tf_cfg.volume,
+        )
+
+        # Run once — metrics are computed by run_all_periods, not by the exporter
+        results = run_all_periods(
+            df=df,
+            atr_period=5,
+            multiplier=2.0,
+            trade_mode="revers",
+            commission=0.0,
+            execution_model=ExecutionModel.OPEN_TO_OPEN,
+            trade_filter_config=tf_cfg,
+            volume_runtime=runtime,
+        )
+        pr_100 = next((r for r in results if r.period_label == "100%"), None)
+        assert pr_100 is not None
+
+        def _snapshot_metrics():
+            snapshot = {}
+            for period_result in results:
+                metrics = period_result.metrics
+                snapshot[period_result.period_label] = {
+                    "sum_pnl_pct": metrics.get("sum_pnl_pct"),
+                    "num_trades": metrics.get("num_trades"),
+                    "win_rate": metrics.get("win_rate"),
+                }
+            return snapshot
+
+        metrics_before = _snapshot_metrics()
+        for key in ("sum_pnl_pct", "num_trades", "win_rate"):
+            assert key in pr_100.metrics, f"metric {key!r} missing from PeriodResult"
+
+        signals_df = build_signal_events(
+            df=df,
+            trend=results[0].result.trend,
+            atr_period=5,
+            trade_mode="revers",
+            execution_model=ExecutionModel.OPEN_TO_OPEN,
+            filter_diagnostics=results[0].filter_diagnostics,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_with_cycle = excel_tester.export_tester_results(
+                results,
+                str(Path(tmpdir) / "vol_cycle_with_cycle_sheet.xlsx"),
+                signals_df=signals_df,
+                trade_filter_config=tf_cfg,
+                df=df,
+            )
+            wb_with_cycle = openpyxl.load_workbook(out_with_cycle, read_only=True)
+            try:
+                assert "cycle" in wb_with_cycle.sheetnames
+            finally:
+                wb_with_cycle.close()
+
+            # Disable cycle writer only for export stage to compare identical metrics
+            # with/without cycle sheet side effects.
+            monkeypatch.setattr(
+                excel_tester,
+                "_write_cycle_sheet",
+                lambda writer, cycle_df: None,
+                raising=True,
+            )
+            out_without_cycle = excel_tester.export_tester_results(
+                results,
+                str(Path(tmpdir) / "vol_cycle_without_cycle_sheet.xlsx"),
+                signals_df=signals_df,
+                trade_filter_config=tf_cfg,
+                df=df,
+            )
+            wb_without_cycle = openpyxl.load_workbook(out_without_cycle, read_only=True)
+            try:
+                assert "cycle" not in wb_without_cycle.sheetnames
+            finally:
+                wb_without_cycle.close()
+
+        metrics_after = _snapshot_metrics()
+        assert metrics_before == metrics_after

@@ -35,6 +35,7 @@ MODES = ("baseline", "zigzag_only", "standalone_volume", "zigzag_plus_volume")
 _VOLUME_SNAPSHOT_KEYS = {
     "volume_filter_enabled",
     "volume_filter_mode",
+    "volume_daily_reset",
     "volume_short_window",
     "volume_baseline_window",
     "volume_threshold_ratio",

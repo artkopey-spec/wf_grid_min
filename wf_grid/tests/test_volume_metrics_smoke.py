@@ -463,15 +463,36 @@ def test_filter_config_snapshot_has_exact_keys_and_values():
         "volume_filter_enabled": True,
         "volume_filter_mode": "volume_B",
         "volume_aggregation": "median",
+        "volume_daily_reset": False,
         "volume_short_window": 3,
         "volume_baseline_window": 5,
         "volume_baseline_session_enabled": False,
         "volume_baseline_session_window": None,
         "volume_threshold_ratio": 0.9,
+        "volume_exit_hysteresis_ratio": 0.9,
+        "volume_exit_freeze_bars": 0,
         "volume_regime_low_ratio": 0.7,
         "volume_regime_high_ratio": 1.3,
         "volume_direction_lookback_bars": 4,
     }
+
+
+def test_filter_config_snapshot_uses_explicit_exit_values():
+    cfg = _cfg(
+        threshold_ratio=2.2,
+        exit_hysteresis_ratio=1.8,
+        exit_freeze_bars=10,
+    )
+
+    rt = build_volume_global_metrics(
+        np.arange(1, 8, dtype=np.float64),
+        np.arange(10, 17, dtype=np.float64),
+        cfg,
+    )
+
+    assert rt.filter_config_snapshot["volume_threshold_ratio"] == 2.2
+    assert rt.filter_config_snapshot["volume_exit_hysteresis_ratio"] == 1.8
+    assert rt.filter_config_snapshot["volume_exit_freeze_bars"] == 10
 
 
 def test_baseline_window_warning_emits_once():

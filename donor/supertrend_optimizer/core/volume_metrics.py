@@ -140,6 +140,12 @@ def build_volume_global_metrics(volume, close, volume_cfg, index=None) -> Volume
     short_window = int(volume_cfg.short_window)
     baseline_window = int(volume_cfg.baseline_window)
     threshold_ratio = float(volume_cfg.threshold_ratio)
+    exit_hysteresis_ratio = getattr(volume_cfg, "exit_hysteresis_ratio", None)
+    if exit_hysteresis_ratio is None:
+        exit_hysteresis_ratio = threshold_ratio
+    exit_freeze_bars = getattr(volume_cfg, "exit_freeze_bars", None)
+    if exit_freeze_bars is None:
+        exit_freeze_bars = 0
     regime_low_ratio = float(volume_cfg.regime_low_ratio)
     regime_high_ratio = float(volume_cfg.regime_high_ratio)
     lookback_bars = int(volume_cfg.direction_lookback_bars)
@@ -222,11 +228,14 @@ def build_volume_global_metrics(volume, close, volume_cfg, index=None) -> Volume
         "volume_filter_enabled": True,
         "volume_filter_mode": mode,
         "volume_aggregation": aggregation,
+        "volume_daily_reset": bool(getattr(volume_cfg, "daily_reset", False)),
         "volume_short_window": volume_cfg.short_window,
         "volume_baseline_window": volume_cfg.baseline_window,
         "volume_baseline_session_enabled": baseline_session_enabled,
         "volume_baseline_session_window": getattr(baseline_session, "window", None),
         "volume_threshold_ratio": volume_cfg.threshold_ratio,
+        "volume_exit_hysteresis_ratio": exit_hysteresis_ratio,
+        "volume_exit_freeze_bars": exit_freeze_bars,
         "volume_regime_low_ratio": volume_cfg.regime_low_ratio,
         "volume_regime_high_ratio": volume_cfg.regime_high_ratio,
         "volume_direction_lookback_bars": volume_cfg.direction_lookback_bars,

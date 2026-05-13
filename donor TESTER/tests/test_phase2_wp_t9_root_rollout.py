@@ -1,18 +1,20 @@
-"""
-WP-T9 root rollout hardening.
+"""WP-T9 root rollout hardening.
 
 These checks pin the production-facing root artifacts that sit outside the
 canonical ``donor TESTER`` implementation:
 
 * repo-root ``run_batch_tester.py`` remains a compatibility wrapper;
-* repo-root ``config_tester.yaml`` loads via ``load_tester_config`` (ZigZag filter
-  may be enabled when ``segmentation.mode: legacy`` — see file comments);
+* repo-root ``config_tester.yaml`` loads via ``load_tester_config`` as the
+  current operator-facing sample config;
+* a dedicated fixture proves legacy ``zigzag_st_mode`` still loads when
+  ``segmentation.mode: legacy``;
 * the user-facing filter document exists and points to the spec.
 """
 
 from pathlib import Path
 import subprocess
 import sys
+from textwrap import dedent
 
 from supertrend_optimizer.cli.tester import load_tester_config
 
@@ -48,18 +50,67 @@ def test_root_entrypoint_help_smoke() -> None:
     assert "--config" in result.stdout
 
 
-def test_root_config_loads_with_legacy_segmentation_and_zigzag_filter() -> None:
+def test_root_config_loads_as_current_operator_sample() -> None:
     text = ROOT_CONFIG.read_text(encoding="utf-8")
 
     assert "segmentation.mode: legacy" in text
     assert "trade_filter:" in text
-    assert "type: zigzag_st_mode" in text
 
     cfg = load_tester_config(str(ROOT_CONFIG))
     tf_cfg = cfg.get("trade_filter")
     assert tf_cfg is not None
-    assert tf_cfg.enabled is True
+    assert isinstance(tf_cfg.enabled, bool)
+
+
+def test_legacy_segmentation_accepts_zigzag_st_mode_fixture(tmp_path: Path) -> None:
+    cfg_path = tmp_path / "config_tester.yaml"
+    cfg_path.write_text(
+        dedent(
+            """\
+            supertrend:
+              atr_period: 20
+              multiplier: 1.0
+            trade_mode: revers
+            commission: 0.0
+            warmup_period_auto: true
+            periods_per_year: auto
+            market: forex
+            segmentation:
+              mode: legacy
+              n_parts: 3
+            trade_filter:
+              enabled: true
+              type: zigzag_st_mode
+              zigzag:
+                enabled: true
+                global_stats_source: full_dataset
+                leg_height_mode: pct
+                reversal_threshold: 0.005
+                candidate_trigger_threshold: 0.012
+                global_median: auto
+                local_window: 5
+              triggers:
+                candidate_threshold:
+                  enabled: true
+                confirmed_median:
+                  enabled: true
+              lifecycle:
+                freeze_confirmed_legs: 5
+                stop_check: confirm_bar_only
+                stopping_exit: opposite_st_flip
+              diagnostics:
+                export_state_columns: true
+                export_trigger_columns: true
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = load_tester_config(str(cfg_path))
+    tf_cfg = cfg.get("trade_filter")
+    assert tf_cfg is not None
     assert tf_cfg.type == "zigzag_st_mode"
+    assert tf_cfg.zigzag.enabled is True
 
 
 def test_user_facing_filter_doc_deliverable_exists() -> None:

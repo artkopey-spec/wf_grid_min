@@ -100,7 +100,7 @@ def apply(
         if arr.ndim != 1 or len(arr) != n:
             raise ValueError(f"volume_runtime.{name} must be 1-D with length {n}")
 
-    daily_reset_event = _resolve_daily_reset_event(
+    daily_reset_enabled, daily_reset_event = _resolve_daily_reset_event(
         daily_reset_event=daily_reset_event,
         index=index,
         n=n,
@@ -132,12 +132,25 @@ def apply(
     threshold = float(
         volume_runtime.filter_config_snapshot.get("volume_threshold_ratio", np.nan)
     )
+    exit_threshold = volume_runtime.filter_config_snapshot.get(
+        "volume_exit_hysteresis_ratio", None
+    )
+    if exit_threshold is None:
+        exit_threshold = threshold
+    exit_threshold = float(exit_threshold)
+    exit_freeze_bars = volume_runtime.filter_config_snapshot.get(
+        "volume_exit_freeze_bars", None
+    )
+    if exit_freeze_bars is None:
+        exit_freeze_bars = 0
+    exit_freeze_bars = int(exit_freeze_bars)
     lookback = int(
         volume_runtime.filter_config_snapshot.get(
             "volume_direction_lookback_bars", 1
         )
     )
 
+    active_age_bars = 0
     for t in range(n):
         if daily_reset_event[t]:
             state = VolumeOnlyState.OFF
@@ -145,7 +158,10 @@ def apply(
         elif time_filter_reset_event[t]:
             state = VolumeOnlyState.OFF
             block_reason_arr[t] = "time_filter_reset"
-        elif _volume_reversal(mode, median_relative_volume[t], threshold, state):
+        elif (
+            active_age_bars >= exit_freeze_bars
+            and _volume_reversal(mode, median_relative_volume[t], exit_threshold, state)
+        ):
             state = VolumeOnlyState.OFF
             block_reason_arr[t] = "volume_reversal"
         else:
@@ -184,6 +200,10 @@ def apply(
         state_arr[t] = _STATE_NAMES[state]
         if t + 1 < n:
             positions[t + 1] = np.int8(_state_position(state))
+        if state == VolumeOnlyState.OFF:
+            active_age_bars = 0
+        else:
+            active_age_bars += 1
 
     diagnostics = {
         "trade_filter_state": state_arr,
@@ -193,6 +213,7 @@ def apply(
         "volume_condition_block_reason": volume_block_reason_labels,
         "volume_initial_direction": volume_direction_labels,
         "median_relative_volume": median_relative_volume,
+        "daily_reset_enabled": np.full(n, int(daily_reset_enabled), dtype=np.int8),
         "daily_reset_event": np.asarray(daily_reset_event, dtype=np.int8),
         "time_filter_enabled": np.full(
             n, np.int8(1 if time_filter_enabled else 0), dtype=np.int8
@@ -213,17 +234,30 @@ def _resolve_daily_reset_event(
     index: Optional[pd.Index],
     n: int,
     trade_filter_config,
-) -> np.ndarray:
+) -> tuple[bool, np.ndarray]:
     if daily_reset_event is None:
+        volume_cfg = getattr(trade_filter_config, "volume", None)
+        if bool(getattr(volume_cfg, "daily_reset", False)):
+            return True, _infer_daily_reset_event(
+                index,
+                n,
+                enabled=True,
+                source="trade_filter.volume.daily_reset",
+            )
         zigzag_cfg = getattr(trade_filter_config, "zigzag", None)
         enabled = bool(getattr(zigzag_cfg, "daily_reset", False))
-        return _infer_daily_reset_event(index, n, enabled=enabled)
+        return enabled, _infer_daily_reset_event(index, n, enabled=enabled)
     arr = np.asarray(daily_reset_event, dtype=bool)
     if arr.ndim != 1 or len(arr) != n:
         raise ConfigError(
             f"apply() daily_reset_event must be 1-D bool of length n={n}"
         )
-    return arr
+    volume_cfg = getattr(trade_filter_config, "volume", None)
+    zigzag_cfg = getattr(trade_filter_config, "zigzag", None)
+    enabled = bool(getattr(volume_cfg, "daily_reset", False)) or bool(
+        getattr(zigzag_cfg, "daily_reset", False)
+    )
+    return enabled, arr
 
 
 def _resolve_time_filter_events(

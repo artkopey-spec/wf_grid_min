@@ -1,0 +1,42 @@
+Loaded config from: C:\3.1_wf_grid\config tester\volgrid_sw80_thr_2p4.yaml
+  atr_period: 20
+  multiplier: 1.0
+  trade_mode: revers
+  commission: 0.0
+  warmup_period: 0
+  warmup_period_auto: True
+  min_trades_required: 3
+  annualization_factor: 252
+  annualization_basis: trading
+  execution_model: open_to_open
+  period: False
+  segmentation.mode: legacy
+  export.diagnostics: False
+  export.signals: False
+  export.false_start: False
+  export.cycle: False
+  export.trades: False
+  export.false_start_max_bars: 4
+  trade_filter: enabled (type=<unset>)
+
+Resolved periods_per_year: 252.00
+Using auto-warmup: 400 bars (10% of 297219 bars, clamped)
+
+Running backtest...
+  CSV: C:\3.1_wf_grid\data.csv
+  ATR period: 20
+  Multiplier: 1.0
+  Mode: revers
+  Commission: 0.0
+  Warmup period: 400
+  auto_warmup: True
+  min_trades_required: 3
+  Execution model: open_to_open
+  Segmentation mode: legacy
+
+Backtest completed:
+  100%: 2900 trades, Sum PnL: 13.00%
+
+Exporting to Excel: C:\3.1_wf_grid\results tester\volgrid_sw80_thr_2p4_20260513_134109.xlsx
+
+[SUCCESS] Results exported to: C:\3.1_wf_grid\results tester\test_volgrid_sw80_thr_2p4_20260513_134109_20260513_134119.xlsx

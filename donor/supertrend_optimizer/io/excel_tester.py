@@ -392,6 +392,19 @@ def _completed_cycle_segments(state_arr: np.ndarray) -> List[Tuple[int, int]]:
     return segments
 
 
+def _completed_cycle_segments_with_exit(state_arr: np.ndarray) -> List[Tuple[int, int, int]]:
+    segments: List[Tuple[int, int, int]] = []
+    start: Optional[int] = None
+    for idx, state in enumerate(state_arr):
+        active = str(state) != "OFF"
+        if active and start is None:
+            start = idx
+        elif not active and start is not None:
+            segments.append((start, idx - 1, idx))
+            start = None
+    return segments
+
+
 def _cycle_trades_for_segment(
     trades_df: Optional[pd.DataFrame],
     start_bar: int,
@@ -696,11 +709,13 @@ def _build_volume_cycle_sheet_df(
     time_filter_reset_raw = filter_diagnostics.get("time_filter_reset_event")
     volume_regime_raw = filter_diagnostics.get("volume_regime")
     median_rel_vol_raw = filter_diagnostics.get("median_relative_volume")
+    block_reason_raw = filter_diagnostics.get("filter_block_reason")
 
     daily_reset_arr_raw: Optional[np.ndarray] = None
     time_filter_reset_arr_raw: Optional[np.ndarray] = None
     volume_regime_arr_raw: Optional[np.ndarray] = None
     median_rel_vol_arr_raw: Optional[np.ndarray] = None
+    block_reason_arr_raw: Optional[np.ndarray] = None
     if daily_reset_raw is not None:
         daily_reset_arr_raw = np.asarray(daily_reset_raw)
         if daily_reset_arr_raw.ndim == 0:
@@ -717,6 +732,10 @@ def _build_volume_cycle_sheet_df(
         median_rel_vol_arr_raw = np.asarray(median_rel_vol_raw)
         if median_rel_vol_arr_raw.ndim == 0:
             median_rel_vol_arr_raw = median_rel_vol_arr_raw.reshape(1)
+    if block_reason_raw is not None:
+        block_reason_arr_raw = np.asarray(block_reason_raw, dtype=object)
+        if block_reason_arr_raw.ndim == 0:
+            block_reason_arr_raw = block_reason_arr_raw.reshape(1)
 
     n = min(len(df), len(state_arr), len(close), len(high), len(low))
     if daily_reset_arr_raw is not None:
@@ -727,6 +746,8 @@ def _build_volume_cycle_sheet_df(
         n = min(n, len(volume_regime_arr_raw))
     if median_rel_vol_arr_raw is not None:
         n = min(n, len(median_rel_vol_arr_raw))
+    if block_reason_arr_raw is not None:
+        n = min(n, len(block_reason_arr_raw))
     if n == 0:
         return result_empty
 
@@ -740,6 +761,7 @@ def _build_volume_cycle_sheet_df(
         time_filter_reset_arr_raw[:n] if time_filter_reset_arr_raw is not None else None
     )
     volume_regime_arr = volume_regime_arr_raw[:n] if volume_regime_arr_raw is not None else None
+    block_reason_arr = block_reason_arr_raw[:n] if block_reason_arr_raw is not None else None
     if median_rel_vol_arr_raw is not None:
         try:
             median_rel_vol_arr: Optional[np.ndarray] = np.asarray(
@@ -753,7 +775,7 @@ def _build_volume_cycle_sheet_df(
     index = df.iloc[:n].index
     rows: List[Dict[str, Any]] = []
 
-    for start_bar, end_bar in _completed_cycle_segments(state_arr):
+    for start_bar, last_active_bar, end_bar in _completed_cycle_segments_with_exit(state_arr):
         state_at_start = str(state_arr[start_bar])
         if state_at_start == "ACTIVE_LONG":
             direction = "+"
@@ -792,7 +814,7 @@ def _build_volume_cycle_sheet_df(
             max_move_pct = float("nan")
             max_drawdown_pct = float("nan")
 
-        off_bar = end_bar + 1
+        off_bar = end_bar
         if (
             daily_reset_arr is not None
             and off_bar < len(daily_reset_arr)
@@ -805,6 +827,13 @@ def _build_volume_cycle_sheet_df(
             and int(time_filter_reset_arr[off_bar]) == 1
         ):
             end_reason = "time_filter_reset"
+        elif block_reason_arr is not None and off_bar < len(block_reason_arr):
+            block_reason = block_reason_arr[off_bar]
+            end_reason = (
+                str(block_reason)
+                if not pd.isna(block_reason) and str(block_reason) != "none"
+                else "FSM_OFF"
+            )
         else:
             end_reason = "FSM_OFF"
 
@@ -821,7 +850,7 @@ def _build_volume_cycle_sheet_df(
         else:
             avg_median_vol = float("nan")
 
-        cycle_trades = _cycle_trades_for_segment(trades_df, start_bar, end_bar)
+        cycle_trades = _cycle_trades_for_segment(trades_df, start_bar, last_active_bar)
 
         rows.append({
             "Начало цикла": _excel_safe_datetime_value(index[start_bar]),

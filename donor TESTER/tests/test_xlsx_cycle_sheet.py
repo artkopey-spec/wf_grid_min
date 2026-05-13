@@ -109,6 +109,7 @@ def _volume_diagnostics(
     time_filter_reset_event: list[int] | np.ndarray | None = None,
     volume_regime: list[object] | np.ndarray | None = None,
     median_relative_volume: list[float] | np.ndarray | None = None,
+    filter_block_reason: list[object] | np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
     diag: dict[str, np.ndarray] = {
         "trade_filter_state": np.asarray(states, dtype=object),
@@ -121,6 +122,8 @@ def _volume_diagnostics(
         diag["volume_regime"] = np.asarray(volume_regime, dtype=object)
     if median_relative_volume is not None:
         diag["median_relative_volume"] = np.asarray(median_relative_volume, dtype=np.float64)
+    if filter_block_reason is not None:
+        diag["filter_block_reason"] = np.asarray(filter_block_reason, dtype=object)
     return diag
 
 
@@ -720,10 +723,27 @@ def test_volume_cycle_alignment_uses_shortest_optional_arrays_without_index_erro
     result = excel_tester._build_volume_cycle_sheet_df(diag, df)
 
     assert list(result["Start bar index"]) == [1]
-    assert list(result["End bar index"]) == [2]
+    assert list(result["End bar index"]) == [3]
     assert result.iloc[0]["Причина завершения"] == "time_filter_reset"
     assert result.iloc[0]["Режим объёма (старт)"] == "HIGH"
     assert result.iloc[0]["Ср. медиана объёма"] == pytest.approx(1.5)
+
+
+def test_volume_cycle_single_active_bar_includes_exit_bar():
+    excel_tester = _excel_tester_module()
+    diag = _volume_diagnostics(
+        ["ACTIVE_LONG", "OFF"],
+        filter_block_reason=["none", "volume_reversal"],
+        median_relative_volume=[3.0, 1.0],
+    )
+
+    result = excel_tester._build_volume_cycle_sheet_df(diag, _df(2))
+
+    assert len(result) == 1
+    assert result.iloc[0]["Start bar index"] == 0
+    assert result.iloc[0]["End bar index"] == 1
+    assert result.iloc[0, 3] == 2
+    assert result.iloc[0, 14] == "volume_reversal"
 
 
 def test_volume_cycle_volume_regime_nan_is_not_string_nan():

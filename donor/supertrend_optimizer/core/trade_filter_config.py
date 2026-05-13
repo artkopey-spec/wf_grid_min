@@ -211,9 +211,12 @@ class TradeFilterVolumeConfig:
     enabled: object = None
     mode: object = None
     aggregation: object = "median"
+    daily_reset: object = False
     short_window: object = None
     baseline_window: object = None
     threshold_ratio: object = None
+    exit_hysteresis_ratio: object = None
+    exit_freeze_bars: object = None
     regime_low_ratio: object = None
     regime_high_ratio: object = None
     direction_lookback_bars: object = None
@@ -334,6 +337,10 @@ def resolve_volume_defaults_in_place(
     vol = trade_filter_config.volume
     if vol is None:
         return
+    if vol.exit_hysteresis_ratio is None:
+        vol.exit_hysteresis_ratio = vol.threshold_ratio
+    if vol.exit_freeze_bars is None:
+        vol.exit_freeze_bars = 0
     if vol.regime_low_ratio is None:
         vol.regime_low_ratio = 0.8
     if vol.regime_high_ratio is None:
@@ -382,7 +389,8 @@ TRADE_FILTER_ALLOWED_KEYS: dict[str, frozenset[str]] = {
     "trade_filter.volume": frozenset({
         "enabled", "mode", "short_window", "baseline_window",
         "threshold_ratio", "regime_low_ratio", "regime_high_ratio",
-        "direction_lookback_bars", "aggregation", "baseline_session",
+        "direction_lookback_bars", "aggregation", "daily_reset",
+        "exit_hysteresis_ratio", "exit_freeze_bars", "baseline_session",
     }),
     "trade_filter.volume.baseline_session": frozenset({
         "enabled", "window",
@@ -538,9 +546,12 @@ def build_trade_filter_config_from_raw(tf_raw: dict) -> TradeFilterConfig:
         enabled=vol_raw.get("enabled", None),
         mode=vol_raw.get("mode", None),
         aggregation=vol_raw.get("aggregation", "median"),
+        daily_reset=vol_raw.get("daily_reset", False),
         short_window=vol_raw.get("short_window", None),
         baseline_window=vol_raw.get("baseline_window", None),
         threshold_ratio=vol_raw.get("threshold_ratio", None),
+        exit_hysteresis_ratio=vol_raw.get("exit_hysteresis_ratio", None),
+        exit_freeze_bars=vol_raw.get("exit_freeze_bars", None),
         regime_low_ratio=vol_raw.get("regime_low_ratio", None),
         regime_high_ratio=vol_raw.get("regime_high_ratio", None),
         direction_lookback_bars=vol_raw.get("direction_lookback_bars", None),
@@ -581,6 +592,16 @@ def _validate_int_ge_one(value: object, field_path: str, errors: list[str]) -> O
         return None
     if value < 1:
         errors.append(f"{field_path} must be int >= 1, got {value!r}")
+        return None
+    return value
+
+
+def _validate_int_ge_zero(value: object, field_path: str, errors: list[str]) -> Optional[int]:
+    if isinstance(value, bool) or not isinstance(value, int):
+        errors.append(f"{field_path} must be int >= 0, got {value!r}")
+        return None
+    if value < 0:
+        errors.append(f"{field_path} must be int >= 0, got {value!r}")
         return None
     return value
 
@@ -719,6 +740,13 @@ def _validate_volume_block(
 
     _validate_volume_baseline_session(vol, errors, raw_user_keys)
 
+    daily_reset_key = ("trade_filter", "volume", "daily_reset")
+    if daily_reset_key in raw_user_keys and not isinstance(vol.daily_reset, bool):
+        errors.append(
+            "trade_filter.volume.daily_reset must be bool (true/false), "
+            f"got {type(vol.daily_reset).__name__!r} ({vol.daily_reset!r})"
+        )
+
     mode_key = ("trade_filter", "volume", "mode")
     if mode_key not in raw_user_keys or vol.mode is None:
         errors.append(
@@ -779,6 +807,22 @@ def _validate_volume_block(
         _validate_positive_finite(
             vol.threshold_ratio,
             "trade_filter.volume.threshold_ratio",
+            errors,
+        )
+
+    exit_hysteresis_key = ("trade_filter", "volume", "exit_hysteresis_ratio")
+    if exit_hysteresis_key in raw_user_keys:
+        _validate_positive_finite(
+            vol.exit_hysteresis_ratio,
+            "trade_filter.volume.exit_hysteresis_ratio",
+            errors,
+        )
+
+    exit_freeze_key = ("trade_filter", "volume", "exit_freeze_bars")
+    if exit_freeze_key in raw_user_keys:
+        _validate_int_ge_zero(
+            vol.exit_freeze_bars,
+            "trade_filter.volume.exit_freeze_bars",
             errors,
         )
 

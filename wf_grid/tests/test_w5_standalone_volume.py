@@ -25,12 +25,14 @@ from supertrend_optimizer.core.volume_metrics import (
 )
 from supertrend_optimizer.core.volume_only_filter import apply as volume_apply
 from supertrend_optimizer.utils.enums import ExecutionModel
+from supertrend_optimizer.utils.exceptions import ConfigError
 
 
 @dataclass
 class _VolumeCfg:
     enabled: bool = True
     mode: str = "volume_A"
+    daily_reset: bool = False
 
 
 @dataclass
@@ -115,6 +117,7 @@ def _run(
     cfg: _TradeFilter | None = None,
     daily_reset_event: np.ndarray | None = None,
     time_filter_events: tuple[np.ndarray, np.ndarray] | None = None,
+    index: pd.Index | None = None,
 ):
     n = runtime.reference_length if runtime is not None else 6
     if trend is None:
@@ -129,6 +132,7 @@ def _run(
         trade_filter_config=cfg or _TradeFilter(),
         volume_runtime=runtime or _runtime(n=n),
         execution_model=ExecutionModel.OPEN_TO_OPEN,
+        index=index,
         daily_reset_event=daily_reset_event,
         time_filter_events=time_filter_events,
     )
@@ -169,6 +173,110 @@ def test_volume_reversal_in_both_modes(mode, relative):
     assert result.filter_diagnostics["trade_filter_state"][2] == "OFF"
     assert result.filter_diagnostics["filter_block_reason"][2] == "volume_reversal"
     assert result.positions[3] == 0
+
+
+@pytest.mark.parametrize(
+    ("mode", "threshold", "exit_threshold", "relative"),
+    [
+        ("volume_A", 2.2, 1.8, np.array([2.3, 2.0, 1.7, 1.7, 1.7, 1.7])),
+        ("volume_B", 0.8, 1.0, np.array([0.7, 0.9, 1.1, 1.1, 1.1, 1.1])),
+    ],
+)
+def test_volume_reversal_uses_exit_hysteresis_threshold(
+    mode, threshold, exit_threshold, relative
+):
+    runtime = _runtime(mode=mode, relative=relative, threshold=threshold)
+    runtime.filter_config_snapshot["volume_exit_hysteresis_ratio"] = exit_threshold
+
+    result = _run(runtime=runtime)
+
+    assert result.filter_diagnostics["trade_filter_state"][1] != "OFF"
+    assert result.filter_diagnostics["trade_filter_state"][2] == "OFF"
+    assert result.filter_diagnostics["filter_block_reason"][2] == "volume_reversal"
+
+
+def test_old_volume_runtime_snapshot_falls_back_to_threshold_and_no_freeze():
+    runtime = _runtime(
+        mode="volume_A",
+        threshold=1.0,
+        relative=np.array([1.2, 1.2, 0.8, 0.8, 0.8, 0.8]),
+    )
+    assert "volume_exit_hysteresis_ratio" not in runtime.filter_config_snapshot
+    assert "volume_exit_freeze_bars" not in runtime.filter_config_snapshot
+
+    result = _run(runtime=runtime)
+
+    assert result.filter_diagnostics["filter_block_reason"][2] == "volume_reversal"
+    assert result.filter_diagnostics["trade_filter_state"][2] == "OFF"
+
+
+@pytest.mark.parametrize(
+    ("exit_freeze_bars", "expected_exit_bar"),
+    [
+        (0, 1),
+        (1, 1),
+        (2, 2),
+    ],
+)
+def test_volume_exit_freeze_off_by_one(exit_freeze_bars, expected_exit_bar):
+    runtime = _runtime(
+        mode="volume_A",
+        threshold=1.0,
+        relative=np.array([1.2, 0.8, 0.8, 0.8, 0.8, 0.8]),
+    )
+    runtime.filter_config_snapshot["volume_exit_freeze_bars"] = exit_freeze_bars
+
+    result = _run(runtime=runtime)
+
+    assert result.filter_diagnostics["filter_block_reason"][expected_exit_bar] == "volume_reversal"
+    assert result.filter_diagnostics["trade_filter_state"][expected_exit_bar] == "OFF"
+    for t in range(1, expected_exit_bar):
+        assert result.filter_diagnostics["filter_block_reason"][t] != "volume_reversal"
+        assert result.filter_diagnostics["trade_filter_state"][t] != "OFF"
+
+
+def test_hard_exits_bypass_volume_exit_freeze():
+    runtime = _runtime(
+        mode="volume_A",
+        threshold=1.0,
+        relative=np.array([1.2, 0.8, 0.8, 0.8, 0.8, 0.8]),
+    )
+    runtime.filter_config_snapshot["volume_exit_freeze_bars"] = 10
+
+    daily = _run(
+        runtime=runtime,
+        daily_reset_event=np.array([0, 1, 0, 0, 0, 0], dtype=bool),
+    )
+    forced = _run(
+        trade_mode="long",
+        trend=np.array([1, -1, -1, -1, -1, -1], dtype=np.int64),
+        runtime=runtime,
+    )
+
+    assert daily.filter_diagnostics["filter_block_reason"][1] == "daily_reset"
+    assert daily.filter_diagnostics["trade_filter_state"][1] == "OFF"
+    assert forced.filter_diagnostics["filter_block_reason"][1] == "trade_mode_forced_exit"
+    assert forced.filter_diagnostics["trade_filter_state"][1] == "OFF"
+
+
+def test_freeze_blocks_reversal_but_allows_same_bar_st_flip():
+    runtime = _runtime(
+        mode="volume_A",
+        threshold=1.0,
+        relative=np.array([1.2, 0.8, 0.8, 0.8, 0.8, 0.8]),
+        direction=DIR_LONG,
+    )
+    runtime.filter_config_snapshot["volume_exit_freeze_bars"] = 10
+
+    result = _run(
+        trade_mode="both",
+        trend=np.array([1, -1, -1, -1, -1, -1], dtype=np.int64),
+        runtime=runtime,
+    )
+
+    assert result.filter_diagnostics["filter_block_reason"][1] == "none"
+    assert result.filter_diagnostics["trade_filter_state"][1] == "ACTIVE_SHORT"
+    assert result.positions[2] == -1
 
 
 def test_direction_warmup_blocks_start():
@@ -270,6 +378,29 @@ def test_daily_reset_priority_over_reversal_and_start():
 
     assert result.filter_diagnostics["filter_block_reason"][2] == "daily_reset"
     assert result.positions[3] == 0
+
+
+def test_volume_daily_reset_is_inferred_from_datetime_index():
+    index = pd.date_range("2025-01-01 23:58", periods=6, freq="min")
+
+    result = _run(
+        cfg=_TradeFilter(volume=_VolumeCfg(daily_reset=True)),
+        index=index,
+    )
+
+    diag = result.filter_diagnostics
+    np.testing.assert_array_equal(
+        diag["daily_reset_enabled"], np.ones(6, dtype=np.int8)
+    )
+    np.testing.assert_array_equal(
+        diag["daily_reset_event"], np.array([0, 0, 1, 0, 0, 0], dtype=np.int8)
+    )
+    assert diag["filter_block_reason"][2] == "daily_reset"
+
+
+def test_volume_daily_reset_requires_datetime_index():
+    with pytest.raises(ConfigError, match="trade_filter.volume.daily_reset"):
+        _run(cfg=_TradeFilter(volume=_VolumeCfg(daily_reset=True)))
 
 
 def test_time_filter_reset_priority_over_reversal_and_start():

@@ -1476,9 +1476,13 @@ def apply(
     # 2) Resolve daily_reset_enabled из config (план v3 §6.1).
     # ------------------------------------------------------------------
     _zz_cfg = _extract_zigzag_field(trade_filter_config, "zigzag")
+    _vol_cfg = getattr(trade_filter_config, "volume", None)
     daily_reset_enabled = bool(
         _extract_zigzag_field(_zz_cfg, "daily_reset", False)
     ) if _zz_cfg is not None else False
+    daily_reset_enabled = daily_reset_enabled or bool(
+        getattr(_vol_cfg, "daily_reset", False)
+    )
 
     # ------------------------------------------------------------------
     # 3) Resolve daily_reset_event (план v3 §6.1 / §0.15).

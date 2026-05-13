@@ -1006,10 +1006,18 @@ def _config_to_dict(config: GridConfig) -> dict:
             trade_filter.pop("volume", None)
     else:
         volume = tf.volume
+        threshold_ratio = volume.threshold_ratio
+        exit_hysteresis_ratio = getattr(volume, "exit_hysteresis_ratio", None)
+        if exit_hysteresis_ratio is None:
+            exit_hysteresis_ratio = threshold_ratio
+        exit_freeze_bars = getattr(volume, "exit_freeze_bars", None)
+        if exit_freeze_bars is None:
+            exit_freeze_bars = 0
         config_dict["filter_config_snapshot"] = {
             "volume_filter_enabled": True,
             "volume_filter_mode": volume.mode,
             "volume_aggregation": getattr(volume, "aggregation", "median"),
+            "volume_daily_reset": bool(getattr(volume, "daily_reset", False)),
             "volume_short_window": volume.short_window,
             "volume_baseline_window": volume.baseline_window,
             "volume_baseline_session_enabled": bool(
@@ -1018,7 +1026,9 @@ def _config_to_dict(config: GridConfig) -> dict:
             "volume_baseline_session_window": getattr(
                 getattr(volume, "baseline_session", None), "window", None
             ),
-            "volume_threshold_ratio": volume.threshold_ratio,
+            "volume_threshold_ratio": threshold_ratio,
+            "volume_exit_hysteresis_ratio": exit_hysteresis_ratio,
+            "volume_exit_freeze_bars": exit_freeze_bars,
             "volume_regime_low_ratio": volume.regime_low_ratio,
             "volume_regime_high_ratio": volume.regime_high_ratio,
             "volume_direction_lookback_bars": volume.direction_lookback_bars,

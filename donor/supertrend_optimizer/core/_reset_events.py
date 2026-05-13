@@ -15,6 +15,7 @@ def _infer_daily_reset_event(
     n: int,
     *,
     enabled: bool,
+    source: str = "trade_filter.zigzag.daily_reset",
 ) -> np.ndarray:
     """Return a bool[n] mask where a new calendar day starts."""
     if not enabled:
@@ -22,14 +23,14 @@ def _infer_daily_reset_event(
 
     if not isinstance(index, pd.DatetimeIndex):
         raise ConfigError(
-            "trade_filter.zigzag.daily_reset=true requires DatetimeIndex; "
+            f"{source}=true requires DatetimeIndex; "
             f"got {type(index).__name__}"
         )
     if len(index) != n:
         raise ConfigError(f"daily_reset: index length {len(index)} != n={n}")
     if not index.is_monotonic_increasing:
         raise ConfigError(
-            "trade_filter.zigzag.daily_reset=true requires "
+            f"{source}=true requires "
             "monotonic-increasing DatetimeIndex; got non-monotonic"
         )
 

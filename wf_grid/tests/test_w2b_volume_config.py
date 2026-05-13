@@ -16,6 +16,7 @@ from supertrend_optimizer.core.trade_filter_config import (
     resolve_zigzag_enabled_in_place,
     validate_trade_filter,
 )
+from supertrend_optimizer.cli.tester import load_tester_config
 from wf_grid.config.loader import ConfigError, load_grid_config
 
 
@@ -24,6 +25,9 @@ def test_volume_config_defaults_include_aggregation_and_baseline_session():
     second = TradeFilterVolumeConfig()
 
     assert first.aggregation == "median"
+    assert first.daily_reset is False
+    assert first.exit_hysteresis_ratio is None
+    assert first.exit_freeze_bars is None
     assert isinstance(first.baseline_session, TradeFilterBaselineSessionConfig)
     assert first.baseline_session.enabled is False
     assert first.baseline_session.window is None
@@ -34,6 +38,9 @@ def test_build_trade_filter_config_materializes_volume_aggregation_and_baseline_
     volume = _valid_volume()
     volume.update({
         "aggregation": "mean",
+        "daily_reset": True,
+        "exit_hysteresis_ratio": 1.8,
+        "exit_freeze_bars": 10,
         "baseline_session": {
             "enabled": True,
             "window": "09:00-19:00",
@@ -43,6 +50,9 @@ def test_build_trade_filter_config_materializes_volume_aggregation_and_baseline_
     cfg = build_trade_filter_config_from_raw(_base_filter(volume))
 
     assert cfg.volume.aggregation == "mean"
+    assert cfg.volume.daily_reset is True
+    assert cfg.volume.exit_hysteresis_ratio == 1.8
+    assert cfg.volume.exit_freeze_bars == 10
     assert cfg.volume.baseline_session.enabled is True
     assert cfg.volume.baseline_session.window == "09:00-19:00"
 
@@ -93,9 +103,27 @@ def test_valid_volume_a_config_passes_validation():
     assert cfg.volume.aggregation == "median"
 
 
+def test_valid_standalone_volume_daily_reset_passes_without_zigzag_payload():
+    raw = {
+        "enabled": True,
+        "zigzag": {"enabled": False},
+        "volume": {
+            **_valid_volume("volume_A"),
+            "daily_reset": True,
+        },
+    }
+
+    cfg, errors, _keys = _build_and_validate(raw)
+
+    assert errors == []
+    assert cfg.volume.daily_reset is True
+
+
 def test_valid_volume_b_config_passes_validation_with_explicit_optional_values():
     volume = _valid_volume("volume_B")
     volume.update({
+        "exit_hysteresis_ratio": 1.0,
+        "exit_freeze_bars": 10,
         "regime_low_ratio": 0.7,
         "regime_high_ratio": 1.4,
         "direction_lookback_bars": 4,
@@ -106,6 +134,21 @@ def test_valid_volume_b_config_passes_validation_with_explicit_optional_values()
     assert errors == []
     assert is_volume_enabled(cfg) is True
     assert cfg.volume.mode == "volume_B"
+    assert cfg.volume.exit_hysteresis_ratio == 1.0
+    assert cfg.volume.exit_freeze_bars == 10
+
+
+@pytest.mark.parametrize("exit_freeze_bars", [0, 1, 10])
+def test_valid_volume_exit_freeze_bars_values_pass_validation(exit_freeze_bars):
+    volume = _valid_volume()
+    volume["exit_hysteresis_ratio"] = 1.8
+    volume["exit_freeze_bars"] = exit_freeze_bars
+
+    cfg, errors, _keys = _build_and_validate(_base_filter(volume))
+
+    assert errors == []
+    assert cfg.volume.exit_hysteresis_ratio == 1.8
+    assert cfg.volume.exit_freeze_bars == exit_freeze_bars
 
 
 def test_absent_volume_block_is_preserved_as_none_and_not_validated():
@@ -121,6 +164,8 @@ def test_volume_enabled_false_skips_deep_volume_validation():
         "enabled": False,
         "mode": "not_a_volume_mode",
         "short_window": 0,
+        "exit_hysteresis_ratio": None,
+        "exit_freeze_bars": -1,
     }))
 
     assert errors == []
@@ -147,12 +192,24 @@ def test_malformed_volume_enabled_is_rejected():
         ({"baseline_window": 4}, "trade_filter.volume.baseline_window must be >="),
         ({"threshold_ratio": 0}, "trade_filter.volume.threshold_ratio must be finite > 0"),
         ({"threshold_ratio": float("inf")}, "trade_filter.volume.threshold_ratio must be finite > 0"),
+        ({"exit_hysteresis_ratio": None}, "trade_filter.volume.exit_hysteresis_ratio must be finite > 0"),
+        ({"exit_hysteresis_ratio": 0}, "trade_filter.volume.exit_hysteresis_ratio must be finite > 0"),
+        ({"exit_hysteresis_ratio": -1}, "trade_filter.volume.exit_hysteresis_ratio must be finite > 0"),
+        ({"exit_hysteresis_ratio": float("inf")}, "trade_filter.volume.exit_hysteresis_ratio must be finite > 0"),
+        ({"exit_hysteresis_ratio": float("nan")}, "trade_filter.volume.exit_hysteresis_ratio must be finite > 0"),
+        ({"exit_hysteresis_ratio": True}, "trade_filter.volume.exit_hysteresis_ratio must be finite > 0"),
+        ({"exit_freeze_bars": None}, "trade_filter.volume.exit_freeze_bars must be int >= 0"),
+        ({"exit_freeze_bars": -1}, "trade_filter.volume.exit_freeze_bars must be int >= 0"),
+        ({"exit_freeze_bars": 1.0}, "trade_filter.volume.exit_freeze_bars must be int >= 0"),
+        ({"exit_freeze_bars": 1.5}, "trade_filter.volume.exit_freeze_bars must be int >= 0"),
+        ({"exit_freeze_bars": False}, "trade_filter.volume.exit_freeze_bars must be int >= 0"),
         ({"regime_low_ratio": 0}, "trade_filter.volume.regime_low_ratio must be finite > 0"),
         (
             {"regime_low_ratio": 1.1, "regime_high_ratio": 1.0},
             "trade_filter.volume.regime_high_ratio must be >",
         ),
         ({"direction_lookback_bars": 0}, "trade_filter.volume.direction_lookback_bars must be int >= 1"),
+        ({"daily_reset": "true"}, "trade_filter.volume.daily_reset must be bool"),
     ],
 )
 def test_invalid_volume_fields_are_rejected(patch, expected):
@@ -305,6 +362,9 @@ def test_volume_aggregation_and_baseline_session_are_allowed_by_strict_schema():
         "volume": {
             "enabled": True,
             "aggregation": "mean",
+            "daily_reset": True,
+            "exit_hysteresis_ratio": 1.8,
+            "exit_freeze_bars": 10,
             "baseline_session": {
                 "enabled": True,
                 "window": "09:00-19:00",
@@ -399,6 +459,9 @@ def test_wf_grid_loader_strict_schema_allows_volume_aggregation_and_baseline_ses
               volume:
                 enabled: false
                 aggregation: mean
+                daily_reset: true
+                exit_hysteresis_ratio: 1.8
+                exit_freeze_bars: 10
                 baseline_session:
                   enabled: false
                   window: "09:00-19:00"
@@ -410,6 +473,9 @@ def test_wf_grid_loader_strict_schema_allows_volume_aggregation_and_baseline_ses
     cfg = load_grid_config(str(path))
 
     assert cfg.trade_filter.volume.aggregation == "mean"
+    assert cfg.trade_filter.volume.daily_reset is True
+    assert cfg.trade_filter.volume.exit_hysteresis_ratio == 1.8
+    assert cfg.trade_filter.volume.exit_freeze_bars == 10
     assert cfg.trade_filter.volume.baseline_session.window == "09:00-19:00"
 
 
@@ -474,12 +540,16 @@ def test_volume_defaults_materialize_only_after_validation():
     cfg, errors, raw_user_keys = _build_and_validate(_base_filter(_valid_volume()))
 
     assert errors == []
+    assert cfg.volume.exit_hysteresis_ratio is None
+    assert cfg.volume.exit_freeze_bars is None
     assert cfg.volume.regime_low_ratio is None
     assert cfg.volume.regime_high_ratio is None
     assert cfg.volume.direction_lookback_bars is None
 
     resolve_volume_defaults_in_place(cfg, raw_user_keys)
 
+    assert cfg.volume.exit_hysteresis_ratio == 1.1
+    assert cfg.volume.exit_freeze_bars == 0
     assert cfg.volume.regime_low_ratio == 0.8
     assert cfg.volume.regime_high_ratio == 1.2
     assert cfg.volume.direction_lookback_bars == 3
@@ -524,3 +594,69 @@ def test_wf_grid_loader_materializes_volume_defaults_in_phase5(tmp_path: Path):
     assert cfg.trade_filter.volume.regime_low_ratio == 0.8
     assert cfg.trade_filter.volume.regime_high_ratio == 1.2
     assert cfg.trade_filter.volume.direction_lookback_bars == 3
+    assert cfg.trade_filter.volume.exit_hysteresis_ratio == 1.1
+    assert cfg.trade_filter.volume.exit_freeze_bars == 0
+
+
+def test_wf_grid_and_tester_loaders_accept_same_volume_mapping(tmp_path: Path):
+    volume = {
+        "enabled": True,
+        "daily_reset": True,
+        "mode": "volume_A",
+        "aggregation": "mean",
+        "short_window": 30,
+        "baseline_window": 1000,
+        "threshold_ratio": 2.2,
+        "exit_hysteresis_ratio": 1.8,
+        "exit_freeze_bars": 10,
+        "regime_low_ratio": 0.8,
+        "regime_high_ratio": 1.2,
+        "direction_lookback_bars": 10,
+        "baseline_session": {
+            "enabled": True,
+            "window": "09:00-19:00",
+        },
+    }
+    wf_raw = {
+        "data": {"file_path": "data.csv"},
+        "validation": {
+            "walk_forward": {
+                "train_size": "90D",
+                "test_size": "30D",
+            },
+        },
+        "trade_filter": {
+            "enabled": True,
+            "zigzag": {"enabled": False},
+            "volume": volume,
+        },
+    }
+    tester_raw = {
+        "segmentation": {"mode": "legacy"},
+        "trade_filter": {
+            "enabled": True,
+            "zigzag": {"enabled": False},
+            "volume": volume,
+        },
+    }
+    wf_path = tmp_path / "wf.yaml"
+    tester_path = tmp_path / "tester.yaml"
+    import yaml
+
+    wf_path.write_text(yaml.safe_dump(wf_raw, sort_keys=False), encoding="utf-8")
+    tester_path.write_text(
+        yaml.safe_dump(tester_raw, sort_keys=False), encoding="utf-8"
+    )
+
+    wf_cfg = load_grid_config(str(wf_path))
+    tester_cfg = load_tester_config(str(tester_path))
+
+    wf_volume = wf_cfg.trade_filter.volume
+    tester_volume = tester_cfg["trade_filter"].volume
+    assert wf_volume.threshold_ratio == tester_volume.threshold_ratio == 2.2
+    assert wf_volume.exit_hysteresis_ratio == tester_volume.exit_hysteresis_ratio == 1.8
+    assert wf_volume.exit_freeze_bars == tester_volume.exit_freeze_bars == 10
+    assert wf_volume.aggregation == tester_volume.aggregation == "mean"
+    assert wf_volume.daily_reset is tester_volume.daily_reset is True
+    assert wf_volume.baseline_session.enabled is tester_volume.baseline_session.enabled is True
+    assert wf_volume.baseline_session.window == tester_volume.baseline_session.window == "09:00-19:00"

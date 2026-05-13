@@ -420,6 +420,7 @@ def test_fingerprint_volume_fields_only_when_enabled():
     volume_keys = {
         "volume_filter_enabled",
         "volume_filter_mode",
+        "volume_daily_reset",
         "volume_short_window",
         "volume_baseline_window",
         "volume_threshold_ratio",

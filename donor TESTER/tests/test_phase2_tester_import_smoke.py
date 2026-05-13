@@ -63,6 +63,11 @@ class TestFilterWiredModulesImport:
         assert "df" in sig.parameters
         assert "config_yaml_snapshot" in sig.parameters
         assert "run_metadata" in sig.parameters
+        assert "export_diagnostics" in sig.parameters
+        assert "export_signals" in sig.parameters
+        assert "export_false_start" in sig.parameters
+        assert "export_cycle" in sig.parameters
+        assert "export_trades" in sig.parameters
         sig_eq = inspect.signature(export_equal_blocks_results)
         assert "config_yaml_snapshot" in sig_eq.parameters
         assert "run_metadata" in sig_eq.parameters

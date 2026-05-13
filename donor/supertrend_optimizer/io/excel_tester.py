@@ -1936,6 +1936,11 @@ def export_tester_results(
     config_yaml_snapshot: Optional[Dict[str, Any]] = None,
     # Extra runtime metadata (resolved values, paths, effective warmup, etc.)
     run_metadata: Optional[Dict[str, Any]] = None,
+    export_diagnostics: bool = True,
+    export_signals: bool = True,
+    export_false_start: bool = True,
+    export_cycle: bool = True,
+    export_trades: bool = True,
 ) -> str:
     """
     Export tester results to Excel file.
@@ -2031,7 +2036,7 @@ def export_tester_results(
         summary_df.to_excel(writer, sheet_name="Summary", index=False)
 
         # WP-T7: Filter Diagnostics Summary block after standard metrics (plan §9.2, §9.4)
-        if filter_enabled:
+        if export_diagnostics and filter_enabled:
             filter_block_df = _build_filter_summary_block_df(period_results)
             if filter_block_df is not None:
                 filter_start_row = len(summary_df) + 2  # +1 header + 1 blank row
@@ -2059,44 +2064,56 @@ def export_tester_results(
             metrics_df = format_excel_export_df(pd.DataFrame([metrics_row]))
             metrics_df.to_excel(writer, sheet_name=metrics_sheet, index=False)
 
-            # Trades sheet (WP-T7: conditional filter columns)
-            trades_sheet = f"Trades_{period_num}"[:31]
-            trades_df = _prepare_legacy_trades_df(
-                pr.trades_df,
-                filter_enabled=filter_enabled,
-                filter_diagnostics_available=(pr.filter_diagnostics is not None),
-            )
-            trades_df.to_excel(writer, sheet_name=trades_sheet, index=False)
-            if len(trades_df) > 0:
-                _format_trades_datetime(trades_df, writer.sheets[trades_sheet])
+            if export_trades:
+                # Trades sheet (WP-T7: conditional filter columns)
+                trades_sheet = f"Trades_{period_num}"[:31]
+                trades_df = _prepare_legacy_trades_df(
+                    pr.trades_df,
+                    filter_enabled=filter_enabled,
+                    filter_diagnostics_available=(pr.filter_diagnostics is not None),
+                )
+                trades_df.to_excel(writer, sheet_name=trades_sheet, index=False)
+                if len(trades_df) > 0:
+                    _format_trades_datetime(trades_df, writer.sheets[trades_sheet])
 
         # ── Signals sheet ──
-        if signals_df is not None:
+        if export_signals and signals_df is not None:
             _write_signals_sheet(writer, "Signals", signals_df)
 
         # ── False start sheet ──
         pr_100 = next((pr for pr in period_results if pr.period_label == "100%"), None)
         trades_100_raw = pr_100.trades_df if pr_100 is not None else None
-        include_fbr = (export_state_cols and signals_df is not None
-                       and "filter_block_reason" in (signals_df.columns if signals_df is not None else []))
-        false_start_df = _build_false_start_sheet_df(
-            trades_100_raw,
-            signals_df,
-            false_start_max_bars=false_start_max_bars,
-            include_filter_block_reason=include_fbr,
-        )
-        _write_false_start_sheet(writer, trades_100_raw, false_start_df)
+        if export_false_start:
+            signals_for_false_start = signals_df if export_signals else None
+            include_fbr = (
+                export_diagnostics
+                and export_state_cols
+                and signals_for_false_start is not None
+                and "filter_block_reason" in signals_for_false_start.columns
+            )
+            false_start_df = _build_false_start_sheet_df(
+                trades_100_raw,
+                signals_for_false_start,
+                false_start_max_bars=false_start_max_bars,
+                include_filter_block_reason=include_fbr,
+            )
+            _write_false_start_sheet(writer, trades_100_raw, false_start_df)
 
         # ── Optional filter sheets (gated on enabled + diagnostics flags) ──
         if filter_enabled and pr_100 is not None:
             fd_100 = pr_100.filter_diagnostics
 
             # FilterDiagnostics_100 (gated: export_state_columns=True)
-            if export_state_cols and fd_100 is not None:
+            if export_diagnostics and export_state_cols and fd_100 is not None:
                 _write_filter_diagnostics_100_sheet(writer, fd_100)
 
             # ZigZag_Trigger_Events (gated: export_trigger_columns=True)
-            if zigzag_enabled and export_trigger_cols and fd_100 is not None:
+            if (
+                export_diagnostics
+                and zigzag_enabled
+                and export_trigger_cols
+                and fd_100 is not None
+            ):
                 df_index = df.index if df is not None else None
                 trigger_df = _build_zigzag_trigger_events_df(
                     filter_diagnostics=fd_100,
@@ -2107,15 +2124,15 @@ def export_tester_results(
                 _write_zigzag_trigger_events_sheet(writer, trigger_df)
 
             # filters_summary (gated: export_state_columns=True)
-            if zigzag_enabled and export_state_cols:
+            if export_diagnostics and zigzag_enabled and export_state_cols:
                 _write_filters_summary_sheet(writer, period_results)
 
             # cycle — ZigZag path
-            if zigzag_enabled and fd_100 is not None:
+            if export_cycle and zigzag_enabled and fd_100 is not None:
                 cycle_df = _build_cycle_sheet_df(fd_100, df, trades_100_raw)
                 _write_cycle_sheet(writer, cycle_df)
             # cycle — volume-only path (mutually exclusive with ZigZag path above)
-            elif volume_enabled and not zigzag_enabled and fd_100 is not None:
+            elif export_cycle and volume_enabled and not zigzag_enabled and fd_100 is not None:
                 vol_cycle_df = _build_volume_cycle_sheet_df(fd_100, df, trades_100_raw)
                 _write_cycle_sheet(writer, vol_cycle_df)
 

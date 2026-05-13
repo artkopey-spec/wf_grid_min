@@ -670,6 +670,37 @@ class TestRunAllPeriodsFilterIntegration:
             "100%", "75%", "50%", "33%", "25%"
         ]
 
+    def test_run_all_periods_can_skip_legacy_tail_splits(
+        self, df_600, cfg_enabled, stats_600
+    ) -> None:
+        from supertrend_optimizer.testing.runner import run_all_periods
+
+        baseline = run_all_periods(
+            df=df_600,
+            atr_period=14,
+            multiplier=3.0,
+            trade_mode="revers",
+            commission=0.001,
+            warmup_period=30,
+            trade_filter_config=cfg_enabled,
+            zigzag_global_stats=stats_600,
+        )
+        fast = run_all_periods(
+            df=df_600,
+            atr_period=14,
+            multiplier=3.0,
+            trade_mode="revers",
+            commission=0.001,
+            warmup_period=30,
+            trade_filter_config=cfg_enabled,
+            zigzag_global_stats=stats_600,
+            include_period_splits=False,
+        )
+
+        assert [r.period_label for r in fast] == ["100%"]
+        assert fast[0].n_bars == len(df_600)
+        assert fast[0].metrics == baseline[0].metrics
+
     def test_disabled_path_run_all_periods_baseline_identical(
         self, df_600
     ) -> None:

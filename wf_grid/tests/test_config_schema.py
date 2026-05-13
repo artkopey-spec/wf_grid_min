@@ -1268,6 +1268,10 @@ class TestAllRepoConfigsLoad:
                 # Skip pytest cache
                 if ".pytest_cache" in p.parts:
                     continue
+                # Skip local tester-config workspaces. These files use the
+                # tester CLI DSL, not the walk-forward grid config schema.
+                if "config tester" in p.parts:
+                    continue
                 # Skip tester CLI configs (different DSL/schema).
                 # These files are validated by supertrend_optimizer.cli.tester.load_tester_config.
                 if p.name.startswith("config_tester") and p.suffix in (".yaml", ".yml"):

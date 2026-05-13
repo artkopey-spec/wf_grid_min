@@ -74,6 +74,7 @@ _ALLOWED_TESTER_ROOT_KEYS = frozenset({
     "export",
     "market",
     "min_trades_required",
+    "period",
     "periods_per_year",
     "segmentation",
     "supertrend",
@@ -82,6 +83,24 @@ _ALLOWED_TESTER_ROOT_KEYS = frozenset({
     "warmup_period",
     "warmup_period_auto",
 })
+
+_EXPORT_BOOL_KEYS = frozenset({
+    "diagnostics",
+    "signals",
+    "false_start",
+    "cycle",
+    "trades",
+})
+
+
+def _validate_strict_bool(raw: Any, key_path: str) -> bool:
+    """Parse a YAML flag that must be an actual bool, not a string/int."""
+    if not isinstance(raw, bool):
+        raise ConfigError(
+            f"{key_path} must be a boolean true/false, "
+            f"got type {type(raw).__name__!r} with value {raw!r}"
+        )
+    return raw
 
 
 def _validate_false_start_max_bars(raw: Any) -> int:
@@ -121,6 +140,11 @@ def _merge_export_config(loaded_config: Dict[str, Any], config: Dict[str, Any]) 
         config["export"]["false_start_max_bars"] = _validate_false_start_max_bars(
             export_raw["false_start_max_bars"]
         )
+    for key in _EXPORT_BOOL_KEYS:
+        if key in export_raw:
+            config["export"][key] = _validate_strict_bool(
+                export_raw[key], f"export.{key}"
+            )
 
 
 def parse_args(args=None) -> argparse.Namespace:
@@ -288,6 +312,7 @@ def load_tester_config(
         "market": None,  # Optional: "stocks" | "crypto" | "futures" | "forex"
         "execution_model": None,  # Optional: "open_to_open"
         "trade_mode": None,
+        "period": True,
         "supertrend": {
             "atr_period": None,
             "multiplier": None,
@@ -297,6 +322,11 @@ def load_tester_config(
             "n_parts": 5,
         },
         "export": {
+            "diagnostics": True,
+            "signals": True,
+            "false_start": True,
+            "cycle": True,
+            "trades": True,
             "false_start_max_bars": DEFAULT_FALSE_START_MAX_BARS,
         },
         # Phase 2 (WP-T2): trade_filter is None when the YAML block is absent
@@ -351,6 +381,8 @@ def load_tester_config(
             "close_to_close was removed due to look-ahead bias."
         )
     config["trade_mode"] = loaded_config.get("trade_mode", None)
+    if "period" in loaded_config:
+        config["period"] = _validate_strict_bool(loaded_config["period"], "period")
 
     supertrend_config = loaded_config.get("supertrend", {})
     if supertrend_config:
@@ -448,9 +480,15 @@ def load_tester_config(
     if config["execution_model"] is not None:
         print(f"  execution_model: {config['execution_model']}")
     seg = config["segmentation"]
+    print(f"  period: {config['period']}")
     print(f"  segmentation.mode: {seg['mode']}")
     if seg["mode"] == "equal_blocks":
         print(f"  segmentation.n_parts: {seg['n_parts']}")
+    print(f"  export.diagnostics: {config['export']['diagnostics']}")
+    print(f"  export.signals: {config['export']['signals']}")
+    print(f"  export.false_start: {config['export']['false_start']}")
+    print(f"  export.cycle: {config['export']['cycle']}")
+    print(f"  export.trades: {config['export']['trades']}")
     print(
         f"  export.false_start_max_bars: {config['export']['false_start_max_bars']}"
     )
@@ -545,7 +583,9 @@ def merge_cli_and_config(
         "annualization_basis": annualization_basis,
         "market": market,
         "execution_model": execution_model,
+        "period": config["period"],
         "segmentation": config["segmentation"],
+        "export": dict(config["export"]),
         "false_start_max_bars": config["export"]["false_start_max_bars"],
         # Phase 2 (WP-T2): trade_filter passes through unchanged. None means
         # the YAML block was absent (baseline preserved).
@@ -565,7 +605,7 @@ def run_backtest(args: argparse.Namespace) -> str:
     """
     # Validate paths
     validate_paths(args.csv, args.out)
-    
+
     # Load config (single read of YAML when a file is given — snapshot + normalize)
     config_yaml_snapshot: Optional[Dict[str, Any]] = None
     if args.config:
@@ -576,11 +616,12 @@ def run_backtest(args: argparse.Namespace) -> str:
 
     # Merge CLI and config
     params = merge_cli_and_config(args, config)
-    
+
     # Load and validate data
     df = load_ohlc_csv(args.csv)
     df = validate_ohlc_data(df)
     df = validate_volume_filter_data(df, params.get("trade_filter"))
+
     tf_cfg = params.get("trade_filter")
     if is_volume_enabled(tf_cfg):
         full_volume_runtime = build_volume_global_metrics(
@@ -589,26 +630,24 @@ def run_backtest(args: argparse.Namespace) -> str:
             tf_cfg.volume,
             index=df.index,
         )
-        _warn_if_volume_baseline_window_large(
-            tf_cfg.volume, len(df)
-        )
+        _warn_if_volume_baseline_window_large(tf_cfg.volume, len(df))
     else:
         full_volume_runtime = None
-    
+
     n = len(df)
-    
+
     # Resolve periods_per_year from config/CLI + data
     market_enum = MarketType(params["market"]) if params["market"] else None
-    
+
     periods_per_year = resolve_periods_per_year_from_config(
         config_value=params["annualization_factor"],
         index=df.index,
         explicit_basis=params["annualization_basis"],
-        market=market_enum
+        market=market_enum,
     )
-    
+
     print(f"\nResolved periods_per_year: {periods_per_year:.2f}")
-    
+
     # Emit market warnings if applicable (only for calendar_days_span >= 30)
     if market_enum is not None:
         stats = detect_timeframe(df.index)
@@ -616,24 +655,24 @@ def run_backtest(args: argparse.Namespace) -> str:
             warnings = validate_market_vs_timeframe(market_enum, stats)
             for warning in warnings:
                 print(f"WARNING: {warning}")
-    
+
     # Resolve execution_model
     if params["execution_model"] is not None:
         execution_model = ExecutionModel(params["execution_model"])
     else:
         execution_model = ExecutionModel.OPEN_TO_OPEN  # Default
-    
+
     # Calculate warmup period
     if params["warmup_period_auto"]:
         warmup_period = calculate_warmup_tester(
             n=n,
             atr_period=params["atr_period"],
-            warmup_period_auto=True
+            warmup_period_auto=True,
         )
         print(f"Using auto-warmup: {warmup_period} bars (10% of {n} bars, clamped)")
     else:
         warmup_period = max(params["warmup_period"], params["atr_period"])
-    
+
     seg_mode = params["segmentation"]["mode"]
     n_parts = params["segmentation"]["n_parts"]
     run_metadata_common: Dict[str, Any] = {
@@ -742,6 +781,7 @@ def run_backtest(args: argparse.Namespace) -> str:
             trade_filter_config=tf_cfg,
             zigzag_global_stats=zigzag_global_stats,
             volume_runtime=full_volume_runtime,
+            include_period_splits=params["period"],
         )
 
         print(f"\nBacktest completed:")
@@ -751,14 +791,16 @@ def run_backtest(args: argparse.Namespace) -> str:
         # WP-T6: pass filter_diagnostics from the 100% period result.
         # None (disabled path) → bit-identical Signals output.
         # not None (enabled path) → 4 filter columns appended (plan §8.2).
-        signals_df = build_signal_events(
-            df=df,
-            trend=results[0].result.trend,
-            atr_period=params["atr_period"],
-            trade_mode=params["trade_mode"],
-            execution_model=execution_model,
-            filter_diagnostics=results[0].filter_diagnostics,
-        )
+        signals_df = None
+        if params["export"]["signals"]:
+            signals_df = build_signal_events(
+                df=df,
+                trend=results[0].result.trend,
+                atr_period=params["atr_period"],
+                trade_mode=params["trade_mode"],
+                execution_model=execution_model,
+                filter_diagnostics=results[0].filter_diagnostics,
+            )
 
         print(f"\nExporting to Excel: {args.out}")
         run_metadata_export = dict(run_metadata_common)
@@ -773,6 +815,11 @@ def run_backtest(args: argparse.Namespace) -> str:
             df=df,
             config_yaml_snapshot=config_yaml_snapshot,
             run_metadata=run_metadata_export,
+            export_diagnostics=params["export"]["diagnostics"],
+            export_signals=params["export"]["signals"],
+            export_false_start=params["export"]["false_start"],
+            export_cycle=params["export"]["cycle"],
+            export_trades=params["export"]["trades"],
         )
 
     print(f"\n[SUCCESS] Results exported to: {actual_output}")

@@ -11,7 +11,6 @@ Usage:
 import argparse
 import copy
 import sys
-from datetime import datetime
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -345,6 +344,7 @@ def main() -> None:
                     trade_filter_config=tf_cfg,
                     zigzag_global_stats=zigzag_global_stats,
                     volume_runtime=full_volume_runtime,
+                    include_period_splits=params["period"],
                 )
                 for r in results:
                     print(
@@ -354,14 +354,16 @@ def main() -> None:
                 # WP-T6: pass filter_diagnostics from the 100% period result.
                 # None (disabled path) → bit-identical Signals output.
                 # not None (enabled path) → 4 filter columns appended (plan §8.2).
-                signals_df = build_signal_events(
-                    df=df,
-                    trend=results[0].result.trend,
-                    atr_period=params["atr_period"],
-                    trade_mode=params["trade_mode"],
-                    execution_model=execution_model,
-                    filter_diagnostics=results[0].filter_diagnostics,
-                )
+                signals_df = None
+                if params["export"]["signals"]:
+                    signals_df = build_signal_events(
+                        df=df,
+                        trend=results[0].result.trend,
+                        atr_period=params["atr_period"],
+                        trade_mode=params["trade_mode"],
+                        execution_model=execution_model,
+                        filter_diagnostics=results[0].filter_diagnostics,
+                    )
                 out_path = str(output_dir / out_basename)
                 run_metadata = {
                     **run_metadata_base,
@@ -378,6 +380,11 @@ def main() -> None:
                     df=df,
                     config_yaml_snapshot=config_yaml_snapshot,
                     run_metadata=run_metadata,
+                    export_diagnostics=params["export"]["diagnostics"],
+                    export_signals=params["export"]["signals"],
+                    export_false_start=params["export"]["false_start"],
+                    export_cycle=params["export"]["cycle"],
+                    export_trades=params["export"]["trades"],
                 )
 
         except (ConfigError, DataValidationError) as e:

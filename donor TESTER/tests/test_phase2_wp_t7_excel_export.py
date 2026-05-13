@@ -220,7 +220,7 @@ def _run_enabled_legacy(df: pd.DataFrame, tf_cfg):
     return results, signals_df
 
 
-def _export_and_load(period_results, signals_df, tf_cfg=None, df=None):
+def _export_and_load(period_results, signals_df, tf_cfg=None, df=None, **export_kwargs):
     """Export to temp file and return openpyxl workbook."""
     from supertrend_optimizer.io.excel_tester import export_tester_results
     import openpyxl
@@ -231,6 +231,7 @@ def _export_and_load(period_results, signals_df, tf_cfg=None, df=None):
             signals_df=signals_df,
             trade_filter_config=tf_cfg,
             df=df,
+            **export_kwargs,
         )
         wb = openpyxl.load_workbook(actual)
     return wb
@@ -239,6 +240,52 @@ def _export_and_load(period_results, signals_df, tf_cfg=None, df=None):
 def _sheet_headers(wb, sheet_name: str) -> List[str]:
     ws = wb[sheet_name]
     return [c.value for c in next(ws.iter_rows(min_row=1, max_row=1)) if c.value is not None]
+
+
+def _minimal_one_period_with_short_trade():
+    from supertrend_optimizer.engine.result import BacktestResult
+    from supertrend_optimizer.testing.runner import PeriodResult
+
+    n = 12
+    trades_df = pd.DataFrame(
+        [
+            {
+                "trade_id": 1,
+                "direction": "LONG",
+                "entry_time": pd.Timestamp("2020-01-02"),
+                "entry_index": 1,
+                "entry_price": 100.0,
+                "exit_time": pd.Timestamp("2020-01-03"),
+                "exit_index": 2,
+                "exit_price": 99.0,
+                "bars_held": 1,
+                "gross_pnl_pct": -1.0,
+                "commission_pct": 0.0,
+                "net_pnl_pct": -1.0,
+                "supertrend_color": "red",
+            }
+        ]
+    )
+    result = BacktestResult(
+        atr_period=14,
+        multiplier=3.0,
+        trade_mode="revers",
+        commission=0.0,
+        warmup=0,
+        returns=np.zeros(n - 1, dtype=np.float64),
+        equity_curve=np.ones(n, dtype=np.float64),
+        positions=np.zeros(n, dtype=np.int8),
+        trend=np.zeros(n, dtype=np.int8),
+        metrics={"num_trades": 1, "sum_pnl_pct": -1.0},
+        early_exit=False,
+        exit_bar=None,
+        exit_drawdown=None,
+        trades_df=trades_df,
+        n_bars_original=n,
+        period_label="100%",
+        effective_warmup=0,
+    )
+    return [PeriodResult(period_label="100%", n_bars=n, result=result)]
 
 
 def _load_baseline_wb(path: Path):
@@ -988,6 +1035,26 @@ class TestCliWiringStaticCheck:
             "run_batch_tester.py must pass df=df to export_tester_results"
         )
 
+    def test_cli_tester_wires_fast_export_flags(self) -> None:
+        src = self._read_file(_DONOR_ROOT / "supertrend_optimizer" / "cli" / "tester.py")
+        assert 'include_period_splits=params["period"]' in src
+        assert 'if params["export"]["signals"]' in src
+        assert 'export_diagnostics=params["export"]["diagnostics"]' in src
+        assert 'export_signals=params["export"]["signals"]' in src
+        assert 'export_false_start=params["export"]["false_start"]' in src
+        assert 'export_cycle=params["export"]["cycle"]' in src
+        assert 'export_trades=params["export"]["trades"]' in src
+
+    def test_run_batch_tester_wires_fast_export_flags(self) -> None:
+        src = self._read_file(_TESTER_ROOT / "run_batch_tester.py")
+        assert 'include_period_splits=params["period"]' in src
+        assert 'if params["export"]["signals"]' in src
+        assert 'export_diagnostics=params["export"]["diagnostics"]' in src
+        assert 'export_signals=params["export"]["signals"]' in src
+        assert 'export_false_start=params["export"]["false_start"]' in src
+        assert 'export_cycle=params["export"]["cycle"]' in src
+        assert 'export_trades=params["export"]["trades"]' in src
+
     def test_two_step_linker_function_exists_in_excel_tester(self) -> None:
         """_two_step_trade_trigger_link must exist in excel_tester.py (plan §9.5.1)."""
         src = self._read_file(_DONOR_ROOT / "supertrend_optimizer" / "io" / "excel_tester.py")
@@ -1007,6 +1074,167 @@ class TestCliWiringStaticCheck:
 # ===========================================================================
 # Plan v3 §6.1/§6.2: exit_b_immediate_off in excel display map + params row
 # ===========================================================================
+
+class TestFastLegacyExportFlags:
+    def test_default_export_writes_full_100pct_sheet_set(self) -> None:
+        df = _make_synthetic_ohlc()
+        tf_cfg = _make_enabled_cfg()
+        results, signals_df = _run_enabled_legacy(df, tf_cfg)
+
+        wb = _export_and_load(results[:1], signals_df, tf_cfg=tf_cfg, df=df)
+
+        for sheet in (
+            "Tester_Config",
+            "Summary",
+            "Metrics_100",
+            "Trades_100",
+            "Signals",
+            "false start",
+            "FilterDiagnostics_100",
+            "ZigZag_Trigger_Events",
+            "filters_summary",
+            "cycle",
+        ):
+            assert sheet in wb.sheetnames
+        assert not any(name.endswith("_75") for name in wb.sheetnames)
+
+    def test_full_fast_flags_write_minimum_sheet_set(self) -> None:
+        df = _make_synthetic_ohlc()
+        tf_cfg = _make_enabled_cfg()
+        results, signals_df = _run_enabled_legacy(df, tf_cfg)
+
+        wb = _export_and_load(
+            results[:1],
+            signals_df,
+            tf_cfg=tf_cfg,
+            df=df,
+            export_diagnostics=False,
+            export_signals=False,
+            export_false_start=False,
+            export_cycle=False,
+            export_trades=False,
+        )
+
+        assert wb.sheetnames == ["Tester_Config", "Summary", "Metrics_100"]
+
+    def test_export_trades_false_preserves_summary_and_metrics_100(self) -> None:
+        results = _minimal_one_period_with_short_trade()
+
+        wb_with_trades = _export_and_load(
+            results,
+            signals_df=None,
+            export_signals=False,
+            export_false_start=False,
+            export_cycle=False,
+            export_diagnostics=False,
+            export_trades=True,
+        )
+        wb_without_trades = _export_and_load(
+            results,
+            signals_df=None,
+            export_signals=False,
+            export_false_start=False,
+            export_cycle=False,
+            export_diagnostics=False,
+            export_trades=False,
+        )
+
+        assert "Trades_100" in wb_with_trades.sheetnames
+        assert "Trades_100" not in wb_without_trades.sheetnames
+        assert list(wb_with_trades["Summary"].iter_rows(values_only=True)) == list(
+            wb_without_trades["Summary"].iter_rows(values_only=True)
+        )
+        assert list(wb_with_trades["Metrics_100"].iter_rows(values_only=True)) == list(
+            wb_without_trades["Metrics_100"].iter_rows(values_only=True)
+        )
+
+    def test_diagnostics_false_removes_diagnostic_sheets_and_summary_block(self) -> None:
+        df = _make_synthetic_ohlc()
+        tf_cfg = _make_enabled_cfg()
+        results, signals_df = _run_enabled_legacy(df, tf_cfg)
+
+        wb = _export_and_load(
+            results[:1],
+            signals_df,
+            tf_cfg=tf_cfg,
+            df=df,
+            export_diagnostics=False,
+            export_cycle=False,
+        )
+
+        assert "FilterDiagnostics_100" not in wb.sheetnames
+        assert "ZigZag_Trigger_Events" not in wb.sheetnames
+        assert "filters_summary" not in wb.sheetnames
+        assert [cell.value for cell in wb["Summary"][1]] == [
+            "Period",
+            "ATR Period",
+            "Multiplier",
+            "Mode",
+            "Sum PnL %",
+            "Sharpe",
+            "Sortino",
+            "Max Drawdown",
+            "Win Rate",
+            "Num Trades",
+        ]
+        all_values = [cell.value for row in wb["Summary"].iter_rows() for cell in row]
+        assert "Lifecycle Starts" not in all_values
+        assert "Bars OFF" not in all_values
+
+    def test_false_start_without_signals_keeps_headers_and_blank_signal_values(self) -> None:
+        from supertrend_optimizer.io.excel_tester import FALSE_START_COLUMNS
+
+        signals_df = pd.DataFrame(
+            [
+                {
+                    "signal_time": pd.Timestamp("2020-01-01"),
+                    "direction": "LONG",
+                    "event_type": "open_signal",
+                    "is_reversal": True,
+                    "exec_price": 100.0,
+                    "signal_body_pct_median_ratio": 9.0,
+                    "signal_range_pct_median_ratio": 8.0,
+                    "t1_return_pct": 7.0,
+                    "t2_return_pct": 6.0,
+                    "t3_return_pct": 5.0,
+                }
+            ]
+        )
+        wb = _export_and_load(
+            _minimal_one_period_with_short_trade(),
+            signals_df=signals_df,
+            export_signals=False,
+            export_false_start=True,
+            export_trades=False,
+        )
+
+        assert "Signals" not in wb.sheetnames
+        assert "Trades_100" not in wb.sheetnames
+        assert "false start" in wb.sheetnames
+
+        ws = wb["false start"]
+        header_ref = ws.auto_filter.ref.split(":")[0]
+        header_row = int("".join(ch for ch in header_ref if ch.isdigit()))
+        headers = [cell.value for cell in ws[header_row]]
+        assert headers == list(FALSE_START_COLUMNS)
+
+        data = {
+            headers[idx]: ws.cell(row=header_row + 1, column=idx + 1).value
+            for idx in range(len(headers))
+        }
+        for col in (
+            "Signal Time",
+            "Event Type",
+            "Is Reversal",
+            "Exec Price",
+            "Signal Body % / Median",
+            "Signal Range % / Median",
+            "T+1 Return %",
+            "T+2 Return %",
+            "T+3 Return %",
+        ):
+            assert data[col] is None
+
 
 class TestImmediateOffExcelDisplayContract:
     """§10.5 (tester-side): FILTER_DIAGNOSTICS_100_DISPLAY_NAMES and

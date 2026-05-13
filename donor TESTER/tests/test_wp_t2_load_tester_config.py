@@ -27,11 +27,12 @@ Plan reference: docs/zigzag_st_tester_phase2_implementation_plan.txt §14 WP-T2 
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from textwrap import dedent
 
 import pytest
 
-from supertrend_optimizer.cli.tester import load_tester_config
+from supertrend_optimizer.cli.tester import load_tester_config, merge_cli_and_config
 from supertrend_optimizer.core.trade_filter_config import (
     TradeFilterConfig,
 )
@@ -980,3 +981,173 @@ class TestExitBImmediateOffFailureKeysRegistryTester:
             f"  expected: {sorted(self._FULL_EXPECTED_SNAPSHOT)}\n"
             f"  observed: {sorted(_IMM_FAILURE_KEYS)}"
         )
+
+
+class TestFastExportConfigParsing:
+    """Fast XLSX export flags: load_tester_config normalization only."""
+
+    def _write_raw_config(self, tmp_path: Path, extra_yaml: str) -> Path:
+        cfg_path = tmp_path / "config_tester.yaml"
+        cfg_path.write_text(
+            _BASE_YAML + "\n" + dedent(extra_yaml).strip() + "\n",
+            encoding="utf-8",
+        )
+        return cfg_path
+
+    def test_defaults_preserve_legacy_export_shape(self) -> None:
+        cfg = load_tester_config(None)
+
+        assert cfg["period"] is True
+        assert cfg["export"]["diagnostics"] is True
+        assert cfg["export"]["signals"] is True
+        assert cfg["export"]["false_start"] is True
+        assert cfg["export"]["cycle"] is True
+        assert cfg["export"]["trades"] is True
+        assert cfg["export"]["false_start_max_bars"] == 4
+
+    def test_fast_export_flags_parse_as_strict_booleans(self, tmp_path: Path) -> None:
+        cfg_path = self._write_raw_config(
+            tmp_path,
+            """
+            period: false
+            export:
+              diagnostics: false
+              signals: false
+              false_start: false
+              cycle: false
+              trades: false
+              false_start_max_bars: 6
+            """,
+        )
+
+        cfg = load_tester_config(str(cfg_path))
+
+        assert cfg["period"] is False
+        assert cfg["export"] == {
+            "diagnostics": False,
+            "signals": False,
+            "false_start": False,
+            "cycle": False,
+            "trades": False,
+            "false_start_max_bars": 6,
+        }
+
+    def test_merge_cli_and_config_includes_normalized_fast_flags(
+        self, tmp_path: Path
+    ) -> None:
+        cfg_path = self._write_raw_config(
+            tmp_path,
+            """
+            period: false
+            export:
+              diagnostics: false
+              signals: false
+              false_start: false
+              cycle: false
+              trades: false
+              false_start_max_bars: 6
+            """,
+        )
+        cfg = load_tester_config(str(cfg_path))
+        parsed = SimpleNamespace(
+            atr=None,
+            mult=None,
+            mode=None,
+            periods_per_year=None,
+            annualization_basis=None,
+            market=None,
+            execution_model=None,
+        )
+
+        params = merge_cli_and_config(parsed, cfg)
+
+        assert params["period"] is False
+        assert params["export"] == cfg["export"]
+        assert params["export"] is not cfg["export"]
+        assert params["false_start_max_bars"] == 6
+
+    def test_load_tester_config_prints_resolved_fast_flags(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        cfg_path = self._write_raw_config(
+            tmp_path,
+            """
+            period: false
+            export:
+              diagnostics: false
+              signals: false
+              false_start: false
+              cycle: false
+              trades: false
+              false_start_max_bars: 6
+            """,
+        )
+
+        load_tester_config(str(cfg_path))
+        out = capsys.readouterr().out
+
+        assert "  period: False" in out
+        assert "  export.diagnostics: False" in out
+        assert "  export.signals: False" in out
+        assert "  export.false_start: False" in out
+        assert "  export.cycle: False" in out
+        assert "  export.trades: False" in out
+        assert "  export.false_start_max_bars: 6" in out
+
+    def test_equal_blocks_accepts_fast_flags_when_filter_absent(
+        self, tmp_path: Path
+    ) -> None:
+        cfg_path = self._write_raw_config(
+            tmp_path,
+            """
+            segmentation:
+              mode: equal_blocks
+              n_parts: 4
+            period: false
+            export:
+              diagnostics: false
+              signals: false
+              false_start: false
+              cycle: false
+              trades: false
+            """,
+        )
+
+        cfg = load_tester_config(str(cfg_path))
+
+        assert cfg["segmentation"] == {"mode": "equal_blocks", "n_parts": 4}
+        assert cfg["period"] is False
+        assert cfg["export"]["diagnostics"] is False
+        assert cfg["export"]["signals"] is False
+        assert cfg["export"]["false_start"] is False
+        assert cfg["export"]["cycle"] is False
+        assert cfg["export"]["trades"] is False
+
+    @pytest.mark.parametrize(
+        ("yaml_fragment", "match"),
+        [
+            ("period: 'false'", "period must be a boolean"),
+            ("period: 'no'", "period must be a boolean"),
+            ("period: 0", "period must be a boolean"),
+            ("period: 1", "period must be a boolean"),
+            ("export:\n  diagnostics: 'false'", "export.diagnostics must be a boolean"),
+            ("export:\n  diagnostics: 0", "export.diagnostics must be a boolean"),
+            ("export:\n  signals: 'false'", "export.signals must be a boolean"),
+            ("export:\n  signals: 'no'", "export.signals must be a boolean"),
+            ("export:\n  signals: 0", "export.signals must be a boolean"),
+            ("export:\n  signals: 1", "export.signals must be a boolean"),
+            ("export:\n  false_start: 'false'", "export.false_start must be a boolean"),
+            ("export:\n  false_start: 0", "export.false_start must be a boolean"),
+            ("export:\n  cycle: 'false'", "export.cycle must be a boolean"),
+            ("export:\n  cycle: 0", "export.cycle must be a boolean"),
+            ("export:\n  trades: 'false'", "export.trades must be a boolean"),
+            ("export:\n  trades: 0", "export.trades must be a boolean"),
+        ],
+    )
+    def test_fast_export_flags_reject_non_bool_values(
+        self, tmp_path: Path, yaml_fragment: str, match: str
+    ) -> None:
+        cfg_path = self._write_raw_config(tmp_path, yaml_fragment)
+
+        with pytest.raises(ConfigError, match=match):
+            load_tester_config(str(cfg_path))

@@ -80,7 +80,7 @@ export:
   retain_per_bar_filter_diagnostics: false
 
 trade_filter:
-  enabled: true
+  enabled: false
   # type: "zigzag_st_mode"  # раскомментировать при включении zigzag
 
   zigzag:
@@ -115,9 +115,9 @@ trade_filter:
     window: "09:00-19:00"
 
   volume:
-    enabled: true
+    enabled: false
     mode: "volume_A"
-    aggregation: mean
+    aggregation: median
     short_window: 24
     baseline_window: 1000
     threshold_ratio: 2.0
@@ -125,5 +125,5 @@ trade_filter:
     regime_high_ratio: 1.2
     direction_lookback_bars: 10
     baseline_session:
-      enabled: true
-      window: "09:00-19:00"
+      enabled: false
+      window: null

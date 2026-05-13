@@ -654,9 +654,10 @@ def run_all_periods(
     trade_filter_config: Any = None,
     zigzag_global_stats: Any = None,
     volume_runtime: Optional[VolumeRuntime] = None,
+    include_period_splits: bool = True,
 ) -> List[PeriodResult]:
     """
-    Run backtest on all periods (100%, 75%, 50%, 33%, 25%).
+    Run backtest on all periods (100%, 75%, 50%, 33%, 25%) by default.
 
     Takes already loaded and validated DataFrame.
     Useful for tests where you can pass synthetic data.
@@ -691,7 +692,8 @@ def run_all_periods(
             ``None`` and filter is enabled, materialised here from ``df`` (plan §7.3).
 
     Returns:
-        List of PeriodResult (5 elements: 100%, 75%, 50%, 33%, 25%)
+        List of PeriodResult (5 elements by default; only 100% when
+        include_period_splits=False).
     """
     n_total = len(df)
 
@@ -712,7 +714,9 @@ def run_all_periods(
 
     results = []
 
-    for period_label, fraction in PERIOD_SPLITS:
+    period_splits = PERIOD_SPLITS if include_period_splits else [("100%", 1.00)]
+
+    for period_label, fraction in period_splits:
         # Calculate slice size (guard: at least 1 bar)
         n_period = max(1, math.floor(n_total * fraction))
 

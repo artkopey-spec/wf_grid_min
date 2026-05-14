@@ -377,10 +377,10 @@ def _compute_volume_summary_counters(
         "volume_above_baseline",
     }
     blocked = np.isin(block, list(volume_reasons)) if len(block) else np.array([], dtype=bool)
-    active = np.isin(state, list(_VOLUME_ACTIVE_STATES)) if len(state) else np.array([], dtype=bool)
-    starts = int(len(active) > 0 and bool(active[0]))
-    if len(active) > 1:
-        starts += int(np.sum(active[1:] & ~active[:-1]))
+    cycle = _volume_cycle_mask(state)
+    suppressed = _volume_suppressed_mask(state)
+    starts = _count_rising_edges(cycle)
+    suppressed_starts = _count_rising_edges(suppressed)
     finite = median_relative[np.isfinite(median_relative)] if len(median_relative) else []
     return {
         "n_volume_blocked_start_attempts": int(np.sum(blocked)),
@@ -394,12 +394,35 @@ def _compute_volume_summary_counters(
         "n_volume_direction_warmup_blocked_start_attempts": int(np.sum(block == "volume_direction_warmup")) if len(block) else 0,
         "n_volume_unknown_direction_blocked_start_attempts": int(np.sum(block == "volume_unknown_direction")) if len(block) else 0,
         "n_volume_trade_mode_disallowed_direction_blocked_start_attempts": int(np.sum(block == "volume_trade_mode_disallowed_direction")) if len(block) else 0,
+        "n_volume_cycle_direction_mismatch_blocked_bars": int(np.sum(block == "volume_cycle_direction_mismatch")) if len(block) else 0,
         "n_volume_low_regime_bars": int(np.sum(regime == "low_volume")) if len(regime) else 0,
         "n_volume_normal_regime_bars": int(np.sum(regime == "normal_volume")) if len(regime) else 0,
         "n_volume_high_regime_bars": int(np.sum(regime == "high_volume")) if len(regime) else 0,
         "avg_median_relative_volume": float(np.mean(finite)) if len(finite) else None,
         "n_volume_started_cycles": starts,
+        "n_volume_suppressed_cycles": suppressed_starts,
     }
+
+
+def _volume_cycle_mask(state: np.ndarray) -> np.ndarray:
+    if not len(state):
+        return np.array([], dtype=bool)
+    return np.isin(state, list(_VOLUME_ACTIVE_STATES)) | _volume_suppressed_mask(state)
+
+
+def _volume_suppressed_mask(state: np.ndarray) -> np.ndarray:
+    if not len(state):
+        return np.array([], dtype=bool)
+    return np.isin(state, ["SUPPRESSED_LONG", "SUPPRESSED_SHORT"])
+
+
+def _count_rising_edges(mask: np.ndarray) -> int:
+    if not len(mask):
+        return 0
+    starts = int(bool(mask[0]))
+    if len(mask) > 1:
+        starts += int(np.sum(mask[1:] & ~mask[:-1]))
+    return starts
 
 
 def _build_filter_diagnostics_summary(

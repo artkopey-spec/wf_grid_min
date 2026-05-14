@@ -290,6 +290,7 @@ def test_wf_filter_diagnostics_sheet_respects_retain_flag(tmp_path):
         rows = list(wb_retained["WF_Config"].iter_rows(values_only=True))
         assert ("filter_config_snapshot", "volume_filter_mode", "volume_A") in rows
         assert ("filter_config_snapshot", "volume_aggregation", "median") in rows
+        assert ("filter_config_snapshot", "volume_cycle_direction_gate", "False") in rows
         assert ("filter_config_snapshot", "volume_baseline_session_enabled", "False") in rows
         assert ("filter_config_snapshot", "volume_baseline_session_window", "null") in rows
     finally:

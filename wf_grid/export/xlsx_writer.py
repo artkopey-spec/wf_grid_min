@@ -551,11 +551,13 @@ def _write_step_sheet(
         "n_volume_direction_warmup_blocked_start_attempts",
         "n_volume_unknown_direction_blocked_start_attempts",
         "n_volume_trade_mode_disallowed_direction_blocked_start_attempts",
+        "n_volume_cycle_direction_mismatch_blocked_bars",
         "n_volume_low_regime_bars",
         "n_volume_normal_regime_bars",
         "n_volume_high_regime_bars",
         "avg_median_relative_volume",
         "n_volume_started_cycles",
+        "n_volume_suppressed_cycles",
     ]
 
     step_df = step_oos_long[step_oos_long["wf_step"] == step_idx].copy()
@@ -1018,6 +1020,9 @@ def _config_to_dict(config: GridConfig) -> dict:
             "volume_filter_mode": volume.mode,
             "volume_aggregation": getattr(volume, "aggregation", "median"),
             "volume_daily_reset": bool(getattr(volume, "daily_reset", False)),
+            "volume_cycle_direction_gate": bool(
+                getattr(volume, "cycle_direction_gate", False)
+            ),
             "volume_short_window": volume.short_window,
             "volume_baseline_window": volume.baseline_window,
             "volume_baseline_session_enabled": bool(

@@ -65,6 +65,7 @@ _V3_INIT_FAILURE_KEYS = frozenset({
     "time_filter_window_invalid_minutes",
     "time_filter_window_zero_length",
     "time_filter_window_cross_midnight",
+    "cycle_direction_gate_requires_volume_only",
 })
 
 # WP-T3 step 6 — caller_pipeline whitelist for type=zigzag_st_mode.
@@ -212,6 +213,7 @@ class TradeFilterVolumeConfig:
     mode: object = None
     aggregation: object = "median"
     daily_reset: object = False
+    cycle_direction_gate: object = False
     short_window: object = None
     baseline_window: object = None
     threshold_ratio: object = None
@@ -347,6 +349,8 @@ def resolve_volume_defaults_in_place(
         vol.regime_high_ratio = 1.2
     if vol.direction_lookback_bars is None:
         vol.direction_lookback_bars = 3
+    if vol.cycle_direction_gate is None:
+        vol.cycle_direction_gate = False
 
 
 # ---------------------------------------------------------------------------
@@ -390,7 +394,8 @@ TRADE_FILTER_ALLOWED_KEYS: dict[str, frozenset[str]] = {
         "enabled", "mode", "short_window", "baseline_window",
         "threshold_ratio", "regime_low_ratio", "regime_high_ratio",
         "direction_lookback_bars", "aggregation", "daily_reset",
-        "exit_hysteresis_ratio", "exit_freeze_bars", "baseline_session",
+        "cycle_direction_gate", "exit_hysteresis_ratio", "exit_freeze_bars",
+        "baseline_session",
     }),
     "trade_filter.volume.baseline_session": frozenset({
         "enabled", "window",
@@ -547,6 +552,7 @@ def build_trade_filter_config_from_raw(tf_raw: dict) -> TradeFilterConfig:
         mode=vol_raw.get("mode", None),
         aggregation=vol_raw.get("aggregation", "median"),
         daily_reset=vol_raw.get("daily_reset", False),
+        cycle_direction_gate=vol_raw.get("cycle_direction_gate", False),
         short_window=vol_raw.get("short_window", None),
         baseline_window=vol_raw.get("baseline_window", None),
         threshold_ratio=vol_raw.get("threshold_ratio", None),
@@ -746,6 +752,26 @@ def _validate_volume_block(
             "trade_filter.volume.daily_reset must be bool (true/false), "
             f"got {type(vol.daily_reset).__name__!r} ({vol.daily_reset!r})"
         )
+
+    cycle_direction_gate_key = ("trade_filter", "volume", "cycle_direction_gate")
+    if cycle_direction_gate_key in raw_user_keys:
+        if not isinstance(vol.cycle_direction_gate, bool):
+            errors.append(
+                "trade_filter.volume.cycle_direction_gate must be bool "
+                f"(true/false), got {type(vol.cycle_direction_gate).__name__!r} "
+                f"({vol.cycle_direction_gate!r})"
+            )
+        elif (
+            vol.cycle_direction_gate
+            and _is_zigzag_enabled_for_validation(tf, raw_user_keys)
+        ):
+            _append_validation_error(
+                errors,
+                "trade_filter.volume.cycle_direction_gate=true requires "
+                "trade_filter.zigzag.enabled=false in v1",
+                _VALIDATION_ERROR_KEYS.get(),
+                "cycle_direction_gate_requires_volume_only",
+            )
 
     mode_key = ("trade_filter", "volume", "mode")
     if mode_key not in raw_user_keys or vol.mode is None:

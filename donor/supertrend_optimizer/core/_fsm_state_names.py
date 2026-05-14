@@ -38,6 +38,8 @@ STANDALONE_VOLUME_STATE_NAMES: tuple[str, ...] = (
     "OFF",
     "ACTIVE_LONG",
     "ACTIVE_SHORT",
+    "SUPPRESSED_LONG",
+    "SUPPRESSED_SHORT",
 )
 
 STANDALONE_VOLUME_ACTIVE_STATES: tuple[str, ...] = (

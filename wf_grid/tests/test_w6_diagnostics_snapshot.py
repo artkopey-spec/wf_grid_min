@@ -15,6 +15,10 @@ from supertrend_optimizer.core.volume_metrics import (
     VolumeRuntime,
 )
 from supertrend_optimizer.core.volume_only_filter import VolumeOnlyState, _STATE_NAMES
+from supertrend_optimizer.testing.runner import (
+    _compute_volume_summary_counters as _compute_tester_volume_summary_counters,
+)
+from supertrend_optimizer.testing.signal_events import _BLOCK_REASON_TO_DECISION
 from supertrend_optimizer.core.zigzag_st_filter import (
     ZigZagGlobalStats,
     ZigZagPerBar,
@@ -276,6 +280,55 @@ def test_volume_summary_counters_only_when_volume_diagnostics_present():
     assert summary["avg_median_relative_volume"] == pytest.approx(1.1)
 
 
+def test_volume_cycle_gate_summary_counts_suppressed_cycles_and_mismatch_bars():
+    diag = {
+        "trade_filter_state": np.array(
+            [
+                "OFF",
+                "SUPPRESSED_SHORT",
+                "SUPPRESSED_SHORT",
+                "OFF",
+                "ACTIVE_LONG",
+                "ACTIVE_LONG",
+            ],
+            dtype=object,
+        ),
+        "filter_block_reason": np.array(
+            [
+                "none",
+                "volume_cycle_direction_mismatch",
+                "volume_cycle_direction_mismatch",
+                "volume_reversal",
+                "none",
+                "volume_cycle_direction_mismatch",
+            ],
+            dtype=object,
+        ),
+        "volume_regime": np.array(["normal_volume"] * 6, dtype=object),
+        "volume_initial_direction": np.array(
+            ["unknown", "short", "short", "unknown", "long", "long"],
+            dtype=object,
+        ),
+        "median_relative_volume": np.ones(6, dtype=np.float64),
+    }
+
+    wf_summary = _compute_filter_diagnostics_summary(diag)
+    tester_summary = _compute_tester_volume_summary_counters(diag)
+
+    for summary in (wf_summary, tester_summary):
+        assert summary["n_volume_started_cycles"] == 2
+        assert summary["n_volume_suppressed_cycles"] == 1
+        assert summary["n_volume_cycle_direction_mismatch_blocked_bars"] == 3
+        assert summary["n_volume_blocked_start_attempts"] == 0
+
+
+def test_signal_events_maps_volume_cycle_direction_mismatch_reason():
+    assert (
+        _BLOCK_REASON_TO_DECISION["volume_cycle_direction_mismatch"]
+        == "entry_blocked_volume_cycle_direction_mismatch"
+    )
+
+
 def test_step_collector_splits_zigzag_and_volume_columns():
     class _Cfg:
         status = type("Status", (), {"min_meaningful_bars": 1})()
@@ -288,7 +341,9 @@ def test_step_collector_splits_zigzag_and_volume_columns():
         "lifecycle_starts_count": 2,
         "n_volume_blocked_start_attempts": 1,
         "n_volume_below_baseline_blocked_start_attempts": 1,
+        "n_volume_cycle_direction_mismatch_blocked_bars": 3,
         "n_volume_started_cycles": 2,
+        "n_volume_suppressed_cycles": 1,
     }
     sr = StepResult(
         grid_point_id="gp",
@@ -311,4 +366,6 @@ def test_step_collector_splits_zigzag_and_volume_columns():
     df = collect_oos_steps({"gp": [sr]}, _Cfg())
 
     assert "n_volume_blocked_start_attempts" in df.columns
+    assert "n_volume_cycle_direction_mismatch_blocked_bars" in df.columns
+    assert "n_volume_suppressed_cycles" in df.columns
     assert "lifecycle_starts_count" not in df.columns

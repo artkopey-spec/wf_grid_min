@@ -110,6 +110,8 @@ def _volume_diagnostics(
     volume_regime: list[object] | np.ndarray | None = None,
     median_relative_volume: list[float] | np.ndarray | None = None,
     filter_block_reason: list[object] | np.ndarray | None = None,
+    cycle_initial_direction: list[object] | np.ndarray | None = None,
+    cycle_direction_gate_passed: list[int] | np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
     diag: dict[str, np.ndarray] = {
         "trade_filter_state": np.asarray(states, dtype=object),
@@ -124,6 +126,10 @@ def _volume_diagnostics(
         diag["median_relative_volume"] = np.asarray(median_relative_volume, dtype=np.float64)
     if filter_block_reason is not None:
         diag["filter_block_reason"] = np.asarray(filter_block_reason, dtype=object)
+    if cycle_initial_direction is not None:
+        diag["cycle_initial_direction"] = np.asarray(cycle_initial_direction, dtype=object)
+    if cycle_direction_gate_passed is not None:
+        diag["cycle_direction_gate_passed"] = np.asarray(cycle_direction_gate_passed)
     return diag
 
 
@@ -744,6 +750,92 @@ def test_volume_cycle_single_active_bar_includes_exit_bar():
     assert result.iloc[0]["End bar index"] == 1
     assert result.iloc[0, 3] == 2
     assert result.iloc[0, 14] == "volume_reversal"
+
+
+def test_volume_cycle_includes_suppressed_cycle_gate_columns():
+    excel_tester = _excel_tester_module()
+    diag = _volume_diagnostics(
+        ["SUPPRESSED_SHORT", "SUPPRESSED_SHORT", "OFF"],
+        filter_block_reason=[
+            "volume_cycle_direction_mismatch",
+            "volume_cycle_direction_mismatch",
+            "volume_reversal",
+        ],
+        cycle_initial_direction=["short", "short", "unknown"],
+        cycle_direction_gate_passed=[0, 0, 0],
+        median_relative_volume=[3.0, 3.0, 1.0],
+    )
+
+    result = excel_tester._build_volume_cycle_sheet_df(diag, _df(3))
+
+    assert len(result) == 1
+    row = result.iloc[0]
+    assert row.iloc[2] == "-"
+    assert row["Cycle Initial Direction"] == "short"
+    assert row["Cycle Trade Allowed"] == 0
+    assert row["Cycle Suppressed Reason"] == "volume_cycle_direction_mismatch"
+    assert row.iloc[17] == 0
+
+
+def test_volume_cycle_includes_open_ended_suppressed_cycle():
+    excel_tester = _excel_tester_module()
+    diag = _volume_diagnostics(
+        ["OFF", "SUPPRESSED_SHORT", "SUPPRESSED_SHORT"],
+        filter_block_reason=[
+            "none",
+            "volume_cycle_direction_mismatch",
+            "volume_cycle_direction_mismatch",
+        ],
+        cycle_initial_direction=["unknown", "short", "short"],
+        cycle_direction_gate_passed=[0, 0, 0],
+        median_relative_volume=[1.0, 3.0, 3.0],
+    )
+
+    result = excel_tester._build_volume_cycle_sheet_df(diag, _df(3))
+
+    assert len(result) == 1
+    row = result.iloc[0]
+    assert row["Start bar index"] == 1
+    assert row["End bar index"] == 2
+    assert row.iloc[14] == "open_cycle"
+    assert row["Cycle Initial Direction"] == "short"
+    assert row["Cycle Trade Allowed"] == 0
+    assert row["Cycle Suppressed Reason"] == "volume_cycle_direction_mismatch"
+    assert row.iloc[17] == 0
+
+
+@pytest.mark.parametrize(
+    ("reset_key", "expected_reason"),
+    [
+        ("daily_reset_event", "daily_reset"),
+        ("time_filter_reset_event", "time_filter_reset"),
+    ],
+)
+def test_volume_cycle_suppressed_cycle_reset_end_reason(reset_key, expected_reason):
+    excel_tester = _excel_tester_module()
+    reset_payload = {reset_key: [0, 0, 1]}
+    diag = _volume_diagnostics(
+        ["SUPPRESSED_SHORT", "SUPPRESSED_SHORT", "OFF"],
+        filter_block_reason=[
+            "volume_cycle_direction_mismatch",
+            "volume_cycle_direction_mismatch",
+            expected_reason,
+        ],
+        cycle_initial_direction=["short", "short", "unknown"],
+        cycle_direction_gate_passed=[0, 0, 0],
+        median_relative_volume=[3.0, 3.0, 1.0],
+        **reset_payload,
+    )
+
+    result = excel_tester._build_volume_cycle_sheet_df(diag, _df(3))
+
+    assert len(result) == 1
+    row = result.iloc[0]
+    assert row.iloc[14] == expected_reason
+    assert row["Cycle Initial Direction"] == "short"
+    assert row["Cycle Trade Allowed"] == 0
+    assert row["Cycle Suppressed Reason"] == "volume_cycle_direction_mismatch"
+    assert row.iloc[17] == 0
 
 
 def test_volume_cycle_volume_regime_nan_is_not_string_nan():

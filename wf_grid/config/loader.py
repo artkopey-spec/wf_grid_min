@@ -222,6 +222,7 @@ _ALLOWED_KEYS: dict[str, set[str]] = {
         "mode",
         "aggregation",
         "daily_reset",
+        "cycle_direction_gate",
         "short_window",
         "baseline_window",
         "threshold_ratio",

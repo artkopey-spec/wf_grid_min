@@ -1,16 +1,26 @@
-# Tester-compatible config, aligned with the equivalent parameters in config.yaml.
-# Variant: daily_reset=false, exit_freeze_bars=10, exit_hysteresis_ratio=2.2.
+# -----------------------------------------------------------------------------
+# Tester config — «lite» volume preset: SW70, threshold/hysteresis 2.6,
+# exit_freeze 17, direction_lookback 30, baseline session 09:00–19:00 (mean agg).
+# volume.cycle_direction_gate — опциональный gate направления volume-cycle (v1,
+# только при zigzag.enabled=false); false = прежнее поведение.
+#
+# Полный экспорт Excel: разбивки по периодам + все вкладки (диагностика, сделки,
+# сигналы, циклы, false start). Commission 0, annualization trading @ 252.
+# -----------------------------------------------------------------------------
 
 supertrend:
   atr_period: 20
   multiplier: 1.0
 
-trade_mode: revers
+trade_mode: long
 
-commission: 0.0000
+commission: 0.0
 
 warmup_period: 0
 warmup_period_auto: true
+
+# Включает листы/разрезы по legacy-периодам (Tester run_all_periods).
+period: true
 
 periods_per_year: 252
 annualization_basis: trading
@@ -19,19 +29,20 @@ min_trades_required: 3
 
 early_exit:
   enabled: false
-  max_drawdown: 0.50
+  max_drawdown: 0.5
   check_bars: 50
 
 segmentation:
   mode: legacy
   n_parts: 7
 
+# Все диагностические и вспомогательные листы экспорта.
 export:
   diagnostics: true
-  signals: false
-  false_start: false
+  signals: true
+  false_start: true
   cycle: true
-  trades: false
+  trades: true
   false_start_max_bars: 4
 
 trade_filter:
@@ -47,16 +58,17 @@ trade_filter:
   volume:
     enabled: true
     daily_reset: false
+    cycle_direction_gate: false
     mode: volume_A
     aggregation: mean
-    short_window: 30
+    short_window: 70
     baseline_window: 1000
-    threshold_ratio: 2.2
-    exit_hysteresis_ratio: 1.8
-    exit_freeze_bars: 10
+    threshold_ratio: 2.6
+    exit_hysteresis_ratio: 2.6
+    exit_freeze_bars: 17
     regime_low_ratio: 0.8
     regime_high_ratio: 1.2
-    direction_lookback_bars: 10
+    direction_lookback_bars: 30
     baseline_session:
       enabled: true
       window: "09:00-19:00"

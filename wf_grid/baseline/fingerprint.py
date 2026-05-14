@@ -309,6 +309,9 @@ def _volume_snapshot_from_result_config(result: Any) -> dict[str, Any]:
         "volume_filter_enabled": True,
         "volume_filter_mode": volume.mode,
         "volume_daily_reset": bool(getattr(volume, "daily_reset", False)),
+        "volume_cycle_direction_gate": bool(
+            getattr(volume, "cycle_direction_gate", False)
+        ),
         "volume_short_window": volume.short_window,
         "volume_baseline_window": volume.baseline_window,
         "volume_threshold_ratio": threshold_ratio,

@@ -29,12 +29,16 @@ class VolumeOnlyState(IntEnum):
     OFF = 0
     ACTIVE_LONG = 1
     ACTIVE_SHORT = -1
+    SUPPRESSED_LONG = 2
+    SUPPRESSED_SHORT = -2
 
 
 _STATE_NAMES = {
     VolumeOnlyState.OFF: STANDALONE_VOLUME_STATE_NAMES[0],
     VolumeOnlyState.ACTIVE_LONG: STANDALONE_VOLUME_STATE_NAMES[1],
     VolumeOnlyState.ACTIVE_SHORT: STANDALONE_VOLUME_STATE_NAMES[2],
+    VolumeOnlyState.SUPPRESSED_LONG: STANDALONE_VOLUME_STATE_NAMES[3],
+    VolumeOnlyState.SUPPRESSED_SHORT: STANDALONE_VOLUME_STATE_NAMES[4],
 }
 
 
@@ -126,8 +130,12 @@ def apply(
     positions = np.zeros(n, dtype=np.int8)
     state_arr = np.full(n, _STATE_NAMES[VolumeOnlyState.OFF], dtype=object)
     block_reason_arr = np.full(n, "none", dtype=object)
+    cycle_initial_direction_arr = np.full(n, "unknown", dtype=object)
+    cycle_direction_gate_passed_arr = np.zeros(n, dtype=np.int8)
 
     state = VolumeOnlyState.OFF
+    volume_cfg = getattr(trade_filter_config, "volume", None)
+    cycle_direction_gate = bool(getattr(volume_cfg, "cycle_direction_gate", False))
     mode = str(volume_runtime.filter_config_snapshot.get("volume_filter_mode", ""))
     threshold = float(
         volume_runtime.filter_config_snapshot.get("volume_threshold_ratio", np.nan)
@@ -151,27 +159,39 @@ def apply(
     )
 
     active_age_bars = 0
+    cycle_initial_direction = 0
     for t in range(n):
         if daily_reset_event[t]:
             state = VolumeOnlyState.OFF
+            cycle_initial_direction = 0
             block_reason_arr[t] = "daily_reset"
         elif time_filter_reset_event[t]:
             state = VolumeOnlyState.OFF
+            cycle_initial_direction = 0
             block_reason_arr[t] = "time_filter_reset"
         elif (
             active_age_bars >= exit_freeze_bars
             and _volume_reversal(mode, median_relative_volume[t], exit_threshold, state)
         ):
             state = VolumeOnlyState.OFF
+            cycle_initial_direction = 0
             block_reason_arr[t] = "volume_reversal"
         else:
             prev_trend = int(trend_arr[t - 1]) if t > 0 else 0
             flip_dir = detect_st_flip(prev_trend, int(trend_arr[t]))
             if state != VolumeOnlyState.OFF:
-                if flip_dir != 0 and not _trade_mode_allows_direction(
+                if cycle_direction_gate:
+                    if _is_suppressed_state(state):
+                        block_reason_arr[t] = "volume_cycle_direction_mismatch"
+                    elif flip_dir != 0 and flip_dir != _state_cycle_direction(state):
+                        block_reason_arr[t] = "volume_cycle_direction_mismatch"
+                    elif flip_dir != 0:
+                        state = _state_from_direction(_state_cycle_direction(state))
+                elif flip_dir != 0 and not _trade_mode_allows_direction(
                     flip_dir, trade_mode
                 ):
                     state = VolumeOnlyState.OFF
+                    cycle_initial_direction = 0
                     block_reason_arr[t] = "trade_mode_forced_exit"
                 elif (
                     flip_dir != 0
@@ -190,24 +210,46 @@ def apply(
                     block_reason_arr[t] = "volume_direction_warmup"
                 elif direction == 0:
                     block_reason_arr[t] = "volume_unknown_direction"
-                elif not _trade_mode_allows_direction(direction, trade_mode):
+                elif (
+                    not cycle_direction_gate
+                    and not _trade_mode_allows_direction(direction, trade_mode)
+                ):
                     block_reason_arr[t] = "volume_trade_mode_disallowed_direction"
                 elif not bool(volume_allowed[t]):
                     block_reason_arr[t] = volume_block_reason_labels[t]
                 else:
-                    state = _state_from_direction(direction)
+                    if cycle_direction_gate and not _trade_mode_allows_direction(
+                        direction, trade_mode
+                    ):
+                        state = _suppressed_state_from_direction(direction)
+                        cycle_initial_direction = direction
+                        block_reason_arr[t] = "volume_cycle_direction_mismatch"
+                    else:
+                        state = _state_from_direction(direction)
+                        cycle_initial_direction = direction
 
         state_arr[t] = _STATE_NAMES[state]
+        cycle_initial_direction_arr[t] = _direction_label(
+            cycle_initial_direction if _is_cycle_state(state) else 0
+        )
+        cycle_direction_gate_passed_arr[t] = np.int8(
+            1 if _is_tradable_state(state) else 0
+        )
         if t + 1 < n:
             positions[t + 1] = np.int8(_state_position(state))
-        if state == VolumeOnlyState.OFF:
-            active_age_bars = 0
-        else:
+        if _is_cycle_state(state):
             active_age_bars += 1
+        else:
+            active_age_bars = 0
 
     diagnostics = {
         "trade_filter_state": state_arr,
         "filter_block_reason": block_reason_arr,
+        "cycle_initial_direction": cycle_initial_direction_arr,
+        "cycle_direction_gate_enabled": np.full(
+            n, np.int8(1 if cycle_direction_gate else 0), dtype=np.int8
+        ),
+        "cycle_direction_gate_passed": cycle_direction_gate_passed_arr,
         "volume_regime": volume_regime_labels,
         "volume_condition_allowed": volume_allowed,
         "volume_condition_block_reason": volume_block_reason_labels,
@@ -308,6 +350,24 @@ def _state_from_direction(direction: int) -> VolumeOnlyState:
     return VolumeOnlyState.ACTIVE_SHORT
 
 
+def _suppressed_state_from_direction(direction: int) -> VolumeOnlyState:
+    if direction > 0:
+        return VolumeOnlyState.SUPPRESSED_LONG
+    return VolumeOnlyState.SUPPRESSED_SHORT
+
+
+def _is_cycle_state(state: VolumeOnlyState) -> bool:
+    return state != VolumeOnlyState.OFF
+
+
+def _is_tradable_state(state: VolumeOnlyState) -> bool:
+    return state in {VolumeOnlyState.ACTIVE_LONG, VolumeOnlyState.ACTIVE_SHORT}
+
+
+def _is_suppressed_state(state: VolumeOnlyState) -> bool:
+    return state in {VolumeOnlyState.SUPPRESSED_LONG, VolumeOnlyState.SUPPRESSED_SHORT}
+
+
 def _state_position(state: VolumeOnlyState) -> int:
     if state == VolumeOnlyState.ACTIVE_LONG:
         return 1
@@ -316,13 +376,29 @@ def _state_position(state: VolumeOnlyState) -> int:
     return 0
 
 
+def _state_cycle_direction(state: VolumeOnlyState) -> int:
+    if state in {VolumeOnlyState.ACTIVE_LONG, VolumeOnlyState.SUPPRESSED_LONG}:
+        return 1
+    if state in {VolumeOnlyState.ACTIVE_SHORT, VolumeOnlyState.SUPPRESSED_SHORT}:
+        return -1
+    return 0
+
+
+def _direction_label(direction: int) -> str:
+    if direction > 0:
+        return "long"
+    if direction < 0:
+        return "short"
+    return "unknown"
+
+
 def _volume_reversal(
     mode: str,
     median_relative_volume: float,
     threshold: float,
     state: VolumeOnlyState,
 ) -> bool:
-    if state == VolumeOnlyState.OFF:
+    if not _is_cycle_state(state):
         return False
     if not np.isfinite(median_relative_volume) or not np.isfinite(threshold):
         return False

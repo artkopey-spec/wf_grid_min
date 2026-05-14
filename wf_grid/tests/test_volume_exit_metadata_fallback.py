@@ -53,5 +53,6 @@ def test_fingerprint_metadata_falls_back_for_old_volume_config_objects():
     fp = compute_pipeline_fingerprint(_Result(config=_old_style_config()))
 
     assert fp.metadata["volume_threshold_ratio"] == 2.2
+    assert fp.metadata["volume_cycle_direction_gate"] is False
     assert fp.metadata["volume_exit_hysteresis_ratio"] == 2.2
     assert fp.metadata["volume_exit_freeze_bars"] == 0

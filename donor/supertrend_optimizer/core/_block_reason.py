@@ -11,6 +11,7 @@ _PRIORITY = {
     "volume_direction_warmup": 4,
     "volume_unknown_direction": 5,
     "volume_trade_mode_disallowed_direction": 6,
+    "volume_cycle_direction_mismatch": 6,
     "volume_warmup": 7,
     "volume_baseline_zero": 8,
     "volume_below_baseline": 9,

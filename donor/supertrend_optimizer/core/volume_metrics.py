@@ -229,6 +229,9 @@ def build_volume_global_metrics(volume, close, volume_cfg, index=None) -> Volume
         "volume_filter_mode": mode,
         "volume_aggregation": aggregation,
         "volume_daily_reset": bool(getattr(volume_cfg, "daily_reset", False)),
+        "volume_cycle_direction_gate": bool(
+            getattr(volume_cfg, "cycle_direction_gate", False)
+        ),
         "volume_short_window": volume_cfg.short_window,
         "volume_baseline_window": volume_cfg.baseline_window,
         "volume_baseline_session_enabled": baseline_session_enabled,

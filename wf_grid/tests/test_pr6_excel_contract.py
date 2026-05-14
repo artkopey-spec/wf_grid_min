@@ -347,6 +347,29 @@ class TestImmediateOffExcelContract:
         assert row.iloc[0]["Value"] is False
 
 
+class TestVolumeCycleDirectionGateExcelContract:
+    _DISPLAY_NAMES = {
+        "cycle_initial_direction": "Cycle Initial Direction",
+        "cycle_direction_gate_enabled": "Cycle Direction Gate Enabled",
+        "cycle_direction_gate_passed": "Cycle Direction Gate Passed",
+    }
+
+    def test_gate_diagnostic_display_names_present(self):
+        from supertrend_optimizer.io.excel_tester import FILTER_DIAGNOSTICS_100_DISPLAY_NAMES
+
+        missing = set(self._DISPLAY_NAMES) - set(FILTER_DIAGNOSTICS_100_DISPLAY_NAMES)
+        assert not missing, (
+            "Missing cycle direction gate keys in FILTER_DIAGNOSTICS_100_DISPLAY_NAMES: "
+            f"{sorted(missing)}"
+        )
+
+    def test_gate_diagnostic_display_names_exact_match(self):
+        from supertrend_optimizer.io.excel_tester import FILTER_DIAGNOSTICS_100_DISPLAY_NAMES
+
+        for key, expected_label in self._DISPLAY_NAMES.items():
+            assert FILTER_DIAGNOSTICS_100_DISPLAY_NAMES.get(key) == expected_label
+
+
 # ===========================================================================
 # docs/time_filter_plan_v1_final.txt ?7.2 ? time_filter Excel contract
 # ===========================================================================

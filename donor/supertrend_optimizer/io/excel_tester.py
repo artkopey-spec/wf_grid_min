@@ -156,6 +156,9 @@ FILTER_DIAGNOSTICS_100_DISPLAY_NAMES: Dict[str, str] = {
     "volume_condition_allowed":         "Volume Condition Allowed",
     "volume_condition_block_reason":    "Volume Condition Block Reason",
     "volume_initial_direction":         "Volume Initial Direction",
+    "cycle_initial_direction":          "Cycle Initial Direction",
+    "cycle_direction_gate_enabled":     "Cycle Direction Gate Enabled",
+    "cycle_direction_gate_passed":      "Cycle Direction Gate Passed",
     "median_relative_volume":           "Median Relative Volume",
 }
 
@@ -232,6 +235,9 @@ VOLUME_CYCLE_SHEET_COLUMNS: Tuple[str, ...] = (
     "Сделок в цикле",
     "Фин результат цикла, %",
     "% сделок с положительным фин результатом в цикле",
+    "Cycle Initial Direction",
+    "Cycle Trade Allowed",
+    "Cycle Suppressed Reason",
 )
 
 # Legacy export: diagnostic sheet for very short trades (100% slice only)
@@ -402,6 +408,8 @@ def _completed_cycle_segments_with_exit(state_arr: np.ndarray) -> List[Tuple[int
         elif not active and start is not None:
             segments.append((start, idx - 1, idx))
             start = None
+    if start is not None and len(state_arr) > 0:
+        segments.append((start, len(state_arr) - 1, len(state_arr) - 1))
     return segments
 
 
@@ -659,7 +667,6 @@ def _build_cycle_sheet_df(
                 _cycle_positive_trades_pct(trades_df, cycle_trades)
             ),
         })
-
     if not rows:
         return result_empty
 
@@ -710,12 +717,18 @@ def _build_volume_cycle_sheet_df(
     volume_regime_raw = filter_diagnostics.get("volume_regime")
     median_rel_vol_raw = filter_diagnostics.get("median_relative_volume")
     block_reason_raw = filter_diagnostics.get("filter_block_reason")
+    cycle_initial_direction_raw = filter_diagnostics.get("cycle_initial_direction")
+    cycle_direction_gate_passed_raw = filter_diagnostics.get(
+        "cycle_direction_gate_passed"
+    )
 
     daily_reset_arr_raw: Optional[np.ndarray] = None
     time_filter_reset_arr_raw: Optional[np.ndarray] = None
     volume_regime_arr_raw: Optional[np.ndarray] = None
     median_rel_vol_arr_raw: Optional[np.ndarray] = None
     block_reason_arr_raw: Optional[np.ndarray] = None
+    cycle_initial_direction_arr_raw: Optional[np.ndarray] = None
+    cycle_direction_gate_passed_arr_raw: Optional[np.ndarray] = None
     if daily_reset_raw is not None:
         daily_reset_arr_raw = np.asarray(daily_reset_raw)
         if daily_reset_arr_raw.ndim == 0:
@@ -736,6 +749,20 @@ def _build_volume_cycle_sheet_df(
         block_reason_arr_raw = np.asarray(block_reason_raw, dtype=object)
         if block_reason_arr_raw.ndim == 0:
             block_reason_arr_raw = block_reason_arr_raw.reshape(1)
+    if cycle_initial_direction_raw is not None:
+        cycle_initial_direction_arr_raw = np.asarray(
+            cycle_initial_direction_raw, dtype=object
+        )
+        if cycle_initial_direction_arr_raw.ndim == 0:
+            cycle_initial_direction_arr_raw = cycle_initial_direction_arr_raw.reshape(1)
+    if cycle_direction_gate_passed_raw is not None:
+        cycle_direction_gate_passed_arr_raw = np.asarray(
+            cycle_direction_gate_passed_raw
+        )
+        if cycle_direction_gate_passed_arr_raw.ndim == 0:
+            cycle_direction_gate_passed_arr_raw = (
+                cycle_direction_gate_passed_arr_raw.reshape(1)
+            )
 
     n = min(len(df), len(state_arr), len(close), len(high), len(low))
     if daily_reset_arr_raw is not None:
@@ -748,6 +775,10 @@ def _build_volume_cycle_sheet_df(
         n = min(n, len(median_rel_vol_arr_raw))
     if block_reason_arr_raw is not None:
         n = min(n, len(block_reason_arr_raw))
+    if cycle_initial_direction_arr_raw is not None:
+        n = min(n, len(cycle_initial_direction_arr_raw))
+    if cycle_direction_gate_passed_arr_raw is not None:
+        n = min(n, len(cycle_direction_gate_passed_arr_raw))
     if n == 0:
         return result_empty
 
@@ -762,6 +793,16 @@ def _build_volume_cycle_sheet_df(
     )
     volume_regime_arr = volume_regime_arr_raw[:n] if volume_regime_arr_raw is not None else None
     block_reason_arr = block_reason_arr_raw[:n] if block_reason_arr_raw is not None else None
+    cycle_initial_direction_arr = (
+        cycle_initial_direction_arr_raw[:n]
+        if cycle_initial_direction_arr_raw is not None
+        else None
+    )
+    cycle_direction_gate_passed_arr = (
+        cycle_direction_gate_passed_arr_raw[:n]
+        if cycle_direction_gate_passed_arr_raw is not None
+        else None
+    )
     if median_rel_vol_arr_raw is not None:
         try:
             median_rel_vol_arr: Optional[np.ndarray] = np.asarray(
@@ -781,8 +822,28 @@ def _build_volume_cycle_sheet_df(
             direction = "+"
         elif state_at_start == "ACTIVE_SHORT":
             direction = "-"
+        elif state_at_start == "SUPPRESSED_LONG":
+            direction = "+"
+        elif state_at_start == "SUPPRESSED_SHORT":
+            direction = "-"
         else:
             direction = ""
+        cycle_initial_direction = _volume_cycle_initial_direction(
+            state_at_start,
+            start_bar,
+            cycle_initial_direction_arr,
+        )
+        cycle_trade_allowed = _volume_cycle_trade_allowed(
+            state_at_start,
+            start_bar,
+            cycle_direction_gate_passed_arr,
+        )
+        cycle_suppressed_reason = _volume_cycle_suppressed_reason(
+            state_at_start,
+            block_reason_arr,
+            start_bar,
+            last_active_bar,
+        )
 
         interval = slice(start_bar, end_bar + 1)
         interval_close = close[interval]
@@ -815,27 +876,30 @@ def _build_volume_cycle_sheet_df(
             max_drawdown_pct = float("nan")
 
         off_bar = end_bar
-        if (
-            daily_reset_arr is not None
-            and off_bar < len(daily_reset_arr)
-            and int(daily_reset_arr[off_bar]) == 1
-        ):
-            end_reason = "daily_reset"
-        elif (
-            time_filter_reset_arr is not None
-            and off_bar < len(time_filter_reset_arr)
-            and int(time_filter_reset_arr[off_bar]) == 1
-        ):
-            end_reason = "time_filter_reset"
-        elif block_reason_arr is not None and off_bar < len(block_reason_arr):
-            block_reason = block_reason_arr[off_bar]
-            end_reason = (
-                str(block_reason)
-                if not pd.isna(block_reason) and str(block_reason) != "none"
-                else "FSM_OFF"
-            )
+        if str(state_arr[off_bar]) != "OFF":
+            end_reason = "open_cycle"
         else:
-            end_reason = "FSM_OFF"
+            if (
+                daily_reset_arr is not None
+                and off_bar < len(daily_reset_arr)
+                and int(daily_reset_arr[off_bar]) == 1
+            ):
+                end_reason = "daily_reset"
+            elif (
+                time_filter_reset_arr is not None
+                and off_bar < len(time_filter_reset_arr)
+                and int(time_filter_reset_arr[off_bar]) == 1
+            ):
+                end_reason = "time_filter_reset"
+            elif block_reason_arr is not None and off_bar < len(block_reason_arr):
+                block_reason = block_reason_arr[off_bar]
+                end_reason = (
+                    str(block_reason)
+                    if not pd.isna(block_reason) and str(block_reason) != "none"
+                    else "FSM_OFF"
+                )
+            else:
+                end_reason = "FSM_OFF"
 
         vol_regime_start: Any = float("nan")
         if volume_regime_arr is not None and start_bar < len(volume_regime_arr):
@@ -850,7 +914,11 @@ def _build_volume_cycle_sheet_df(
         else:
             avg_median_vol = float("nan")
 
-        cycle_trades = _cycle_trades_for_segment(trades_df, start_bar, last_active_bar)
+        cycle_trades = (
+            []
+            if _volume_state_is_suppressed(state_at_start)
+            else _cycle_trades_for_segment(trades_df, start_bar, last_active_bar)
+        )
 
         rows.append({
             "Начало цикла": _excel_safe_datetime_value(index[start_bar]),
@@ -876,6 +944,11 @@ def _build_volume_cycle_sheet_df(
                 _cycle_positive_trades_pct(trades_df, cycle_trades)
             ),
         })
+        rows[-1].update({
+            "Cycle Initial Direction": cycle_initial_direction,
+            "Cycle Trade Allowed": cycle_trade_allowed,
+            "Cycle Suppressed Reason": cycle_suppressed_reason,
+        })
 
     if not rows:
         return result_empty
@@ -884,6 +957,57 @@ def _build_volume_cycle_sheet_df(
     result = result.sort_values("Start bar index", kind="stable").reset_index(drop=True)
     result["ID цикла"] = np.arange(1, len(result) + 1, dtype=np.int64)
     return result.loc[:, list(VOLUME_CYCLE_SHEET_COLUMNS)]
+
+
+def _volume_state_is_suppressed(state: str) -> bool:
+    return state in {"SUPPRESSED_LONG", "SUPPRESSED_SHORT"}
+
+
+def _volume_cycle_initial_direction(
+    state: str,
+    start_bar: int,
+    cycle_initial_direction_arr: Optional[np.ndarray],
+) -> str:
+    if cycle_initial_direction_arr is not None and start_bar < len(cycle_initial_direction_arr):
+        value = cycle_initial_direction_arr[start_bar]
+        if not pd.isna(value):
+            return str(value)
+    if state in {"ACTIVE_LONG", "SUPPRESSED_LONG"}:
+        return "long"
+    if state in {"ACTIVE_SHORT", "SUPPRESSED_SHORT"}:
+        return "short"
+    return "unknown"
+
+
+def _volume_cycle_trade_allowed(
+    state: str,
+    start_bar: int,
+    cycle_direction_gate_passed_arr: Optional[np.ndarray],
+) -> int:
+    if _volume_state_is_suppressed(state):
+        return 0
+    if cycle_direction_gate_passed_arr is not None and start_bar < len(cycle_direction_gate_passed_arr):
+        try:
+            return int(cycle_direction_gate_passed_arr[start_bar])
+        except (TypeError, ValueError):
+            return 0
+    return 1 if state in {"ACTIVE_LONG", "ACTIVE_SHORT"} else 0
+
+
+def _volume_cycle_suppressed_reason(
+    state: str,
+    block_reason_arr: Optional[np.ndarray],
+    start_bar: int,
+    last_active_bar: int,
+) -> str:
+    if not _volume_state_is_suppressed(state):
+        return ""
+    if block_reason_arr is not None:
+        for idx in range(start_bar, min(last_active_bar + 1, len(block_reason_arr))):
+            value = block_reason_arr[idx]
+            if not pd.isna(value) and str(value) != "none":
+                return str(value)
+    return "volume_cycle_direction_mismatch"
 
 
 def _write_cycle_sheet(writer: pd.ExcelWriter, cycle_df: pd.DataFrame) -> None:
@@ -1304,9 +1428,17 @@ def _build_filter_summary_block_df(period_results: List[PeriodResult]) -> Option
                         0,
                     ),
                 ),
+                "Volume Cycle Direction Mismatch Bars": ctr.get(
+                    "n_volume_cycle_direction_mismatch_blocked_bars",
+                    s.get("n_volume_cycle_direction_mismatch_blocked_bars", 0),
+                ),
                 "Volume Started Cycles": ctr.get(
                     "n_volume_started_cycles",
                     s.get("n_volume_started_cycles", 0),
+                ),
+                "Volume Suppressed Cycles": ctr.get(
+                    "n_volume_suppressed_cycles",
+                    s.get("n_volume_suppressed_cycles", 0),
                 ),
                 "Avg Median Relative Volume": ctr.get(
                     "avg_median_relative_volume",
@@ -1629,7 +1761,9 @@ def _build_filters_summary_df(period_results: List[PeriodResult]) -> Optional[pd
             "Volume Direction Warmup Blocks":  s.get("n_volume_direction_warmup_blocked_start_attempts", ctr.get("n_volume_direction_warmup_blocked_start_attempts", 0)),
             "Volume Unknown Direction Blocks": s.get("n_volume_unknown_direction_blocked_start_attempts", ctr.get("n_volume_unknown_direction_blocked_start_attempts", 0)),
             "Volume Trade Mode Direction Blocks": s.get("n_volume_trade_mode_disallowed_direction_blocked_start_attempts", ctr.get("n_volume_trade_mode_disallowed_direction_blocked_start_attempts", 0)),
+            "Volume Cycle Direction Mismatch Bars": s.get("n_volume_cycle_direction_mismatch_blocked_bars", ctr.get("n_volume_cycle_direction_mismatch_blocked_bars", 0)),
             "Volume Started Cycles":           s.get("n_volume_started_cycles", ctr.get("n_volume_started_cycles", 0)),
+            "Volume Suppressed Cycles":         s.get("n_volume_suppressed_cycles", ctr.get("n_volume_suppressed_cycles", 0)),
             "Avg Median Relative Volume":      s.get("avg_median_relative_volume", ctr.get("avg_median_relative_volume", None)),
         })
     period_df = pd.DataFrame(period_rows)

@@ -171,6 +171,9 @@ _EXCEL_PER_BAR_HEADERS_SNAPSHOT: dict = {
     "volume_condition_allowed":                 "Volume Condition Allowed",
     "volume_condition_block_reason":            "Volume Condition Block Reason",
     "volume_initial_direction":                 "Volume Initial Direction",
+    "cycle_initial_direction":                  "Cycle Initial Direction",
+    "cycle_direction_gate_enabled":             "Cycle Direction Gate Enabled",
+    "cycle_direction_gate_passed":              "Cycle Direction Gate Passed",
     "volume_regime":                            "Volume Regime",
 }
 
@@ -206,7 +209,8 @@ _EXCEL_SUMMARY_PERIOD_COLS_SNAPSHOT: list = [
     "Volume Blocked Starts", "Volume Warmup Blocks", "Volume Below Baseline",
     "Volume Above Baseline", "Volume Baseline Zero",
     "Volume Direction Warmup Blocks", "Volume Unknown Direction Blocks",
-    "Volume Trade Mode Direction Blocks", "Volume Started Cycles",
+    "Volume Trade Mode Direction Blocks", "Volume Cycle Direction Mismatch Bars",
+    "Volume Started Cycles", "Volume Suppressed Cycles",
     "Avg Median Relative Volume",
 ]
 
@@ -252,11 +256,13 @@ _STEP_LONG_FILTER_COLUMNS_SNAPSHOT = [
     "n_volume_direction_warmup_blocked_start_attempts",
     "n_volume_unknown_direction_blocked_start_attempts",
     "n_volume_trade_mode_disallowed_direction_blocked_start_attempts",
+    "n_volume_cycle_direction_mismatch_blocked_bars",
     "n_volume_low_regime_bars",
     "n_volume_normal_regime_bars",
     "n_volume_high_regime_bars",
     "avg_median_relative_volume",
     "n_volume_started_cycles",
+    "n_volume_suppressed_cycles",
 ]
 
 

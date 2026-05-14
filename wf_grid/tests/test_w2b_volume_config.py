@@ -4,6 +4,7 @@ from textwrap import dedent
 import pytest
 
 from supertrend_optimizer.core.trade_filter_config import (
+    _V3_INIT_FAILURE_KEYS,
     TradeFilterBaselineSessionConfig,
     TradeFilterVolumeConfig,
     build_trade_filter_config_from_raw,
@@ -26,6 +27,7 @@ def test_volume_config_defaults_include_aggregation_and_baseline_session():
 
     assert first.aggregation == "median"
     assert first.daily_reset is False
+    assert first.cycle_direction_gate is False
     assert first.exit_hysteresis_ratio is None
     assert first.exit_freeze_bars is None
     assert isinstance(first.baseline_session, TradeFilterBaselineSessionConfig)
@@ -39,6 +41,7 @@ def test_build_trade_filter_config_materializes_volume_aggregation_and_baseline_
     volume.update({
         "aggregation": "mean",
         "daily_reset": True,
+        "cycle_direction_gate": True,
         "exit_hysteresis_ratio": 1.8,
         "exit_freeze_bars": 10,
         "baseline_session": {
@@ -51,6 +54,7 @@ def test_build_trade_filter_config_materializes_volume_aggregation_and_baseline_
 
     assert cfg.volume.aggregation == "mean"
     assert cfg.volume.daily_reset is True
+    assert cfg.volume.cycle_direction_gate is True
     assert cfg.volume.exit_hysteresis_ratio == 1.8
     assert cfg.volume.exit_freeze_bars == 10
     assert cfg.volume.baseline_session.enabled is True
@@ -117,6 +121,22 @@ def test_valid_standalone_volume_daily_reset_passes_without_zigzag_payload():
 
     assert errors == []
     assert cfg.volume.daily_reset is True
+
+
+def test_valid_standalone_volume_cycle_direction_gate_passes_without_zigzag_payload():
+    raw = {
+        "enabled": True,
+        "zigzag": {"enabled": False},
+        "volume": {
+            **_valid_volume("volume_A"),
+            "cycle_direction_gate": True,
+        },
+    }
+
+    cfg, errors, _keys = _build_and_validate(raw)
+
+    assert errors == []
+    assert cfg.volume.cycle_direction_gate is True
 
 
 def test_valid_volume_b_config_passes_validation_with_explicit_optional_values():
@@ -210,6 +230,7 @@ def test_malformed_volume_enabled_is_rejected():
         ),
         ({"direction_lookback_bars": 0}, "trade_filter.volume.direction_lookback_bars must be int >= 1"),
         ({"daily_reset": "true"}, "trade_filter.volume.daily_reset must be bool"),
+        ({"cycle_direction_gate": "true"}, "trade_filter.volume.cycle_direction_gate must be bool"),
     ],
 )
 def test_invalid_volume_fields_are_rejected(patch, expected):
@@ -219,6 +240,24 @@ def test_invalid_volume_fields_are_rejected(patch, expected):
     _cfg, errors, _keys = _build_and_validate(_base_filter(volume))
 
     assert any(expected in error for error in errors)
+
+
+def test_volume_cycle_direction_gate_requires_standalone_volume_v1():
+    volume = _valid_volume()
+    volume["cycle_direction_gate"] = True
+
+    cfg, _errors, raw_user_keys = _build_and_validate(_base_filter(volume))
+    errors: list[str] = []
+    error_keys: list[str] = []
+
+    validate_trade_filter(cfg, errors, raw_user_keys, error_keys=error_keys)
+
+    assert errors == [
+        "trade_filter.volume.cycle_direction_gate=true requires "
+        "trade_filter.zigzag.enabled=false in v1"
+    ]
+    assert error_keys == ["cycle_direction_gate_requires_volume_only"]
+    assert "cycle_direction_gate_requires_volume_only" in _V3_INIT_FAILURE_KEYS
 
 
 @pytest.mark.parametrize("aggregation", ["median", "mean"])
@@ -363,6 +402,7 @@ def test_volume_aggregation_and_baseline_session_are_allowed_by_strict_schema():
             "enabled": True,
             "aggregation": "mean",
             "daily_reset": True,
+            "cycle_direction_gate": True,
             "exit_hysteresis_ratio": 1.8,
             "exit_freeze_bars": 10,
             "baseline_session": {
@@ -460,6 +500,7 @@ def test_wf_grid_loader_strict_schema_allows_volume_aggregation_and_baseline_ses
                 enabled: false
                 aggregation: mean
                 daily_reset: true
+                cycle_direction_gate: true
                 exit_hysteresis_ratio: 1.8
                 exit_freeze_bars: 10
                 baseline_session:
@@ -474,6 +515,7 @@ def test_wf_grid_loader_strict_schema_allows_volume_aggregation_and_baseline_ses
 
     assert cfg.trade_filter.volume.aggregation == "mean"
     assert cfg.trade_filter.volume.daily_reset is True
+    assert cfg.trade_filter.volume.cycle_direction_gate is True
     assert cfg.trade_filter.volume.exit_hysteresis_ratio == 1.8
     assert cfg.trade_filter.volume.exit_freeze_bars == 10
     assert cfg.trade_filter.volume.baseline_session.window == "09:00-19:00"
@@ -532,6 +574,7 @@ def test_repo_config_yaml_keeps_trade_filter_safe_default_disabled():
     assert cfg.trade_filter.enabled is False
     assert cfg.trade_filter.volume.enabled is False
     assert cfg.trade_filter.volume.aggregation == "median"
+    assert cfg.trade_filter.volume.cycle_direction_gate is False
     assert cfg.trade_filter.volume.baseline_session.enabled is False
     assert cfg.trade_filter.volume.baseline_session.window is None
 
@@ -602,6 +645,7 @@ def test_wf_grid_and_tester_loaders_accept_same_volume_mapping(tmp_path: Path):
     volume = {
         "enabled": True,
         "daily_reset": True,
+        "cycle_direction_gate": True,
         "mode": "volume_A",
         "aggregation": "mean",
         "short_window": 30,
@@ -658,5 +702,6 @@ def test_wf_grid_and_tester_loaders_accept_same_volume_mapping(tmp_path: Path):
     assert wf_volume.exit_freeze_bars == tester_volume.exit_freeze_bars == 10
     assert wf_volume.aggregation == tester_volume.aggregation == "mean"
     assert wf_volume.daily_reset is tester_volume.daily_reset is True
+    assert wf_volume.cycle_direction_gate is tester_volume.cycle_direction_gate is True
     assert wf_volume.baseline_session.enabled is tester_volume.baseline_session.enabled is True
     assert wf_volume.baseline_session.window == tester_volume.baseline_session.window == "09:00-19:00"

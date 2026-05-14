@@ -53,8 +53,10 @@ _VOLUME_SUMMARY_COLUMNS = [
     "n_volume_direction_warmup_blocked_start_attempts",
     "n_volume_unknown_direction_blocked_start_attempts",
     "n_volume_trade_mode_disallowed_direction_blocked_start_attempts",
+    "n_volume_cycle_direction_mismatch_blocked_bars",
     "avg_median_relative_volume",
     "n_volume_started_cycles",
+    "n_volume_suppressed_cycles",
 ]
 
 _ZIGZAG_ONLY_COLUMNS = {

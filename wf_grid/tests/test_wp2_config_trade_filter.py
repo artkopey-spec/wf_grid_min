@@ -1722,6 +1722,7 @@ class TestExitBImmediateOffFailureKeysRegistry:
 
     _FULL_EXPECTED_SNAPSHOT = frozenset({
         "candidate_entry_deprecated",
+        "cycle_direction_gate_requires_volume_only",
         "duration_gate_enabled_invalid_type",
         "duration_gate_max_bars_below_one",
         "duration_gate_max_bars_invalid_type",

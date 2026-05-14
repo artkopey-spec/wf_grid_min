@@ -33,6 +33,7 @@ class _VolumeCfg:
     enabled: bool = True
     mode: str = "volume_A"
     daily_reset: bool = False
+    cycle_direction_gate: bool = False
 
 
 @dataclass
@@ -337,6 +338,197 @@ def test_trade_mode_disallows_direction_blocks_start():
     )
 
 
+def test_cycle_direction_gate_false_preserves_legacy_volume_only_behavior():
+    result = _run(
+        trade_mode="long",
+        trend=np.array([1, 1, -1, -1, -1, -1], dtype=np.int64),
+        runtime=_runtime(direction=DIR_LONG),
+        cfg=_TradeFilter(volume=_VolumeCfg(cycle_direction_gate=False)),
+    )
+
+    assert result.filter_diagnostics["trade_filter_state"][0] == "ACTIVE_LONG"
+    assert result.filter_diagnostics["trade_filter_state"][2] == "OFF"
+    assert result.filter_diagnostics["filter_block_reason"][2] == "trade_mode_forced_exit"
+    assert result.filter_diagnostics["cycle_initial_direction"][0] == "long"
+    assert result.filter_diagnostics["cycle_direction_gate_enabled"][0] == 0
+    assert result.filter_diagnostics["cycle_direction_gate_passed"][0] == 1
+    assert result.filter_diagnostics["cycle_initial_direction"][2] == "unknown"
+    assert result.filter_diagnostics["cycle_direction_gate_passed"][2] == 0
+    assert result.positions.tolist() == [0, 1, 1, 0, 1, 1]
+
+    wrong_direction = _run(
+        trade_mode="long",
+        runtime=_runtime(direction=DIR_SHORT),
+        cfg=_TradeFilter(volume=_VolumeCfg(cycle_direction_gate=False)),
+    )
+
+    assert np.all(wrong_direction.positions == 0)
+    assert wrong_direction.filter_diagnostics["trade_filter_state"][0] == "OFF"
+    assert (
+        wrong_direction.filter_diagnostics["filter_block_reason"][0]
+        == "volume_trade_mode_disallowed_direction"
+    )
+
+
+def test_cycle_direction_gate_long_mode_short_cycle_stays_suppressed():
+    result = _run(
+        trade_mode="long",
+        runtime=_runtime(
+            direction=np.array(
+                [DIR_SHORT, DIR_SHORT, DIR_LONG, DIR_LONG, DIR_LONG, DIR_LONG],
+                dtype=np.int8,
+            )
+        ),
+        cfg=_TradeFilter(volume=_VolumeCfg(cycle_direction_gate=True)),
+    )
+
+    diag = result.filter_diagnostics
+    assert diag["trade_filter_state"].tolist() == ["SUPPRESSED_SHORT"] * 6
+    assert diag["filter_block_reason"].tolist() == [
+        "volume_cycle_direction_mismatch"
+    ] * 6
+    assert diag["cycle_initial_direction"].tolist() == ["short"] * 6
+    np.testing.assert_array_equal(
+        diag["cycle_direction_gate_enabled"], np.ones(6, dtype=np.int8)
+    )
+    np.testing.assert_array_equal(
+        diag["cycle_direction_gate_passed"], np.zeros(6, dtype=np.int8)
+    )
+    np.testing.assert_array_equal(result.positions, np.zeros(6, dtype=np.int8))
+
+
+def test_cycle_direction_gate_forbidden_opposite_flip_does_not_forced_exit():
+    result = _run(
+        trade_mode="long",
+        trend=np.array([1, 1, -1, -1, -1, -1], dtype=np.int64),
+        runtime=_runtime(direction=DIR_LONG),
+        cfg=_TradeFilter(volume=_VolumeCfg(cycle_direction_gate=True)),
+    )
+
+    diag = result.filter_diagnostics
+    assert diag["trade_filter_state"][2] == "ACTIVE_LONG"
+    assert diag["filter_block_reason"][2] == "volume_cycle_direction_mismatch"
+    assert "trade_mode_forced_exit" not in set(diag["filter_block_reason"].tolist())
+    assert result.positions.tolist() == [0, 1, 1, 1, 1, 1]
+
+
+def test_cycle_direction_gate_suppressed_cycle_ignores_all_st_flips():
+    result = _run(
+        trade_mode="long",
+        trend=np.array([1, -1, 1, -1, 1, -1], dtype=np.int64),
+        runtime=_runtime(direction=DIR_SHORT),
+        cfg=_TradeFilter(volume=_VolumeCfg(cycle_direction_gate=True)),
+    )
+
+    diag = result.filter_diagnostics
+    assert diag["trade_filter_state"].tolist() == ["SUPPRESSED_SHORT"] * 6
+    assert diag["cycle_initial_direction"].tolist() == ["short"] * 6
+    assert diag["filter_block_reason"].tolist() == [
+        "volume_cycle_direction_mismatch"
+    ] * 6
+    np.testing.assert_array_equal(result.positions, np.zeros(6, dtype=np.int8))
+
+
+def test_cycle_direction_gate_unknown_does_not_start_cycle_then_short_suppresses():
+    result = _run(
+        trade_mode="long",
+        runtime=_runtime(
+            direction=np.array(
+                [DIR_UNKNOWN, DIR_SHORT, DIR_SHORT, DIR_SHORT, DIR_SHORT, DIR_SHORT],
+                dtype=np.int8,
+            ),
+            lookback=1,
+        ),
+        cfg=_TradeFilter(volume=_VolumeCfg(cycle_direction_gate=True)),
+    )
+
+    diag = result.filter_diagnostics
+    assert diag["trade_filter_state"][0] == "OFF"
+    assert diag["filter_block_reason"][0] == "volume_direction_warmup"
+    assert diag["cycle_initial_direction"][0] == "unknown"
+    assert diag["trade_filter_state"][1] == "SUPPRESSED_SHORT"
+    assert diag["cycle_initial_direction"][1] == "short"
+    np.testing.assert_array_equal(result.positions, np.zeros(6, dtype=np.int8))
+
+
+def test_cycle_direction_gate_reversal_resets_suppressed_cycle_and_new_long_can_start():
+    result = _run(
+        trade_mode="long",
+        runtime=_runtime(
+            direction=np.array(
+                [DIR_SHORT, DIR_SHORT, DIR_LONG, DIR_LONG, DIR_LONG, DIR_LONG],
+                dtype=np.int8,
+            ),
+            relative=np.array([1.2, 1.2, 0.8, 1.2, 1.2, 1.2], dtype=np.float64),
+        ),
+        cfg=_TradeFilter(volume=_VolumeCfg(cycle_direction_gate=True)),
+    )
+
+    diag = result.filter_diagnostics
+    assert diag["trade_filter_state"][0] == "SUPPRESSED_SHORT"
+    assert diag["trade_filter_state"][2] == "OFF"
+    assert diag["cycle_initial_direction"][2] == "unknown"
+    assert diag["filter_block_reason"][2] == "volume_reversal"
+    assert diag["trade_filter_state"][3] == "ACTIVE_LONG"
+    assert diag["cycle_initial_direction"][3] == "long"
+    assert diag["cycle_direction_gate_passed"][3] == 1
+    assert result.positions.tolist() == [0, 0, 0, 0, 1, 1]
+
+
+def test_cycle_direction_gate_short_mode_forbidden_long_flip_does_not_forced_exit():
+    result = _run(
+        trade_mode="short",
+        trend=np.array([-1, -1, 1, 1, 1, 1], dtype=np.int64),
+        runtime=_runtime(direction=DIR_SHORT),
+        cfg=_TradeFilter(volume=_VolumeCfg(cycle_direction_gate=True)),
+    )
+
+    diag = result.filter_diagnostics
+    assert diag["trade_filter_state"][2] == "ACTIVE_SHORT"
+    assert diag["filter_block_reason"][2] == "volume_cycle_direction_mismatch"
+    assert "trade_mode_forced_exit" not in set(diag["filter_block_reason"].tolist())
+    assert result.positions.tolist() == [0, -1, -1, -1, -1, -1]
+
+
+@pytest.mark.parametrize(
+    ("trade_mode", "direction", "trend", "expected_state", "expected_positions"),
+    [
+        (
+            "both",
+            DIR_LONG,
+            np.array([1, 1, -1, -1, -1, -1], dtype=np.int64),
+            "ACTIVE_LONG",
+            [0, 1, 1, 1, 1, 1],
+        ),
+        (
+            "revers",
+            DIR_SHORT,
+            np.array([-1, -1, 1, 1, 1, 1], dtype=np.int64),
+            "ACTIVE_SHORT",
+            [0, -1, -1, -1, -1, -1],
+        ),
+    ],
+)
+def test_cycle_direction_gate_both_and_revers_cannot_flip_opposite_to_cycle(
+    trade_mode,
+    direction,
+    trend,
+    expected_state,
+    expected_positions,
+):
+    result = _run(
+        trade_mode=trade_mode,
+        trend=trend,
+        runtime=_runtime(direction=direction),
+        cfg=_TradeFilter(volume=_VolumeCfg(cycle_direction_gate=True)),
+    )
+
+    diag = result.filter_diagnostics
+    assert diag["trade_filter_state"][2] == expected_state
+    assert diag["filter_block_reason"][2] == "volume_cycle_direction_mismatch"
+    assert result.positions.tolist() == expected_positions
+
+
 @pytest.mark.parametrize("trade_mode", ["both", "revers"])
 def test_st_flip_switches_position_in_both_and_revers(trade_mode):
     result = _run(
@@ -347,6 +539,34 @@ def test_st_flip_switches_position_in_both_and_revers(trade_mode):
 
     assert result.filter_diagnostics["trade_filter_state"][2] == "ACTIVE_SHORT"
     assert result.positions[3] == -1
+
+
+@pytest.mark.parametrize("trade_mode", ["both", "revers"])
+def test_gate_false_cycle_initial_direction_stays_latched_after_allowed_flip(
+    trade_mode,
+):
+    result = _run(
+        trade_mode=trade_mode,
+        trend=np.array([1, 1, -1, -1, -1, -1], dtype=np.int64),
+        runtime=_runtime(
+            direction=DIR_LONG,
+            relative=np.array([1.2, 1.2, 1.2, 1.2, 0.8, 1.2], dtype=np.float64),
+        ),
+        cfg=_TradeFilter(volume=_VolumeCfg(cycle_direction_gate=False)),
+    )
+
+    diag = result.filter_diagnostics
+    assert diag["trade_filter_state"][0] == "ACTIVE_LONG"
+    assert diag["trade_filter_state"][2] == "ACTIVE_SHORT"
+    assert diag["filter_block_reason"][4] == "volume_reversal"
+    assert diag["cycle_initial_direction"].tolist() == [
+        "long",
+        "long",
+        "long",
+        "long",
+        "unknown",
+        "long",
+    ]
 
 
 @pytest.mark.parametrize(

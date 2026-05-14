@@ -169,11 +169,13 @@ _VOLUME_FILTER_SUMMARY_COLUMNS: List[str] = [
     "n_volume_direction_warmup_blocked_start_attempts",
     "n_volume_unknown_direction_blocked_start_attempts",
     "n_volume_trade_mode_disallowed_direction_blocked_start_attempts",
+    "n_volume_cycle_direction_mismatch_blocked_bars",
     "n_volume_low_regime_bars",
     "n_volume_normal_regime_bars",
     "n_volume_high_regime_bars",
     "avg_median_relative_volume",
     "n_volume_started_cycles",
+    "n_volume_suppressed_cycles",
 ]
 
 _FILTER_SUMMARY_COLUMNS: List[str] = (

@@ -46,6 +46,9 @@ _BLOCK_REASON_TO_DECISION: Dict[str, str] = {
     "volume_trade_mode_disallowed_direction": (
         "entry_blocked_volume_trade_mode_disallowed_direction"
     ),
+    "volume_cycle_direction_mismatch": (
+        "entry_blocked_volume_cycle_direction_mismatch"
+    ),
     "volume_warmup":                "entry_blocked_volume_warmup",
     "volume_baseline_zero":         "entry_blocked_volume_baseline_zero",
     "volume_below_baseline":        "entry_blocked_volume_below_baseline",

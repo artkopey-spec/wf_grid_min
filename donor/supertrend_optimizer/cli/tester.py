@@ -240,6 +240,15 @@ Examples:
         default=None,
         help="Periods per year for annualization: integer or 'auto' (can be set in config.yaml)"
     )
+
+    parser.add_argument(
+        "--exact-output-path",
+        action="store_true",
+        help=(
+            "Write exactly to --out instead of adding the legacy test_ timestamp "
+            "prefix/suffix. Intended for batch runners."
+        ),
+    )
     
     return parser.parse_args(args)
 
@@ -259,7 +268,20 @@ def validate_paths(csv_path: str, output_path: str) -> None:
     csv_file = Path(csv_path)
     if not csv_file.exists():
         raise FileNotFoundError(f"Input CSV file not found: {csv_path}")
-    
+
+    validate_output_path(output_path)
+
+
+def validate_output_path(output_path: str) -> None:
+    """
+    Validate output file path.
+
+    Args:
+        output_path: Path to output Excel file
+
+    Raises:
+        ValueError: If output directory does not exist
+    """
     output_file = Path(output_path)
     output_dir = output_file.parent
     if output_dir != Path('.') and not output_dir.exists():
@@ -593,18 +615,24 @@ def merge_cli_and_config(
     }
 
 
-def run_backtest(args: argparse.Namespace) -> str:
+def run_backtest_with_df(
+    args: argparse.Namespace,
+    df: pd.DataFrame,
+    *,
+    csv_path_for_metadata: str,
+) -> str:
     """
-    Run the backtest pipeline.
-    
+    Run the backtest pipeline using an already loaded and OHLC-validated DataFrame.
+
     Args:
         args: Parsed command line arguments
-        
+        df: OHLC DataFrame that was already loaded and validated by caller
+        csv_path_for_metadata: CSV path to use in logs and exported metadata
+
     Returns:
         Path to the output file
     """
-    # Validate paths
-    validate_paths(args.csv, args.out)
+    validate_output_path(args.out)
 
     # Load config (single read of YAML when a file is given — snapshot + normalize)
     config_yaml_snapshot: Optional[Dict[str, Any]] = None
@@ -617,9 +645,6 @@ def run_backtest(args: argparse.Namespace) -> str:
     # Merge CLI and config
     params = merge_cli_and_config(args, config)
 
-    # Load and validate data
-    df = load_ohlc_csv(args.csv)
-    df = validate_ohlc_data(df)
     df = validate_volume_filter_data(df, params.get("trade_filter"))
 
     tf_cfg = params.get("trade_filter")
@@ -677,7 +702,7 @@ def run_backtest(args: argparse.Namespace) -> str:
     n_parts = params["segmentation"]["n_parts"]
     run_metadata_common: Dict[str, Any] = {
         "config_path": str(Path(args.config).resolve()) if args.config else "",
-        "csv_path": str(Path(args.csv).resolve()),
+        "csv_path": str(Path(csv_path_for_metadata).resolve()),
         "output_path_requested": str(Path(args.out)),
         "segmentation": {
             "mode": seg_mode,
@@ -693,7 +718,7 @@ def run_backtest(args: argparse.Namespace) -> str:
     }
 
     print(f"\nRunning backtest...")
-    print(f"  CSV: {args.csv}")
+    print(f"  CSV: {csv_path_for_metadata}")
     print(f"  ATR period: {params['atr_period']}")
     print(f"  Multiplier: {params['multiplier']}")
     print(f"  Mode: {params['trade_mode']}")
@@ -705,6 +730,8 @@ def run_backtest(args: argparse.Namespace) -> str:
     print(f"  Segmentation mode: {seg_mode}")
     if seg_mode == "equal_blocks":
         print(f"  n_parts: {n_parts}")
+
+    add_export_timestamp = not getattr(args, "exact_output_path", False)
 
     if seg_mode == "equal_blocks":
         segment_results = run_equal_blocks(
@@ -739,6 +766,7 @@ def run_backtest(args: argparse.Namespace) -> str:
             args.out,
             config_yaml_snapshot=config_yaml_snapshot,
             run_metadata=run_metadata_export,
+            add_timestamp=add_export_timestamp,
         )
 
     else:
@@ -820,11 +848,34 @@ def run_backtest(args: argparse.Namespace) -> str:
             export_false_start=params["export"]["false_start"],
             export_cycle=params["export"]["cycle"],
             export_trades=params["export"]["trades"],
+            add_timestamp=add_export_timestamp,
         )
 
     print(f"\n[SUCCESS] Results exported to: {actual_output}")
 
     return actual_output
+
+
+def run_backtest(args: argparse.Namespace) -> str:
+    """
+    Run the backtest pipeline.
+
+    Args:
+        args: Parsed command line arguments
+
+    Returns:
+        Path to the output file
+    """
+    validate_paths(args.csv, args.out)
+
+    df = load_ohlc_csv(args.csv)
+    df = validate_ohlc_data(df)
+
+    return run_backtest_with_df(
+        args,
+        df,
+        csv_path_for_metadata=args.csv,
+    )
 
 
 def main(args=None) -> None:

@@ -1970,6 +1970,7 @@ def export_tester_results(
     export_false_start: bool = True,
     export_cycle: bool = True,
     export_trades: bool = True,
+    add_timestamp: bool = True,
 ) -> str:
     """
     Export tester results to Excel file.
@@ -1989,7 +1990,7 @@ def export_tester_results(
 
     Args:
         period_results: List of PeriodResult for 100%, 75%, 50%, 33%, 25%.
-        output_path: Path to output Excel file (timestamp will be added).
+        output_path: Path to output Excel file.
         signals_df: Optional DataFrame from ``build_signal_events()``.
         false_start_max_bars: False-start threshold (bars_held < N).
         trade_filter_config: Optional TradeFilterConfig. None → disabled path.
@@ -1997,11 +1998,14 @@ def export_tester_results(
         config_yaml_snapshot: Raw mapping from ``load_config`` (sheet ``Tester_Config`` / ``config_file``).
         run_metadata: Runtime fields (paths, ``resolved_periods_per_year``,
             ``warmup_period_resolved``, ``warmup_period_effective``, …). The exporter appends ``output_path_actual``.
+        add_timestamp: When True, preserve legacy timestamped TEST naming.
+            When False, write exactly to ``output_path``.
 
     Returns:
-        Actual output path used (with TEST timestamp).
+        Actual output path used.
     """
-    output_path = add_test_timestamp_to_filename(output_path)
+    if add_timestamp:
+        output_path = add_test_timestamp_to_filename(output_path)
     run_metadata_payload: Dict[str, Any] = dict(run_metadata or {})
     # output_path_actual is NOT auto-injected here; callers that need it (e.g.
     # the CLI) should pass it explicitly in run_metadata so that two independent
@@ -2211,6 +2215,7 @@ def export_equal_blocks_results(
     output_path: str,
     config_yaml_snapshot: Optional[Dict[str, Any]] = None,
     run_metadata: Optional[Dict[str, Any]] = None,
+    add_timestamp: bool = True,
 ) -> str:
     """
     Export equal_blocks segmentation results to Excel.
@@ -2218,8 +2223,10 @@ def export_equal_blocks_results(
     Phase 2: filter is not supported in equal_blocks (rejected upstream by
     run_equal_blocks / config gate). Sheet ``Tester_Config`` (first) carries
     the raw YAML snapshot and ``run_metadata`` when provided.
+    ``add_timestamp=False`` writes exactly to ``output_path`` for batch runners.
     """
-    output_path = _add_eqblk_timestamp_to_filename(output_path)
+    if add_timestamp:
+        output_path = _add_eqblk_timestamp_to_filename(output_path)
     run_metadata_payload: Dict[str, Any] = dict(run_metadata or {})
     # output_path_actual is NOT auto-injected; set it in run_metadata from the caller.
 

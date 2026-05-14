@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 from openpyxl import load_workbook
@@ -98,6 +100,37 @@ def test_tester_config_empty_yaml_root_mapping_note(tmp_path):
         wb.close()
 
 
+def test_export_tester_results_exact_output_path_opt_in(tmp_path):
+    out = tmp_path / "exact.xlsx"
+
+    actual = excel_tester.export_tester_results(
+        _minimal_period_results(),
+        str(out),
+        signals_df=None,
+        add_timestamp=False,
+    )
+
+    assert Path(actual) == out
+    assert out.exists()
+    assert not list(tmp_path.glob("test_exact_*.xlsx"))
+
+
+def test_export_tester_results_legacy_timestamp_default(tmp_path):
+    out = tmp_path / "legacy.xlsx"
+
+    actual = excel_tester.export_tester_results(
+        _minimal_period_results(),
+        str(out),
+        signals_df=None,
+    )
+
+    actual_path = Path(actual)
+    assert actual_path.parent == tmp_path
+    assert actual_path.name.startswith("test_legacy_")
+    assert actual_path.exists()
+    assert not out.exists()
+
+
 def test_tester_config_equal_blocks_first_sheet(tmp_path):
     seg = SegmentResult(
         segment_label="S1",
@@ -140,3 +173,36 @@ def test_tester_config_equal_blocks_first_sheet(tmp_path):
         assert flat[("run", "warmup_period_effective")] == "4"
     finally:
         wb.close()
+
+
+def test_equal_blocks_exact_output_path_opt_in(tmp_path):
+    seg = SegmentResult(
+        segment_label="S1",
+        segment_index=0,
+        n_parts=3,
+        range_label="0-33%",
+        start_bar=0,
+        end_bar=10,
+        n_bars=10,
+        prepend_bars=0,
+        atr_period=14,
+        multiplier=3.0,
+        trade_mode="revers",
+        commission=0.0,
+        segment_metrics={"sum_pnl_pct": 0.0, "num_trades": 0},
+        segment_trades_df=None,
+        start_date=None,
+        end_date=None,
+        ext_slice_effective_warmup=4,
+    )
+    out = tmp_path / "eq_exact.xlsx"
+
+    actual = excel_tester.export_equal_blocks_results(
+        [seg],
+        str(out),
+        add_timestamp=False,
+    )
+
+    assert Path(actual) == out
+    assert out.exists()
+    assert not list(tmp_path.glob("test_eq_exact_eqblk_*.xlsx"))

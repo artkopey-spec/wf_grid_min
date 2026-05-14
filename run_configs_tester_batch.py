@@ -82,6 +82,7 @@ def build_command(
         str(config_path.resolve()),
         "--out",
         str(output_path.resolve()),
+        "--exact-output-path",
     ]
 
 

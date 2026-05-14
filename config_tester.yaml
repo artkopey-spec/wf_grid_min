@@ -1,12 +1,7 @@
 # Tester-compatible config, aligned with the equivalent parameters in config.yaml.
-# WF-only sections from config.yaml (data.file_path, optimization ranges, gates,
-# ranking, scoring, status, bucket, execution) are intentionally not copied here:
-# Tester CLI rejects unknown root keys.
+# Variant: daily_reset=false, exit_freeze_bars=10, exit_hysteresis_ratio=2.2.
 
 supertrend:
-  # Tester needs one fixed ATR/multiplier. The main config has grid ranges:
-  # optimization.atr_period_range: [20, 90]
-  # optimization.multiplier_range: [1.0, 9.0]
   atr_period: 20
   multiplier: 1.0
 
@@ -30,48 +25,20 @@ early_exit:
 segmentation:
   mode: legacy
   n_parts: 7
-# segmentation.mode: legacy
 
 export:
   diagnostics: true
-  signals: true
-  false_start: true
+  signals: false
+  false_start: false
   cycle: true
-  trades: true
+  trades: false
   false_start_max_bars: 4
 
 trade_filter:
   enabled: true
-  # Volume-only mode: ZigZag is intentionally disabled below.
-  # type: zigzag_st_mode
 
   zigzag:
     enabled: false
-    # global_stats_source: full_dataset
-    # leg_height_mode: pct
-    # reversal_threshold: 0.0005
-    # candidate_trigger_threshold: auto
-    # candidate_trigger_quantile: 0.80
-    # global_median: auto
-    # local_window: 5
-    # daily_reset: false
-    # mode: A
-    # candidate_duration_gate:
-    #   enabled: true
-    #   max_bars: 30
-
-  # ZigZag lifecycle is kept here as a commented template only.
-  # lifecycle:
-  #   freeze_confirmed_legs: 5
-  #   stop_check: confirm_bar_only
-  #   stopping_exit: opposite_st_flip
-  #   exit_off_mode: "exit B"
-  #   exit_off_zz_leg_count: 5
-
-  # ZigZag-specific diagnostics are disabled in volume-only mode.
-  # diagnostics:
-  #   export_state_columns: true
-  #   export_trigger_columns: true
 
   time_filter:
     enabled: false
@@ -79,7 +46,7 @@ trade_filter:
 
   volume:
     enabled: true
-    daily_reset: true
+    daily_reset: false
     mode: volume_A
     aggregation: mean
     short_window: 30

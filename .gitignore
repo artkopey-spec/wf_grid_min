@@ -6,3 +6,7 @@ __pycache__/
 *.txt
 !docs/volume_filter_implementation_plan_tz_v5.txt
 *.yaml
+*.log
+results/
+results tester/
+!results tester/.gitkeep

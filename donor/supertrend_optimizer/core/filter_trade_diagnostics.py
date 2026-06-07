@@ -31,6 +31,7 @@ def attach_trade_filter_diagnostics(
     imm_triggered_arr = filter_diagnostics.get("exit_b_immediate_off_triggered")
     volume_reason_arr = filter_diagnostics.get("volume_condition_block_reason")
     block_reason_arr = filter_diagnostics.get("filter_block_reason")
+    wakeup_exit_reason_arr = filter_diagnostics.get("wakeup_exit_reason")
 
     n_diag = len(state_arr)
     pending_exit_idx = n_diag - 1
@@ -66,13 +67,19 @@ def attach_trade_filter_diagnostics(
         reset_at_exit = _flag_at(daily_reset_arr, exit_signal_idx)
         time_reset_at_exit = _flag_at(time_reset_arr, exit_signal_idx)
         imm_at_exit = _flag_at(imm_triggered_arr, exit_signal_idx)
+        wakeup_exit_reason = _wakeup_exit_reason_at(
+            wakeup_exit_reason_arr,
+            exit_signal_idx,
+        )
         block_at_exit = (
             str(block_reason_arr[exit_signal_idx])
             if block_reason_arr is not None and exit_signal_idx < len(block_reason_arr)
             else "none"
         )
 
-        if reset_at_exit:
+        if wakeup_exit_reason is not None:
+            exit_reasons.append(wakeup_exit_reason)
+        elif reset_at_exit:
             exit_reasons.append("filter_daily_reset")
         elif time_reset_at_exit:
             exit_reasons.append("filter_time_reset")
@@ -100,6 +107,17 @@ def attach_trade_filter_diagnostics(
 
 def _flag_at(arr: Any, idx: int) -> bool:
     return arr is not None and idx < len(arr) and int(arr[idx]) == 1
+
+
+def _wakeup_exit_reason_at(arr: Any, idx: int) -> str | None:
+    if arr is None or idx >= len(arr):
+        return None
+    return {
+        "ttl": "wakeup_exit_ttl",
+        "no_fresh_candidate": "wakeup_exit_no_fresh_candidate",
+        "reset": "wakeup_exit_reset",
+        "opposite_st_flip": "wakeup_exit_opposite_st_flip",
+    }.get(str(arr[idx]))
 
 
 __all__ = ["attach_trade_filter_diagnostics"]

@@ -202,6 +202,16 @@ from supertrend_optimizer.core.trade_filter_config import (  # noqa: E402,F401
     TradeFilterTimeFilterConfig,
     TradeFilterBaselineSessionConfig,
     TradeFilterVolumeConfig,
+    TradeFilterWakeupRegimeConfig,
+    TradeFilterWakeupEntryConfig,
+    TradeFilterWakeupCandidateHeightConfig,
+    TradeFilterWakeupCandidateAgeConfig,
+    TradeFilterWakeupAtrExpansionConfig,
+    TradeFilterWakeupVolumeExpansionConfig,
+    TradeFilterWakeupExitConfig,
+    TradeFilterWakeupTtlExitConfig,
+    TradeFilterWakeupNoFreshCandidateExitConfig,
+    TradeFilterWakeupExitActionConfig,
     resolve_zigzag_mode,
 )
 

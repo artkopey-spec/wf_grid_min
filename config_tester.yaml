@@ -12,7 +12,7 @@ supertrend:
   atr_period: 20
   multiplier: 1.0
 
-trade_mode: long
+trade_mode: revers
 
 commission: 0.0
 
@@ -38,11 +38,11 @@ segmentation:
 
 # Все диагностические и вспомогательные листы экспорта.
 export:
-  diagnostics: true
-  signals: true
-  false_start: true
+  diagnostics: false
+  signals: false
+  false_start: false
   cycle: true
-  trades: true
+  trades: false
   false_start_max_bars: 4
 
 trade_filter:
@@ -57,7 +57,7 @@ trade_filter:
 
   volume:
     enabled: true
-    daily_reset: false
+    daily_reset: true
     cycle_direction_gate: false
     mode: volume_A
     aggregation: mean

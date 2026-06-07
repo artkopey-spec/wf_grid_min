@@ -1,0 +1,71 @@
+supertrend:
+  atr_period: 20
+  multiplier: 1.0
+
+trade_mode: revers
+commission: 0.0
+
+warmup_period: 0
+warmup_period_auto: true
+
+period: true
+periods_per_year: 252
+annualization_basis: trading
+execution_model: open_to_open
+min_trades_required: 1
+
+early_exit:
+  enabled: false
+  max_drawdown: 0.5
+  check_bars: 50
+
+segmentation:
+  mode: legacy
+  n_parts: 7
+
+export:
+  diagnostics: true
+  signals: true
+  false_start: false
+  cycle: true
+  trades: true
+  false_start_max_bars: 4
+
+trade_filter:
+  enabled: true
+  type: zigzag_st_mode
+
+  zigzag:
+    enabled: true
+    mode: D
+    reversal_threshold: 0.005
+    candidate_trigger_threshold: 0.012
+    local_window: 5
+    global_stats_source: full_dataset
+
+  lifecycle:
+    freeze_confirmed_legs: 3
+    stop_check: confirm_bar_only
+    stopping_exit: opposite_st_flip
+    exit_off_mode: "exit C"
+
+  wakeup_regime:
+    enabled: true
+    entry:
+      candidate_height:
+        enabled: true
+        quantile: 0.50
+      candidate_age:
+        enabled: false
+      atr_expansion:
+        enabled: false
+      volume_expansion:
+        enabled: false
+    exit:
+      ttl:
+        enabled: true
+        bars: 45
+      no_fresh_candidate:
+        enabled: false
+      action:
+        mode: close_position

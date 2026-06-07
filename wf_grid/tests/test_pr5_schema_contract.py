@@ -175,6 +175,28 @@ _EXCEL_PER_BAR_HEADERS_SNAPSHOT: dict = {
     "cycle_direction_gate_enabled":             "Cycle Direction Gate Enabled",
     "cycle_direction_gate_passed":              "Cycle Direction Gate Passed",
     "volume_regime":                            "Volume Regime",
+    # Wakeup Regime Mode D diagnostics.
+    "wakeup_regime_active":                     "Wakeup Regime Active",
+    "wakeup_entry_all_ok":                      "Wakeup Entry All OK",
+    "wakeup_entry_candidate_height_ok":         "Wakeup Entry Candidate Height OK",
+    "wakeup_entry_candidate_age_ok":            "Wakeup Entry Candidate Age OK",
+    "wakeup_entry_candidate_direction_ok":      "Wakeup Entry Candidate Direction OK",
+    "wakeup_entry_trade_mode_ok":               "Wakeup Entry Trade Mode OK",
+    "wakeup_entry_atr_ok":                      "Wakeup Entry ATR OK",
+    "wakeup_entry_volume_ok":                   "Wakeup Entry Volume OK",
+    "wakeup_entry_candidate_height_value":      "Wakeup Entry Candidate Height Value",
+    "wakeup_entry_candidate_height_threshold":  "Wakeup Entry Candidate Height Threshold",
+    "wakeup_entry_candidate_age_bars":          "Wakeup Entry Candidate Age Bars",
+    "wakeup_entry_candidate_leg_direction":     "Wakeup Entry Candidate Leg Direction",
+    "wakeup_entry_atr_ratio":                   "Wakeup Entry ATR Ratio",
+    "wakeup_entry_volume_ratio":                "Wakeup Entry Volume Ratio",
+    "wakeup_cycle_age_bars":                    "Wakeup Cycle Age Bars",
+    "wakeup_bars_since_fresh_candidate":        "Wakeup Bars Since Fresh Candidate",
+    "wakeup_exit_ttl_triggered":                "Wakeup Exit TTL Triggered",
+    "wakeup_exit_no_fresh_candidate_triggered": "Wakeup Exit No Fresh Candidate Triggered",
+    "wakeup_exit_close_triggered":              "Wakeup Exit Close Triggered",
+    "wakeup_exit_action_mode":                  "Wakeup Exit Action Mode",
+    "wakeup_exit_reason":                       "Wakeup Exit Reason",
 }
 
 # EXCEL_SUMMARY_LABELS: ordered params labels and period column set (§14.5 / §8.2).

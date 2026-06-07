@@ -31,7 +31,6 @@ from __future__ import annotations
 import inspect
 import math
 import re
-from pathlib import Path
 from typing import List
 
 import numpy as np
@@ -421,7 +420,7 @@ class TestCloseOnlyAntiDrift:
             "close", "reversal_threshold", "local_window", "daily_reset_event",
         ]
 
-    def test_module_executable_lines_have_no_high_low_hlc3_ohlc4(self):
+    def test_close_only_executable_lines_have_no_high_low_hlc3_ohlc4(self):
         """Mirror of the WP3 grep gate — the close-only formula path must
         not reference ``high`` / ``low`` / ``hlc3`` / ``ohlc4`` in
         executable code.  Module / function docstrings are stripped before
@@ -429,7 +428,12 @@ class TestCloseOnlyAntiDrift:
         """
         import supertrend_optimizer.core.zigzag_st_filter as zzmod
 
-        text = Path(zzmod.__file__).read_text(encoding="utf-8")
+        close_only_functions = (
+            zzmod.detect_confirmed_legs_close_only,
+            zzmod.compute_confirmed_legs_reset_aware,
+            zzmod.compute_zigzag_per_bar,
+        )
+        text = "\n".join(inspect.getsource(fn) for fn in close_only_functions)
         # Strip all triple-quoted strings (module / class / function
         # docstrings).
         stripped = re.sub(

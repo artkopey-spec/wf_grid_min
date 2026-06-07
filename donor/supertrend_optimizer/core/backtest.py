@@ -323,6 +323,7 @@ def run_backtest_fast(
     volume_runtime: Any = None,
     global_offset: int = 0,
     index: Any = None,                        # NEW: trailing optional for daily_reset
+    volume: Any = None,
 ) -> RawBacktestArtifacts:
     """Run fast backtest without DataFrame overhead.
 
@@ -430,10 +431,13 @@ def run_backtest_fast(
             trade_filter_config=trade_filter_config,
             zigzag_global_stats=zigzag_global_stats,
             open_prices=open_prices,
+            high=high,
+            low=low,
             global_offset=global_offset,
             execution_model=execution_model,
             index=index,                      # NEW: propogate for daily_reset
             volume_runtime=volume_runtime if volume_enabled else None,
+            volume=volume,
         )
         positions = filter_result.positions
         filter_diagnostics = filter_result.filter_diagnostics

@@ -425,6 +425,87 @@ def _count_rising_edges(mask: np.ndarray) -> int:
     return starts
 
 
+def _build_wakeup_summary_fields(
+    trade_filter_config: Any,
+    zigzag_global_stats: Any,
+    filter_diagnostics: Dict[str, np.ndarray],
+) -> Dict[str, Any]:
+    wakeup = getattr(trade_filter_config, "wakeup_regime", None)
+    entry = getattr(wakeup, "entry", None) if wakeup is not None else None
+    exit_cfg = getattr(wakeup, "exit", None) if wakeup is not None else None
+    candidate_height = (
+        getattr(entry, "candidate_height", None) if entry is not None else None
+    )
+    candidate_age = (
+        getattr(entry, "candidate_age", None) if entry is not None else None
+    )
+    atr = getattr(entry, "atr_expansion", None) if entry is not None else None
+    volume = (
+        getattr(entry, "volume_expansion", None) if entry is not None else None
+    )
+    ttl = getattr(exit_cfg, "ttl", None) if exit_cfg is not None else None
+    no_fresh = (
+        getattr(exit_cfg, "no_fresh_candidate", None)
+        if exit_cfg is not None else None
+    )
+    action = getattr(exit_cfg, "action", None) if exit_cfg is not None else None
+
+    trigger_source = np.asarray(
+        filter_diagnostics.get("trade_filter_trigger_source", []), dtype=object
+    )
+    exit_reason = np.asarray(
+        filter_diagnostics.get("wakeup_exit_reason", []), dtype=object
+    )
+
+    def _sum_int8(key: str) -> int:
+        arr = filter_diagnostics.get(key)
+        return int(np.sum(np.asarray(arr) == 1)) if arr is not None else 0
+
+    return {
+        "wakeup_enabled": bool(getattr(wakeup, "enabled", False)),
+        "wakeup_exit_action_mode": str(getattr(action, "mode", "") or ""),
+        "wakeup_starts_count": int(np.sum(trigger_source == "wakeup_regime")),
+        "wakeup_entry_attempts_count": _sum_int8("wakeup_entry_all_ok"),
+        "wakeup_exit_ttl_count": _sum_int8("wakeup_exit_ttl_triggered"),
+        "wakeup_exit_no_fresh_candidate_count": _sum_int8(
+            "wakeup_exit_no_fresh_candidate_triggered"
+        ),
+        "wakeup_exit_close_count": _sum_int8("wakeup_exit_close_triggered"),
+        "wakeup_exit_reset_count": int(np.sum(exit_reason == "reset")),
+        "wakeup_exit_opposite_st_flip_count": int(
+            np.sum(exit_reason == "opposite_st_flip")
+        ),
+        "wakeup_bars_active": _sum_int8("wakeup_regime_active"),
+        "wakeup_entry_candidate_height_threshold": getattr(
+            zigzag_global_stats, "wakeup_entry_candidate_height_threshold", None
+        ),
+        "wakeup_no_fresh_candidate_height_threshold": getattr(
+            zigzag_global_stats,
+            "wakeup_no_fresh_candidate_height_threshold",
+            None,
+        ),
+        "wakeup_entry_candidate_height_quantile": getattr(
+            candidate_height, "quantile", None
+        ),
+        "wakeup_no_fresh_candidate_quantile": getattr(no_fresh, "quantile", None),
+        "wakeup_candidate_age_max_bars": getattr(candidate_age, "max_bars", None),
+        "wakeup_atr_short_window": getattr(atr, "short_window", None),
+        "wakeup_atr_long_window": getattr(atr, "long_window", None),
+        "wakeup_atr_min_ratio": getattr(atr, "min_ratio", None),
+        "wakeup_volume_short_window": getattr(volume, "short_window", None),
+        "wakeup_volume_baseline_window": getattr(volume, "baseline_window", None),
+        "wakeup_volume_min_ratio": getattr(volume, "min_ratio", None),
+        "wakeup_ttl_bars": getattr(ttl, "bars", None),
+        "wakeup_no_fresh_max_age_bars": getattr(no_fresh, "max_age_bars", None),
+        "wakeup_no_fresh_timeout_bars": getattr(no_fresh, "timeout_bars", None),
+        "trigger_count_candidate_threshold": 0,
+        "trigger_count_confirmed_median": 0,
+        "trigger_count_both": 0,
+        "median_stop_triggered_count": 0,
+        "zz_leg_stop_triggered_count": 0,
+    }
+
+
 def _build_filter_diagnostics_summary(
     result: BacktestResult,
     trade_filter_config: Any,
@@ -484,6 +565,36 @@ def _build_filter_diagnostics_summary(
     )
     gate_max_bars = getattr(zigzag_global_stats, "candidate_duration_max_bars", None)
     gate_max_bars_out = int(gate_max_bars) if gate_max_bars is not None else -1
+    wakeup_fields: Dict[str, Any] = {}
+    if zigzag_mode == "D":
+        counters["median_stop_triggered"] = 0
+        counters["zz_leg_stop_triggered"] = 0
+        wakeup_fields = _build_wakeup_summary_fields(
+            trade_filter_config,
+            zigzag_global_stats,
+            result.filter_diagnostics,
+        )
+        thresholds.update(
+            {
+                k: wakeup_fields[k]
+                for k in (
+                    "wakeup_entry_candidate_height_threshold",
+                    "wakeup_no_fresh_candidate_height_threshold",
+                    "wakeup_entry_candidate_height_quantile",
+                    "wakeup_no_fresh_candidate_quantile",
+                    "wakeup_candidate_age_max_bars",
+                    "wakeup_atr_short_window",
+                    "wakeup_atr_long_window",
+                    "wakeup_atr_min_ratio",
+                    "wakeup_volume_short_window",
+                    "wakeup_volume_baseline_window",
+                    "wakeup_volume_min_ratio",
+                    "wakeup_ttl_bars",
+                    "wakeup_no_fresh_max_age_bars",
+                    "wakeup_no_fresh_timeout_bars",
+                )
+            }
+        )
 
     return {
         "mode": "zigzag_st_mode",
@@ -507,6 +618,7 @@ def _build_filter_diagnostics_summary(
         "global_offset": global_offset,
         "counters": counters,
         "bars_in_state": bars_in_state,
+        **wakeup_fields,
         **volume_counters,
     }
 
@@ -598,6 +710,7 @@ def run_period(
     high = df["high"].values
     low = df["low"].values
     close = df["close"].values
+    volume = df["volume"].values if "volume" in df.columns else None
     index = df.index
 
     n_bars = len(df)
@@ -634,6 +747,7 @@ def run_period(
         zigzag_global_stats=zigzag_global_stats if zigzag_enabled else None,
         volume_runtime=period_volume_runtime,
         global_offset=global_offset if filter_enabled else 0,
+        volume=volume,
     )
 
     # Validate warmup vs data length

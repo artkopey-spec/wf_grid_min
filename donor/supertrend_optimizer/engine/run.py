@@ -65,6 +65,7 @@ def run_single_backtest(
     zigzag_global_stats: Any = None,
     volume_runtime: Any = None,
     global_offset: int = 0,
+    volume: Optional[np.ndarray] = None,
 ) -> BacktestResult:
     """
     Run single backtest with unified interface.
@@ -151,6 +152,11 @@ def run_single_backtest(
             f"open={len(open_prices)}, high={len(high)}, low={len(low)}, "
             f"close={len(close)}, index={len(index)}"
         )
+    if volume is not None and len(volume) != n_bars_original:
+        raise ValueError(
+            f"Volume array must have same length as prices: "
+            f"volume={len(volume)}, open={n_bars_original}"
+        )
 
     # Validate minimum data length: need at least 2 bars to produce 1 return
     if n_bars_original < 2:
@@ -227,6 +233,7 @@ def run_single_backtest(
         volume_runtime=volume_runtime,
         global_offset=global_offset,
         index=index,                          # NEW: for daily_reset
+        volume=volume,
     )
     returns = _artifacts.returns
     equity_curve = _artifacts.equity_curve

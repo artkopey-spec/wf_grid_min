@@ -160,6 +160,28 @@ FILTER_DIAGNOSTICS_100_DISPLAY_NAMES: Dict[str, str] = {
     "cycle_direction_gate_enabled":     "Cycle Direction Gate Enabled",
     "cycle_direction_gate_passed":      "Cycle Direction Gate Passed",
     "median_relative_volume":           "Median Relative Volume",
+    # Wakeup Regime Mode D diagnostics.
+    "wakeup_regime_active":                     "Wakeup Regime Active",
+    "wakeup_entry_all_ok":                      "Wakeup Entry All OK",
+    "wakeup_entry_candidate_height_ok":         "Wakeup Entry Candidate Height OK",
+    "wakeup_entry_candidate_age_ok":            "Wakeup Entry Candidate Age OK",
+    "wakeup_entry_candidate_direction_ok":      "Wakeup Entry Candidate Direction OK",
+    "wakeup_entry_trade_mode_ok":               "Wakeup Entry Trade Mode OK",
+    "wakeup_entry_atr_ok":                      "Wakeup Entry ATR OK",
+    "wakeup_entry_volume_ok":                   "Wakeup Entry Volume OK",
+    "wakeup_entry_candidate_height_value":      "Wakeup Entry Candidate Height Value",
+    "wakeup_entry_candidate_height_threshold":  "Wakeup Entry Candidate Height Threshold",
+    "wakeup_entry_candidate_age_bars":          "Wakeup Entry Candidate Age Bars",
+    "wakeup_entry_candidate_leg_direction":     "Wakeup Entry Candidate Leg Direction",
+    "wakeup_entry_atr_ratio":                   "Wakeup Entry ATR Ratio",
+    "wakeup_entry_volume_ratio":                "Wakeup Entry Volume Ratio",
+    "wakeup_cycle_age_bars":                    "Wakeup Cycle Age Bars",
+    "wakeup_bars_since_fresh_candidate":        "Wakeup Bars Since Fresh Candidate",
+    "wakeup_exit_ttl_triggered":                "Wakeup Exit TTL Triggered",
+    "wakeup_exit_no_fresh_candidate_triggered": "Wakeup Exit No Fresh Candidate Triggered",
+    "wakeup_exit_close_triggered":              "Wakeup Exit Close Triggered",
+    "wakeup_exit_action_mode":                  "Wakeup Exit Action Mode",
+    "wakeup_exit_reason":                       "Wakeup Exit Reason",
 }
 
 # ZigZag_Trigger_Events sheet column order (plan §9.2, extended by WP-V3-8 §11.2)
@@ -1578,12 +1600,20 @@ def _build_zigzag_trigger_events_df(
     cand_age_arr = filter_diagnostics.get("candidate_age_bars")
     cand_dir_arr = filter_diagnostics.get("candidate_leg_direction")
     gate_passed_arr = filter_diagnostics.get("candidate_duration_gate_passed")
+    wakeup_threshold_arr = filter_diagnostics.get(
+        "wakeup_entry_candidate_height_threshold"
+    )
+    wakeup_height_arr = filter_diagnostics.get("wakeup_entry_candidate_height_value")
+    wakeup_age_arr = filter_diagnostics.get("wakeup_entry_candidate_age_bars")
+    wakeup_dir_arr = filter_diagnostics.get("wakeup_entry_candidate_leg_direction")
 
     quantile_used = None
+    wakeup_quantile_used = None
     if filter_diagnostics_summary is not None:
         # Support both nested format (legacy donor) and flat format (step_executor)
         thr = filter_diagnostics_summary.get("thresholds", {})
         quantile_used = thr.get("candidate_trigger_quantile")
+        wakeup_quantile_used = thr.get("wakeup_entry_candidate_height_quantile")
 
     # Collect trigger bars in bar order (plan §9.2.1)
     trigger_bars: List[int] = [
@@ -1597,6 +1627,7 @@ def _build_zigzag_trigger_events_df(
     trigger_id = 1
     for t in trigger_bars:
         src = str(trigger_source_arr[t])
+        is_wakeup_trigger = src == "wakeup_regime"
 
         # Triggered Lifecycle Start (WP-V3-8):
         # Mode C immediate entry: state at trigger bar is already ST_ACTIVE_FREEZE
@@ -1605,7 +1636,9 @@ def _build_zigzag_trigger_events_df(
         triggered_lc_start = False
         if state_arr is not None:
             state_at_t = str(state_arr[t])
-            if state_at_t in ("ST_ACTIVE_FREEZE", "ST_ACTIVE_MONITORING"):
+            if is_wakeup_trigger:
+                triggered_lc_start = state_at_t == "ST_ACTIVE_FREEZE"
+            elif state_at_t in ("ST_ACTIVE_FREEZE", "ST_ACTIVE_MONITORING"):
                 # Mode C same-bar immediate entry (already in lifecycle at bar t)
                 triggered_lc_start = True
             else:
@@ -1628,6 +1661,28 @@ def _build_zigzag_trigger_events_df(
         g_median = float(global_median_arr[t]) if global_median_arr is not None else np.nan
         l_median_n = float(local_median_n_arr[t]) if local_median_n_arr is not None else np.nan
         cand_ht = float(candidate_height_arr[t]) if candidate_height_arr is not None else np.nan
+        row_quantile_used = quantile_used if quantile_used is not None else "N/A"
+        imm_used = int(imm_used_arr[t]) if imm_used_arr is not None else 0
+        imm_reason = str(imm_reason_arr[t]) if imm_reason_arr is not None else ""
+        cand_age = int(cand_age_arr[t]) if cand_age_arr is not None else -1
+        cand_dir = int(cand_dir_arr[t]) if cand_dir_arr is not None else 0
+        if is_wakeup_trigger:
+            threshold = (
+                float(wakeup_threshold_arr[t])
+                if wakeup_threshold_arr is not None else np.nan
+            )
+            row_quantile_used = (
+                wakeup_quantile_used
+                if wakeup_quantile_used is not None else "N/A"
+            )
+            cand_ht = (
+                float(wakeup_height_arr[t])
+                if wakeup_height_arr is not None else np.nan
+            )
+            imm_used = 0
+            imm_reason = "mode_not_c"
+            cand_age = int(wakeup_age_arr[t]) if wakeup_age_arr is not None else -1
+            cand_dir = int(wakeup_dir_arr[t]) if wakeup_dir_arr is not None else 0
 
         rows.append({
             "Trigger ID":                trigger_id,
@@ -1635,7 +1690,7 @@ def _build_zigzag_trigger_events_df(
             "Trigger Time":              trigger_time,
             "Trigger Source":            src,
             "Threshold Used":            threshold,
-            "Quantile Used":             quantile_used if quantile_used is not None else "N/A",
+            "Quantile Used":             row_quantile_used,
             "Global Median":             g_median,
             "Local Median N":            l_median_n,
             "Candidate Height %":        cand_ht,
@@ -1643,10 +1698,10 @@ def _build_zigzag_trigger_events_df(
             "Linked Trade ID":           linked_trade_map.get(t, "N/A"),
             # WP-V3-8: new §11.2 columns
             "ZigZag Mode":                              str(zigzag_mode_arr[t]) if zigzag_mode_arr is not None else "",
-            "Immediate Candidate Entry Used":           int(imm_used_arr[t]) if imm_used_arr is not None else 0,
-            "Immediate Candidate Entry Block Reason":   str(imm_reason_arr[t]) if imm_reason_arr is not None else "",
-            "Candidate Age Bars":                       int(cand_age_arr[t]) if cand_age_arr is not None else -1,
-            "Candidate Leg Direction":                  int(cand_dir_arr[t]) if cand_dir_arr is not None else 0,
+            "Immediate Candidate Entry Used":           imm_used,
+            "Immediate Candidate Entry Block Reason":   imm_reason,
+            "Candidate Age Bars":                       cand_age,
+            "Candidate Leg Direction":                  cand_dir,
             "Candidate Duration Gate Passed":           int(gate_passed_arr[t]) if gate_passed_arr is not None else 0,
         })
         trigger_id += 1
@@ -1691,6 +1746,7 @@ def _build_filters_summary_df(period_results: List[PeriodResult]) -> Optional[pd
     s0 = pr0.filter_diagnostics_summary
     # Support both nested (legacy) and flat (step_executor) formats
     thr = s0.get("thresholds", {})
+    is_wakeup_mode = str(s0.get("zigzag_mode", s0.get("mode", ""))) == "D"
 
     params_rows = [
         # WP-V3-8: "ZigZag Mode" replaces legacy "Mode"; fall back for older summaries
@@ -1713,6 +1769,25 @@ def _build_filters_summary_df(period_results: List[PeriodResult]) -> Optional[pd
         # docs/time_filter_plan_v1_final.txt §6.4: time_filter params
         {"Parameter": "Time Filter Enabled",   "Value": s0.get("time_filter_enabled", False)},
     ]
+    if is_wakeup_mode:
+        params_rows.extend([
+            {"Parameter": "Wakeup Enabled", "Value": s0.get("wakeup_enabled", "")},
+            {"Parameter": "Wakeup Exit Action Mode", "Value": s0.get("wakeup_exit_action_mode", "")},
+            {"Parameter": "Wakeup Entry Candidate Height Threshold", "Value": thr.get("wakeup_entry_candidate_height_threshold", s0.get("wakeup_entry_candidate_height_threshold", ""))},
+            {"Parameter": "Wakeup No-Fresh Candidate Height Threshold", "Value": thr.get("wakeup_no_fresh_candidate_height_threshold", s0.get("wakeup_no_fresh_candidate_height_threshold", ""))},
+            {"Parameter": "Wakeup Entry Candidate Height Quantile", "Value": thr.get("wakeup_entry_candidate_height_quantile", s0.get("wakeup_entry_candidate_height_quantile", ""))},
+            {"Parameter": "Wakeup No-Fresh Candidate Quantile", "Value": thr.get("wakeup_no_fresh_candidate_quantile", s0.get("wakeup_no_fresh_candidate_quantile", ""))},
+            {"Parameter": "Wakeup Candidate Age Max Bars", "Value": thr.get("wakeup_candidate_age_max_bars", s0.get("wakeup_candidate_age_max_bars", ""))},
+            {"Parameter": "Wakeup ATR Short Window", "Value": thr.get("wakeup_atr_short_window", s0.get("wakeup_atr_short_window", ""))},
+            {"Parameter": "Wakeup ATR Long Window", "Value": thr.get("wakeup_atr_long_window", s0.get("wakeup_atr_long_window", ""))},
+            {"Parameter": "Wakeup ATR Min Ratio", "Value": thr.get("wakeup_atr_min_ratio", s0.get("wakeup_atr_min_ratio", ""))},
+            {"Parameter": "Wakeup Volume Short Window", "Value": thr.get("wakeup_volume_short_window", s0.get("wakeup_volume_short_window", ""))},
+            {"Parameter": "Wakeup Volume Baseline Window", "Value": thr.get("wakeup_volume_baseline_window", s0.get("wakeup_volume_baseline_window", ""))},
+            {"Parameter": "Wakeup Volume Min Ratio", "Value": thr.get("wakeup_volume_min_ratio", s0.get("wakeup_volume_min_ratio", ""))},
+            {"Parameter": "Wakeup TTL Bars", "Value": thr.get("wakeup_ttl_bars", s0.get("wakeup_ttl_bars", ""))},
+            {"Parameter": "Wakeup No-Fresh Max Age Bars", "Value": thr.get("wakeup_no_fresh_max_age_bars", s0.get("wakeup_no_fresh_max_age_bars", ""))},
+            {"Parameter": "Wakeup No-Fresh Timeout Bars", "Value": thr.get("wakeup_no_fresh_timeout_bars", s0.get("wakeup_no_fresh_timeout_bars", ""))},
+        ])
     params_df = pd.DataFrame(params_rows)
 
     # Section (b): per-period aggregates
@@ -1725,7 +1800,7 @@ def _build_filters_summary_df(period_results: List[PeriodResult]) -> Optional[pd
         # Support both nested (legacy) and flat (step_executor) formats
         ctr = s.get("counters", {})
         bis = s.get("bars_in_state", {})
-        period_rows.append({
+        row = {
             "Period":              pr.period_label,
             "Raw ST Flips":        ctr.get("raw_st_flips", 0),
             "Entries Allowed":     ctr.get("passed_entry_signals", 0),
@@ -1765,7 +1840,19 @@ def _build_filters_summary_df(period_results: List[PeriodResult]) -> Optional[pd
             "Volume Started Cycles":           s.get("n_volume_started_cycles", ctr.get("n_volume_started_cycles", 0)),
             "Volume Suppressed Cycles":         s.get("n_volume_suppressed_cycles", ctr.get("n_volume_suppressed_cycles", 0)),
             "Avg Median Relative Volume":      s.get("avg_median_relative_volume", ctr.get("avg_median_relative_volume", None)),
-        })
+        }
+        if is_wakeup_mode:
+            row.update({
+                "Wakeup Starts": s.get("wakeup_starts_count", ctr.get("wakeup_starts_count", 0)),
+                "Wakeup Entry Attempts": s.get("wakeup_entry_attempts_count", ctr.get("wakeup_entry_attempts_count", 0)),
+                "Wakeup Exit TTL": s.get("wakeup_exit_ttl_count", ctr.get("wakeup_exit_ttl_count", 0)),
+                "Wakeup Exit No Fresh Candidate": s.get("wakeup_exit_no_fresh_candidate_count", ctr.get("wakeup_exit_no_fresh_candidate_count", 0)),
+                "Wakeup Exit Close": s.get("wakeup_exit_close_count", ctr.get("wakeup_exit_close_count", 0)),
+                "Wakeup Exit Reset": s.get("wakeup_exit_reset_count", ctr.get("wakeup_exit_reset_count", 0)),
+                "Wakeup Exit Opposite ST Flip": s.get("wakeup_exit_opposite_st_flip_count", ctr.get("wakeup_exit_opposite_st_flip_count", 0)),
+                "Wakeup Bars Active": s.get("wakeup_bars_active", ctr.get("wakeup_bars_active", 0)),
+            })
+        period_rows.append(row)
     period_df = pd.DataFrame(period_rows)
     return (params_df, period_df)  # type: ignore[return-value]
 

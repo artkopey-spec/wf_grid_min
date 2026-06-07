@@ -876,7 +876,7 @@ class TestV3ModeValidation:
         cfg = _assert_ok(tmp_path, _v3_yaml(mode))
         assert cfg.trade_filter.zigzag.mode == mode
 
-    @pytest.mark.parametrize("bad_mode", ["a", "b", "c", "a+b", "c+b", "AB", "D", "", "auto"])
+    @pytest.mark.parametrize("bad_mode", ["a", "b", "c", "a+b", "c+b", "AB", "", "auto"])
     def test_a2_invalid_mode_rejected(self, tmp_path, bad_mode):
         """A2: lowercase or unknown mode -> ConfigError."""
         _assert_error(tmp_path, _v3_yaml(bad_mode), "must be one of")
@@ -1087,6 +1087,83 @@ class TestLifecycleWhitelistDrift:
         )
 
 
+class TestWakeupWhitelistPhase0Schema:
+    def test_wakeup_allowed_key_paths_match_shared(self):
+        from wf_grid.config.loader import _ALLOWED_KEYS as wf_allowed
+        from supertrend_optimizer.core.trade_filter_config import (
+            TRADE_FILTER_ALLOWED_KEYS as shared_allowed,
+        )
+
+        wakeup_paths = [
+            "trade_filter",
+            "trade_filter.wakeup_regime",
+            "trade_filter.wakeup_regime.entry",
+            "trade_filter.wakeup_regime.entry.candidate_height",
+            "trade_filter.wakeup_regime.entry.candidate_age",
+            "trade_filter.wakeup_regime.entry.atr_expansion",
+            "trade_filter.wakeup_regime.entry.volume_expansion",
+            "trade_filter.wakeup_regime.exit",
+            "trade_filter.wakeup_regime.exit.ttl",
+            "trade_filter.wakeup_regime.exit.no_fresh_candidate",
+            "trade_filter.wakeup_regime.exit.action",
+        ]
+
+        for path in wakeup_paths:
+            assert frozenset(wf_allowed[path]) == shared_allowed[path]
+
+    def test_disabled_filter_known_wakeup_keys_reach_shared_wf_grid_reject(self, tmp_path):
+        yaml = _MINIMAL_BASE + """\
+trade_filter:
+  enabled: false
+  wakeup_regime:
+    enabled: true
+    entry:
+      candidate_height:
+        enabled: true
+        quantile: 0.65
+      candidate_age:
+        enabled: true
+        max_bars: 10
+      atr_expansion:
+        enabled: true
+        short_window: 5
+        long_window: 60
+        min_ratio: 1.3
+      volume_expansion:
+        enabled: true
+        short_window: 5
+        baseline_window: 60
+        min_ratio: 1.3
+    exit:
+      ttl:
+        enabled: true
+        bars: 45
+      no_fresh_candidate:
+        enabled: true
+        quantile: 0.60
+        max_age_bars: 15
+        timeout_bars: 20
+      action:
+        mode: block_new_entries
+"""
+        _assert_error(tmp_path, yaml, "wakeup_regime is not supported by wf_grid")
+
+    def test_unknown_wakeup_subkey_rejects(self, tmp_path):
+        yaml = _MINIMAL_BASE + """\
+trade_filter:
+  enabled: false
+  wakeup_regime:
+    entry:
+      candidate_height:
+        surprise: true
+"""
+        _assert_error(
+            tmp_path,
+            yaml,
+            "unknown config key: 'trade_filter.wakeup_regime.entry.candidate_height.surprise'",
+        )
+
+
 # ===========================================================================
 # PR2: Full validation matrix §3.1-§3.3 (plan_exit_off_modes_v2.txt §14.1)
 # ===========================================================================
@@ -1149,6 +1226,64 @@ def _assert_no_exit_off_errors(lc_overrides: dict | None = None) -> None:
     assert not exit_msgs, f"Unexpected exit_off error messages: {exit_msgs}"
 
 
+def _mode_d_raw(action_mode: str = "block_new_entries") -> dict:
+    return {
+        "enabled": True,
+        "type": "zigzag_st_mode",
+        "zigzag": {
+            "mode": "D",
+            "reversal_threshold": 0.005,
+            "candidate_trigger_threshold": 0.012,
+            "local_window": 5,
+        },
+        "lifecycle": {
+            "freeze_confirmed_legs": 3,
+            "stop_check": "confirm_bar_only",
+            "stopping_exit": "opposite_st_flip",
+            "exit_off_mode": "exit C",
+        },
+        "wakeup_regime": {
+            "enabled": True,
+            "entry": {
+                "candidate_height": {"enabled": True, "quantile": 0.65},
+                "candidate_age": {"enabled": True, "max_bars": 10},
+                "atr_expansion": {
+                    "enabled": True,
+                    "short_window": 5,
+                    "long_window": 60,
+                    "min_ratio": 1.3,
+                },
+                "volume_expansion": {
+                    "enabled": True,
+                    "short_window": 5,
+                    "baseline_window": 60,
+                    "min_ratio": 1.3,
+                },
+            },
+            "exit": {
+                "ttl": {"enabled": True, "bars": 45},
+                "no_fresh_candidate": {
+                    "enabled": True,
+                    "quantile": 0.60,
+                    "max_age_bars": 15,
+                    "timeout_bars": 20,
+                },
+                "action": {"mode": action_mode},
+            },
+        },
+    }
+
+
+def _run_phase0_raw(raw_tf: dict, caller: str = "tester") -> tuple[list[str], list[str]]:
+    raw = {"trade_filter": _copy.deepcopy(raw_tf)}
+    tf = _build_tf(raw["trade_filter"])
+    ruk = _collect_ruk(raw)
+    errors: list[str] = []
+    ekeys: list[str] = []
+    _shared_validate(tf, errors, ruk, caller_pipeline=caller, error_keys=ekeys)
+    return errors, ekeys
+
+
 def _superset_assert(
     ekeys: list[str],
     required: set[str],
@@ -1167,6 +1302,210 @@ def _superset_assert(
             f"Forbidden error_keys present: {sorted(present_forbidden)}\n"
             f"  Observed: {sorted(observed)}"
         )
+
+
+class TestWakeupPhase0Validation:
+    def test_tester_accepts_mode_d_exit_c_wakeup_block_new_entries(self):
+        errors, ekeys = _run_phase0_raw(_mode_d_raw("block_new_entries"), "tester")
+        assert errors == []
+        assert ekeys == []
+
+    def test_tester_accepts_mode_d_exit_c_wakeup_close_position(self):
+        errors, ekeys = _run_phase0_raw(_mode_d_raw("close_position"), "tester")
+        assert errors == []
+        assert ekeys == []
+
+    def test_tester_rejects_mode_d_without_raw_exit_c(self):
+        raw = _mode_d_raw()
+        raw["lifecycle"].pop("exit_off_mode")
+        _, ekeys = _run_phase0_raw(raw, "tester")
+        _superset_assert(ekeys, {"mode_d_requires_exit_c"})
+
+    def test_tester_rejects_mode_d_without_wakeup_enabled_true(self):
+        raw = _mode_d_raw()
+        raw["wakeup_regime"]["enabled"] = False
+        _, ekeys = _run_phase0_raw(raw, "tester")
+        _superset_assert(ekeys, {"mode_d_requires_wakeup_enabled"})
+
+    def test_tester_rejects_mode_d_candidate_threshold_auto(self):
+        raw = _mode_d_raw()
+        raw["zigzag"]["candidate_trigger_threshold"] = "auto"
+        raw["zigzag"]["candidate_trigger_quantile"] = 0.8
+        _, ekeys = _run_phase0_raw(raw, "tester")
+        _superset_assert(
+            ekeys,
+            {
+                "mode_d_candidate_threshold_auto_rejected",
+                "mode_d_candidate_quantile_rejected",
+            },
+        )
+
+    def test_tester_rejects_mode_d_candidate_trigger_quantile(self):
+        raw = _mode_d_raw()
+        raw["zigzag"]["candidate_trigger_quantile"] = 0.8
+        _, ekeys = _run_phase0_raw(raw, "tester")
+        _superset_assert(ekeys, {"mode_d_candidate_quantile_rejected"})
+
+    def test_tester_rejects_exit_c_with_mode_a(self):
+        raw = _copy.deepcopy(_VALID_ENABLED_RAW)
+        raw["lifecycle"]["exit_off_mode"] = "exit C"
+        _, ekeys = _run_phase0_raw(raw, "tester")
+        _superset_assert(ekeys, {"exit_c_requires_mode_d"})
+
+    def test_tester_rejects_wakeup_regime_with_mode_a(self):
+        raw = _copy.deepcopy(_VALID_ENABLED_RAW)
+        raw["wakeup_regime"] = _mode_d_raw()["wakeup_regime"]
+        _, ekeys = _run_phase0_raw(raw, "tester")
+        _superset_assert(
+            ekeys,
+            {"wakeup_regime_requires_mode_d", "wakeup_enabled_requires_mode_d"},
+        )
+
+    def test_tester_rejects_exit_c_legacy_controls(self):
+        raw = _mode_d_raw()
+        raw["triggers"] = {"candidate_threshold": {"enabled": True}}
+        raw["lifecycle"]["exit_off_zz_leg_count"] = 3
+        raw["lifecycle"]["exit_b_immediate_off"] = False
+        _, ekeys = _run_phase0_raw(raw, "tester")
+        _superset_assert(
+            ekeys,
+            {
+                "mode_conflicts_with_legacy_triggers",
+                "exit_c_rejects_legacy_triggers",
+                "exit_c_rejects_exit_off_zz_leg_count",
+                "exit_c_rejects_exit_b_immediate_off",
+            },
+        )
+
+    def test_wf_grid_rejects_mode_d_exit_c_wakeup_via_shared_gate(self):
+        _, ekeys = _run_phase0_raw(_mode_d_raw(), "wf_grid")
+        _superset_assert(
+            ekeys,
+            {
+                "mode_d_unsupported_pipeline",
+                "exit_c_unsupported_pipeline",
+                "wakeup_regime_unsupported_pipeline",
+            },
+        )
+
+    def test_wf_grid_loader_rejects_mode_d_not_as_unknown_key(self, tmp_path):
+        yaml = _MINIMAL_BASE + """\
+trade_filter:
+  enabled: true
+  type: zigzag_st_mode
+  zigzag:
+    mode: D
+    reversal_threshold: 0.005
+    candidate_trigger_threshold: 0.012
+    local_window: 5
+  lifecycle:
+    freeze_confirmed_legs: 3
+    stop_check: confirm_bar_only
+    stopping_exit: opposite_st_flip
+    exit_off_mode: "exit C"
+  wakeup_regime:
+    enabled: true
+    entry:
+      candidate_height:
+        enabled: true
+        quantile: 0.65
+    exit:
+      ttl:
+        enabled: true
+        bars: 45
+      action:
+        mode: block_new_entries
+"""
+        _assert_error(tmp_path, yaml, "mode='D' is not supported by wf_grid")
+
+    def test_wf_grid_loader_rejects_exit_c_not_as_unknown_key(self, tmp_path):
+        yaml = _MINIMAL_BASE + _ENABLED_BLOCK.replace(
+            "    stopping_exit: opposite_st_flip\n",
+            "    stopping_exit: opposite_st_flip\n    exit_off_mode: \"exit C\"\n",
+        )
+        _assert_error(tmp_path, yaml, "exit_off_mode='exit C' is not supported by wf_grid")
+
+    def test_wakeup_disabled_component_may_omit_numeric_fields(self):
+        raw = _mode_d_raw()
+        raw["wakeup_regime"]["entry"] = {
+            "candidate_height": {"enabled": True, "quantile": 0.65},
+            "candidate_age": {"enabled": False},
+            "atr_expansion": {"enabled": False},
+            "volume_expansion": {"enabled": False},
+        }
+        raw["wakeup_regime"]["exit"] = {
+            "ttl": {"enabled": True, "bars": 45},
+            "no_fresh_candidate": {"enabled": False},
+            "action": {"mode": "block_new_entries"},
+        }
+        errors, ekeys = _run_phase0_raw(raw, "tester")
+        assert errors == []
+        assert ekeys == []
+
+    @pytest.mark.parametrize(
+        ("mutate", "fragment"),
+        [
+            (
+                lambda raw: raw["wakeup_regime"].update({"enabled": "yes"}),
+                "trade_filter.wakeup_regime.enabled must be bool",
+            ),
+            (
+                lambda raw: raw["wakeup_regime"]["entry"]["candidate_height"].update(
+                    {"quantile": 1.0}
+                ),
+                "candidate_height.quantile must be finite numeric in (0, 1)",
+            ),
+            (
+                lambda raw: raw["wakeup_regime"]["entry"]["candidate_age"].update(
+                    {"max_bars": 0}
+                ),
+                "candidate_age.max_bars must be int >= 1",
+            ),
+            (
+                lambda raw: raw["wakeup_regime"]["entry"]["atr_expansion"].update(
+                    {"min_ratio": 0}
+                ),
+                "atr_expansion.min_ratio must be finite > 0",
+            ),
+            (
+                lambda raw: raw["wakeup_regime"]["entry"]["atr_expansion"].update(
+                    {"short_window": 60, "long_window": 5}
+                ),
+                "atr_expansion.long_window must be >= short_window",
+            ),
+            (
+                lambda raw: raw["wakeup_regime"]["entry"]["volume_expansion"].update(
+                    {"short_window": 60, "baseline_window": 5}
+                ),
+                "volume_expansion.baseline_window must be >= short_window",
+            ),
+            (
+                lambda raw: raw["wakeup_regime"]["exit"]["action"].update(
+                    {"mode": "bad"}
+                ),
+                "exit.action.mode must be 'block_new_entries' or 'close_position'",
+            ),
+        ],
+    )
+    def test_wakeup_field_validation_rejects_invalid_values(self, mutate, fragment):
+        raw = _mode_d_raw()
+        mutate(raw)
+        errors, _ = _run_phase0_raw(raw, "tester")
+        assert any(fragment in err for err in errors), errors
+
+    def test_wakeup_requires_enabled_entry_component(self):
+        raw = _mode_d_raw()
+        for component in raw["wakeup_regime"]["entry"].values():
+            component["enabled"] = False
+        errors, _ = _run_phase0_raw(raw, "tester")
+        assert any("at least one enabled entry component" in err for err in errors)
+
+    def test_wakeup_requires_enabled_exit_condition(self):
+        raw = _mode_d_raw()
+        raw["wakeup_regime"]["exit"]["ttl"]["enabled"] = False
+        raw["wakeup_regime"]["exit"]["no_fresh_candidate"]["enabled"] = False
+        errors, _ = _run_phase0_raw(raw, "tester")
+        assert any("at least one enabled exit condition" in err for err in errors)
 
 
 # ---------------------------------------------------------------------------
@@ -1739,6 +2078,19 @@ class TestExitBImmediateOffFailureKeysRegistry:
         "exit_off_zz_leg_count_present_when_exit_a",
         "mode_conflicts_with_legacy_triggers",
         "mode_invalid_literal",
+        "mode_d_unsupported_pipeline",
+        "exit_c_unsupported_pipeline",
+        "wakeup_regime_unsupported_pipeline",
+        "mode_d_requires_exit_c",
+        "mode_d_requires_wakeup_enabled",
+        "mode_d_candidate_threshold_auto_rejected",
+        "mode_d_candidate_quantile_rejected",
+        "exit_c_requires_mode_d",
+        "exit_c_rejects_exit_off_zz_leg_count",
+        "exit_c_rejects_exit_b_immediate_off",
+        "exit_c_rejects_legacy_triggers",
+        "wakeup_regime_requires_mode_d",
+        "wakeup_enabled_requires_mode_d",
         # time_filter (docs/time_filter_plan_v1_final.txt §1.2, §7.3)
         "time_filter_enabled_invalid_type",
         "time_filter_window_missing",

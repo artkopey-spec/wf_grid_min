@@ -173,6 +173,7 @@ _ALLOWED_KEYS: dict[str, set[str]] = {
         "diagnostics",
         "time_filter",
         "volume",
+        "wakeup_regime",
     },
     "trade_filter.time_filter": {
         "enabled",
@@ -236,6 +237,55 @@ _ALLOWED_KEYS: dict[str, set[str]] = {
     "trade_filter.volume.baseline_session": {
         "enabled",
         "window",
+    },
+    "trade_filter.wakeup_regime": {
+        "enabled",
+        "entry",
+        "exit",
+    },
+    "trade_filter.wakeup_regime.entry": {
+        "candidate_height",
+        "candidate_age",
+        "atr_expansion",
+        "volume_expansion",
+    },
+    "trade_filter.wakeup_regime.entry.candidate_height": {
+        "enabled",
+        "quantile",
+    },
+    "trade_filter.wakeup_regime.entry.candidate_age": {
+        "enabled",
+        "max_bars",
+    },
+    "trade_filter.wakeup_regime.entry.atr_expansion": {
+        "enabled",
+        "short_window",
+        "long_window",
+        "min_ratio",
+    },
+    "trade_filter.wakeup_regime.entry.volume_expansion": {
+        "enabled",
+        "short_window",
+        "baseline_window",
+        "min_ratio",
+    },
+    "trade_filter.wakeup_regime.exit": {
+        "ttl",
+        "no_fresh_candidate",
+        "action",
+    },
+    "trade_filter.wakeup_regime.exit.ttl": {
+        "enabled",
+        "bars",
+    },
+    "trade_filter.wakeup_regime.exit.no_fresh_candidate": {
+        "enabled",
+        "quantile",
+        "max_age_bars",
+        "timeout_bars",
+    },
+    "trade_filter.wakeup_regime.exit.action": {
+        "mode",
     },
 }
 

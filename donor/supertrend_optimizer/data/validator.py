@@ -33,7 +33,10 @@ import numpy as np
 import pandas as pd
 
 from supertrend_optimizer.utils.exceptions import DataValidationError
-from supertrend_optimizer.core.trade_filter_config import is_volume_enabled
+from supertrend_optimizer.core.trade_filter_config import (
+    is_volume_enabled,
+    is_wakeup_volume_enabled,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -251,13 +254,20 @@ def validate_volume_filter_data(
     trade_filter_config,
 ) -> pd.DataFrame:
     """Validate the volume column required by enabled volume trade filters."""
-    if not is_volume_enabled(trade_filter_config):
+    volume_enabled = is_volume_enabled(trade_filter_config)
+    wakeup_volume_enabled = is_wakeup_volume_enabled(trade_filter_config)
+    if not volume_enabled and not wakeup_volume_enabled:
         return df
+
+    requirement = (
+        "trade_filter.volume"
+        if volume_enabled else "trade_filter.wakeup_regime.entry.volume_expansion"
+    )
 
     if "volume" not in df.columns:
         _cols = [str(c) for c in df.columns]
         raise DataValidationError(
-            "trade_filter.volume requires a 'volume' column in input data "
+            f"{requirement} requires a 'volume' column in input data "
             f"(names are normalised to lowercase by the CSV loader). "
             f"Columns present: {_cols}"
         )
@@ -265,20 +275,20 @@ def validate_volume_filter_data(
     volume = df["volume"]
     if not pd.api.types.is_numeric_dtype(volume):
         raise DataValidationError(
-            "trade_filter.volume column 'volume' must be numeric, "
+            f"{requirement} column 'volume' must be numeric, "
             f"got dtype {volume.dtype}"
         )
     if volume.isna().any():
         raise DataValidationError(
-            "trade_filter.volume column 'volume' contains NaN values"
+            f"{requirement} column 'volume' contains NaN values"
         )
     if np.isinf(volume).any():
         raise DataValidationError(
-            "trade_filter.volume column 'volume' contains inf values"
+            f"{requirement} column 'volume' contains inf values"
         )
     if (volume < 0).any():
         raise DataValidationError(
-            "trade_filter.volume column 'volume' contains negative values"
+            f"{requirement} column 'volume' contains negative values"
         )
 
     return df

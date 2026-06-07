@@ -35,7 +35,7 @@ _LIFECYCLE_STOPPING_EXIT_VALUES = {"opposite_st_flip"}
 _SUPPORTED_TRADE_FILTER_TYPES = {"zigzag_st_mode"}
 
 # v3: valid mode literals (ТЗ v3 §4.1, WP-V3-1 A1/A2)
-_VALID_ZIGZAG_MODES = {"A", "B", "C", "A+B", "C+B"}
+_VALID_ZIGZAG_MODES = {"A", "B", "C", "D", "A+B", "C+B"}
 
 _V3_INIT_FAILURE_KEYS = frozenset({
     "mode_invalid_literal",
@@ -66,6 +66,20 @@ _V3_INIT_FAILURE_KEYS = frozenset({
     "time_filter_window_zero_length",
     "time_filter_window_cross_midnight",
     "cycle_direction_gate_requires_volume_only",
+    # wakeup_regime / Phase 0 Mode D
+    "mode_d_unsupported_pipeline",
+    "exit_c_unsupported_pipeline",
+    "wakeup_regime_unsupported_pipeline",
+    "mode_d_requires_exit_c",
+    "mode_d_requires_wakeup_enabled",
+    "mode_d_candidate_threshold_auto_rejected",
+    "mode_d_candidate_quantile_rejected",
+    "exit_c_requires_mode_d",
+    "exit_c_rejects_exit_off_zz_leg_count",
+    "exit_c_rejects_exit_b_immediate_off",
+    "exit_c_rejects_legacy_triggers",
+    "wakeup_regime_requires_mode_d",
+    "wakeup_enabled_requires_mode_d",
 })
 
 # WP-T3 step 6 — caller_pipeline whitelist for type=zigzag_st_mode.
@@ -228,6 +242,93 @@ class TradeFilterVolumeConfig:
 
 
 @dataclass
+class TradeFilterWakeupCandidateHeightConfig:
+    enabled: object = False
+    quantile: object = None
+
+
+@dataclass
+class TradeFilterWakeupCandidateAgeConfig:
+    enabled: object = False
+    max_bars: object = None
+
+
+@dataclass
+class TradeFilterWakeupAtrExpansionConfig:
+    enabled: object = False
+    short_window: object = None
+    long_window: object = None
+    min_ratio: object = None
+
+
+@dataclass
+class TradeFilterWakeupVolumeExpansionConfig:
+    enabled: object = False
+    short_window: object = None
+    baseline_window: object = None
+    min_ratio: object = None
+
+
+@dataclass
+class TradeFilterWakeupEntryConfig:
+    candidate_height: TradeFilterWakeupCandidateHeightConfig = field(
+        default_factory=TradeFilterWakeupCandidateHeightConfig
+    )
+    candidate_age: TradeFilterWakeupCandidateAgeConfig = field(
+        default_factory=TradeFilterWakeupCandidateAgeConfig
+    )
+    atr_expansion: TradeFilterWakeupAtrExpansionConfig = field(
+        default_factory=TradeFilterWakeupAtrExpansionConfig
+    )
+    volume_expansion: TradeFilterWakeupVolumeExpansionConfig = field(
+        default_factory=TradeFilterWakeupVolumeExpansionConfig
+    )
+
+
+@dataclass
+class TradeFilterWakeupTtlExitConfig:
+    enabled: object = False
+    bars: object = None
+
+
+@dataclass
+class TradeFilterWakeupNoFreshCandidateExitConfig:
+    enabled: object = False
+    quantile: object = None
+    max_age_bars: object = None
+    timeout_bars: object = None
+
+
+@dataclass
+class TradeFilterWakeupExitActionConfig:
+    mode: object = None
+
+
+@dataclass
+class TradeFilterWakeupExitConfig:
+    ttl: TradeFilterWakeupTtlExitConfig = field(
+        default_factory=TradeFilterWakeupTtlExitConfig
+    )
+    no_fresh_candidate: TradeFilterWakeupNoFreshCandidateExitConfig = field(
+        default_factory=TradeFilterWakeupNoFreshCandidateExitConfig
+    )
+    action: TradeFilterWakeupExitActionConfig = field(
+        default_factory=TradeFilterWakeupExitActionConfig
+    )
+
+
+@dataclass
+class TradeFilterWakeupRegimeConfig:
+    enabled: object = False
+    entry: TradeFilterWakeupEntryConfig = field(
+        default_factory=TradeFilterWakeupEntryConfig
+    )
+    exit: TradeFilterWakeupExitConfig = field(
+        default_factory=TradeFilterWakeupExitConfig
+    )
+
+
+@dataclass
 class TradeFilterConfig:
     """Root trade-filter block.
 
@@ -258,6 +359,7 @@ class TradeFilterConfig:
         default_factory=TradeFilterTimeFilterConfig
     )
     volume: Optional[TradeFilterVolumeConfig] = None
+    wakeup_regime: Optional[TradeFilterWakeupRegimeConfig] = None
     # Raw YAML presence marker.  ``None`` means "unknown / hand-built config",
     # so runtime consumers fall back to the historical duck-typed behaviour.
     _raw_triggers_present: Optional[bool] = field(default=None, repr=False)
@@ -292,6 +394,21 @@ def is_volume_enabled(tf: object) -> bool:
         return False
     volume = getattr(tf, "volume", None)
     return volume is not None and getattr(volume, "enabled", None) is True
+
+
+def is_wakeup_volume_enabled(tf: object) -> bool:
+    """Return True when wakeup volume expansion is explicitly enabled."""
+    if not is_trade_filter_enabled(tf):
+        return False
+    wakeup = getattr(tf, "wakeup_regime", None)
+    if wakeup is None or getattr(wakeup, "enabled", None) is not True:
+        return False
+    entry = getattr(wakeup, "entry", None)
+    volume_expansion = getattr(entry, "volume_expansion", None)
+    return (
+        volume_expansion is not None
+        and getattr(volume_expansion, "enabled", None) is True
+    )
 
 
 def resolve_zigzag_enabled_in_place(
@@ -362,7 +479,7 @@ def resolve_volume_defaults_in_place(
 TRADE_FILTER_ALLOWED_KEYS: dict[str, frozenset[str]] = {
     "trade_filter": frozenset({
         "enabled", "type", "zigzag", "triggers", "lifecycle", "diagnostics",
-        "time_filter", "volume",
+        "time_filter", "volume", "wakeup_regime",
     }),
     "trade_filter.time_filter": frozenset({"enabled", "window"}),
     "trade_filter.zigzag": frozenset({
@@ -399,6 +516,37 @@ TRADE_FILTER_ALLOWED_KEYS: dict[str, frozenset[str]] = {
     }),
     "trade_filter.volume.baseline_session": frozenset({
         "enabled", "window",
+    }),
+    "trade_filter.wakeup_regime": frozenset({
+        "enabled", "entry", "exit",
+    }),
+    "trade_filter.wakeup_regime.entry": frozenset({
+        "candidate_height", "candidate_age", "atr_expansion",
+        "volume_expansion",
+    }),
+    "trade_filter.wakeup_regime.entry.candidate_height": frozenset({
+        "enabled", "quantile",
+    }),
+    "trade_filter.wakeup_regime.entry.candidate_age": frozenset({
+        "enabled", "max_bars",
+    }),
+    "trade_filter.wakeup_regime.entry.atr_expansion": frozenset({
+        "enabled", "short_window", "long_window", "min_ratio",
+    }),
+    "trade_filter.wakeup_regime.entry.volume_expansion": frozenset({
+        "enabled", "short_window", "baseline_window", "min_ratio",
+    }),
+    "trade_filter.wakeup_regime.exit": frozenset({
+        "ttl", "no_fresh_candidate", "action",
+    }),
+    "trade_filter.wakeup_regime.exit.ttl": frozenset({
+        "enabled", "bars",
+    }),
+    "trade_filter.wakeup_regime.exit.no_fresh_candidate": frozenset({
+        "enabled", "quantile", "max_age_bars", "timeout_bars",
+    }),
+    "trade_filter.wakeup_regime.exit.action": frozenset({
+        "mode",
     }),
 }
 
@@ -564,6 +712,63 @@ def build_trade_filter_config_from_raw(tf_raw: dict) -> TradeFilterConfig:
         baseline_session=baseline_session,
     ) if "volume" in tf_raw else None
 
+    wakeup_regime = None
+    if "wakeup_regime" in tf_raw:
+        wakeup_raw: dict = tf_raw.get("wakeup_regime") or {}
+        entry_raw: dict = wakeup_raw.get("entry") or {}
+        candidate_height_raw: dict = entry_raw.get("candidate_height") or {}
+        candidate_age_raw: dict = entry_raw.get("candidate_age") or {}
+        atr_expansion_raw: dict = entry_raw.get("atr_expansion") or {}
+        volume_expansion_raw: dict = entry_raw.get("volume_expansion") or {}
+
+        exit_raw: dict = wakeup_raw.get("exit") or {}
+        ttl_raw: dict = exit_raw.get("ttl") or {}
+        no_fresh_raw: dict = exit_raw.get("no_fresh_candidate") or {}
+        action_raw: dict = exit_raw.get("action") or {}
+
+        wakeup_regime = TradeFilterWakeupRegimeConfig(
+            enabled=wakeup_raw.get("enabled", False),
+            entry=TradeFilterWakeupEntryConfig(
+                candidate_height=TradeFilterWakeupCandidateHeightConfig(
+                    enabled=candidate_height_raw.get("enabled", False),
+                    quantile=candidate_height_raw.get("quantile", None),
+                ),
+                candidate_age=TradeFilterWakeupCandidateAgeConfig(
+                    enabled=candidate_age_raw.get("enabled", False),
+                    max_bars=candidate_age_raw.get("max_bars", None),
+                ),
+                atr_expansion=TradeFilterWakeupAtrExpansionConfig(
+                    enabled=atr_expansion_raw.get("enabled", False),
+                    short_window=atr_expansion_raw.get("short_window", None),
+                    long_window=atr_expansion_raw.get("long_window", None),
+                    min_ratio=atr_expansion_raw.get("min_ratio", None),
+                ),
+                volume_expansion=TradeFilterWakeupVolumeExpansionConfig(
+                    enabled=volume_expansion_raw.get("enabled", False),
+                    short_window=volume_expansion_raw.get("short_window", None),
+                    baseline_window=volume_expansion_raw.get(
+                        "baseline_window", None
+                    ),
+                    min_ratio=volume_expansion_raw.get("min_ratio", None),
+                ),
+            ),
+            exit=TradeFilterWakeupExitConfig(
+                ttl=TradeFilterWakeupTtlExitConfig(
+                    enabled=ttl_raw.get("enabled", False),
+                    bars=ttl_raw.get("bars", None),
+                ),
+                no_fresh_candidate=TradeFilterWakeupNoFreshCandidateExitConfig(
+                    enabled=no_fresh_raw.get("enabled", False),
+                    quantile=no_fresh_raw.get("quantile", None),
+                    max_age_bars=no_fresh_raw.get("max_age_bars", None),
+                    timeout_bars=no_fresh_raw.get("timeout_bars", None),
+                ),
+                action=TradeFilterWakeupExitActionConfig(
+                    mode=action_raw.get("mode", None),
+                ),
+            ),
+        )
+
     return TradeFilterConfig(
         enabled=enabled_raw,
         type=tf_type,
@@ -573,6 +778,7 @@ def build_trade_filter_config_from_raw(tf_raw: dict) -> TradeFilterConfig:
         diagnostics=diagnostics,
         time_filter=time_filter,
         volume=volume,
+        wakeup_regime=wakeup_regime,
         _raw_triggers_present=("triggers" in tf_raw),
     )
 
@@ -629,6 +835,53 @@ def _validate_positive_finite(
         errors.append(f"{field_path} must be finite > 0, got {value!r}")
         return None
     return value_f
+
+
+def _validate_quantile_open_interval(
+    value: object,
+    field_path: str,
+    errors: list[str],
+) -> Optional[float]:
+    if isinstance(value, bool):
+        errors.append(f"{field_path} must be finite numeric in (0, 1), got {value!r}")
+        return None
+    try:
+        value_f = float(value)
+    except (TypeError, ValueError):
+        errors.append(f"{field_path} must be finite numeric in (0, 1), got {value!r}")
+        return None
+    if not math.isfinite(value_f) or not (0.0 < value_f < 1.0):
+        errors.append(f"{field_path} must be finite numeric in (0, 1), got {value!r}")
+        return None
+    return value_f
+
+
+def _validate_bool_field(
+    value: object,
+    field_path: str,
+    errors: list[str],
+) -> bool:
+    if not isinstance(value, bool):
+        errors.append(
+            f"{field_path} must be bool (true/false), "
+            f"got {type(value).__name__!r} ({value!r})"
+        )
+        return False
+    return True
+
+
+def _is_mode_d(tf: TradeFilterConfig, raw_user_keys: frozenset[tuple[str, ...]]) -> bool:
+    return (
+        ("trade_filter", "zigzag", "mode") in raw_user_keys
+        and getattr(getattr(tf, "zigzag", None), "mode", None) == "D"
+    )
+
+
+def _is_exit_c(tf: TradeFilterConfig, raw_user_keys: frozenset[tuple[str, ...]]) -> bool:
+    return (
+        ("trade_filter", "lifecycle", "exit_off_mode") in raw_user_keys
+        and getattr(getattr(tf, "lifecycle", None), "exit_off_mode", None) == "exit C"
+    )
 
 
 def _validate_volume_baseline_session(
@@ -976,7 +1229,7 @@ def _validate_zigzag_block(tf: TradeFilterConfig, errors: list[str], raw_user_ke
             _append_validation_error(
                 errors,
                 f"trade_filter.zigzag.mode must be one of "
-                f"{{'A', 'B', 'C', 'A+B', 'C+B'}}; got {mode_value!r}",
+                f"{sorted(_VALID_ZIGZAG_MODES)}; got {mode_value!r}",
                 _VALIDATION_ERROR_KEYS.get(),
                 "mode_invalid_literal",
             )
@@ -1243,16 +1496,16 @@ def _validate_lifecycle_block(tf: TradeFilterConfig, errors: list[str], raw_user
             _append_validation_error(
                 errors,
                 "trade_filter.lifecycle.exit_off_mode must be str literal "
-                "\"exit A\" or \"exit B\", got "
+                "\"exit A\", \"exit B\", or \"exit C\", got "
                 f"{type(eom_raw).__name__!r} ({eom_raw!r})",
                 _VALIDATION_ERROR_KEYS.get(),
                 "exit_off_mode_invalid_type",
             )
-        elif eom_raw not in ("exit A", "exit B"):
+        elif eom_raw not in ("exit A", "exit B", "exit C"):
             _append_validation_error(
                 errors,
-                "trade_filter.lifecycle.exit_off_mode must be \"exit A\" or "
-                f"\"exit B\"; got {eom_raw!r}",
+                "trade_filter.lifecycle.exit_off_mode must be \"exit A\", "
+                f"\"exit B\", or \"exit C\"; got {eom_raw!r}",
                 _VALIDATION_ERROR_KEYS.get(),
                 "exit_off_mode_invalid_literal",
             )
@@ -1260,6 +1513,7 @@ def _validate_lifecycle_block(tf: TradeFilterConfig, errors: list[str], raw_user
     if exit_mode_key_present and isinstance(lc.exit_off_mode, str) and lc.exit_off_mode in (
         "exit A",
         "exit B",
+        "exit C",
     ):
         _effective_exit_off = lc.exit_off_mode
     else:
@@ -1292,8 +1546,7 @@ def _validate_lifecycle_block(tf: TradeFilterConfig, errors: list[str], raw_user
         _append_validation_error(
             errors,
             "trade_filter.lifecycle.exit_off_zz_leg_count must be absent when "
-            "trade_filter.lifecycle.exit_off_mode is \"exit A\" or exit_off_mode "
-            "is omitted from YAML",
+            "trade_filter.lifecycle.exit_off_mode is not \"exit B\"",
             _VALIDATION_ERROR_KEYS.get(),
             "exit_off_zz_leg_count_present_when_exit_a",
         )
@@ -1442,6 +1695,355 @@ def _validate_time_filter_block(tf: TradeFilterConfig, errors: list[str], raw_us
                             )
         # Rule 3: time_filter.enabled=false -> no deep validation (disabled-path)
 
+
+def _validate_required_int_ge_one(
+    value: object,
+    value_present: bool,
+    field_path: str,
+    errors: list[str],
+    *,
+    required: bool,
+) -> Optional[int]:
+    if not value_present or value is None:
+        if required:
+            errors.append(f"{field_path} is required when component is enabled")
+        return None
+    return _validate_int_ge_one(value, field_path, errors)
+
+
+def _validate_required_positive_finite(
+    value: object,
+    value_present: bool,
+    field_path: str,
+    errors: list[str],
+    *,
+    required: bool,
+) -> Optional[float]:
+    if not value_present or value is None:
+        if required:
+            errors.append(f"{field_path} is required when component is enabled")
+        return None
+    return _validate_positive_finite(value, field_path, errors)
+
+
+def _validate_required_quantile(
+    value: object,
+    value_present: bool,
+    field_path: str,
+    errors: list[str],
+    *,
+    required: bool,
+) -> Optional[float]:
+    if not value_present or value is None:
+        if required:
+            errors.append(f"{field_path} is required when component is enabled")
+        return None
+    return _validate_quantile_open_interval(value, field_path, errors)
+
+
+def _validate_wakeup_component_enabled(
+    component: object,
+    path: tuple[str, ...],
+    raw_user_keys: frozenset[tuple[str, ...]],
+    errors: list[str],
+) -> bool:
+    block_present = path in raw_user_keys
+    enabled = getattr(component, "enabled", False)
+    if block_present and not _validate_bool_field(enabled, ".".join(path + ("enabled",)), errors):
+        return False
+    return enabled is True
+
+
+def _validate_wakeup_regime_block(
+    tf: TradeFilterConfig,
+    errors: list[str],
+    raw_user_keys: frozenset[tuple[str, ...]],
+) -> None:
+    wakeup_key = ("trade_filter", "wakeup_regime")
+    if wakeup_key not in raw_user_keys:
+        return
+
+    wakeup = getattr(tf, "wakeup_regime", None)
+    if wakeup is None:
+        return
+
+    if not _validate_bool_field(
+        getattr(wakeup, "enabled", False),
+        "trade_filter.wakeup_regime.enabled",
+        errors,
+    ):
+        return
+
+    wakeup_enabled = wakeup.enabled is True
+    entry_key = wakeup_key + ("entry",)
+    exit_key = wakeup_key + ("exit",)
+    if wakeup_enabled:
+        if entry_key not in raw_user_keys:
+            errors.append(
+                "trade_filter.wakeup_regime.entry is required when "
+                "wakeup_regime.enabled is true"
+            )
+        if exit_key not in raw_user_keys:
+            errors.append(
+                "trade_filter.wakeup_regime.exit is required when "
+                "wakeup_regime.enabled is true"
+            )
+
+    entry = wakeup.entry
+    ch_path = entry_key + ("candidate_height",)
+    ca_path = entry_key + ("candidate_age",)
+    atr_path = entry_key + ("atr_expansion",)
+    vol_path = entry_key + ("volume_expansion",)
+
+    ch_enabled = _validate_wakeup_component_enabled(
+        entry.candidate_height, ch_path, raw_user_keys, errors
+    )
+    ca_enabled = _validate_wakeup_component_enabled(
+        entry.candidate_age, ca_path, raw_user_keys, errors
+    )
+    atr_enabled = _validate_wakeup_component_enabled(
+        entry.atr_expansion, atr_path, raw_user_keys, errors
+    )
+    vol_enabled = _validate_wakeup_component_enabled(
+        entry.volume_expansion, vol_path, raw_user_keys, errors
+    )
+
+    _validate_required_quantile(
+        entry.candidate_height.quantile,
+        ch_path + ("quantile",) in raw_user_keys,
+        "trade_filter.wakeup_regime.entry.candidate_height.quantile",
+        errors,
+        required=ch_enabled,
+    )
+    _validate_required_int_ge_one(
+        entry.candidate_age.max_bars,
+        ca_path + ("max_bars",) in raw_user_keys,
+        "trade_filter.wakeup_regime.entry.candidate_age.max_bars",
+        errors,
+        required=ca_enabled,
+    )
+
+    atr_short = _validate_required_int_ge_one(
+        entry.atr_expansion.short_window,
+        atr_path + ("short_window",) in raw_user_keys,
+        "trade_filter.wakeup_regime.entry.atr_expansion.short_window",
+        errors,
+        required=atr_enabled,
+    )
+    atr_long = _validate_required_int_ge_one(
+        entry.atr_expansion.long_window,
+        atr_path + ("long_window",) in raw_user_keys,
+        "trade_filter.wakeup_regime.entry.atr_expansion.long_window",
+        errors,
+        required=atr_enabled,
+    )
+    _validate_required_positive_finite(
+        entry.atr_expansion.min_ratio,
+        atr_path + ("min_ratio",) in raw_user_keys,
+        "trade_filter.wakeup_regime.entry.atr_expansion.min_ratio",
+        errors,
+        required=atr_enabled,
+    )
+    if atr_short is not None and atr_long is not None and atr_long < atr_short:
+        errors.append(
+            "trade_filter.wakeup_regime.entry.atr_expansion.long_window "
+            "must be >= short_window"
+        )
+
+    vol_short = _validate_required_int_ge_one(
+        entry.volume_expansion.short_window,
+        vol_path + ("short_window",) in raw_user_keys,
+        "trade_filter.wakeup_regime.entry.volume_expansion.short_window",
+        errors,
+        required=vol_enabled,
+    )
+    vol_baseline = _validate_required_int_ge_one(
+        entry.volume_expansion.baseline_window,
+        vol_path + ("baseline_window",) in raw_user_keys,
+        "trade_filter.wakeup_regime.entry.volume_expansion.baseline_window",
+        errors,
+        required=vol_enabled,
+    )
+    _validate_required_positive_finite(
+        entry.volume_expansion.min_ratio,
+        vol_path + ("min_ratio",) in raw_user_keys,
+        "trade_filter.wakeup_regime.entry.volume_expansion.min_ratio",
+        errors,
+        required=vol_enabled,
+    )
+    if vol_short is not None and vol_baseline is not None and vol_baseline < vol_short:
+        errors.append(
+            "trade_filter.wakeup_regime.entry.volume_expansion.baseline_window "
+            "must be >= short_window"
+        )
+
+    if wakeup_enabled and not any((ch_enabled, ca_enabled, atr_enabled, vol_enabled)):
+        errors.append(
+            "trade_filter.wakeup_regime requires at least one enabled entry component"
+        )
+
+    wakeup_exit = wakeup.exit
+    ttl_path = exit_key + ("ttl",)
+    nf_path = exit_key + ("no_fresh_candidate",)
+    action_path = exit_key + ("action",)
+
+    ttl_enabled = _validate_wakeup_component_enabled(
+        wakeup_exit.ttl, ttl_path, raw_user_keys, errors
+    )
+    nf_enabled = _validate_wakeup_component_enabled(
+        wakeup_exit.no_fresh_candidate, nf_path, raw_user_keys, errors
+    )
+
+    _validate_required_int_ge_one(
+        wakeup_exit.ttl.bars,
+        ttl_path + ("bars",) in raw_user_keys,
+        "trade_filter.wakeup_regime.exit.ttl.bars",
+        errors,
+        required=ttl_enabled,
+    )
+    _validate_required_quantile(
+        wakeup_exit.no_fresh_candidate.quantile,
+        nf_path + ("quantile",) in raw_user_keys,
+        "trade_filter.wakeup_regime.exit.no_fresh_candidate.quantile",
+        errors,
+        required=nf_enabled,
+    )
+    _validate_required_int_ge_one(
+        wakeup_exit.no_fresh_candidate.max_age_bars,
+        nf_path + ("max_age_bars",) in raw_user_keys,
+        "trade_filter.wakeup_regime.exit.no_fresh_candidate.max_age_bars",
+        errors,
+        required=nf_enabled,
+    )
+    _validate_required_int_ge_one(
+        wakeup_exit.no_fresh_candidate.timeout_bars,
+        nf_path + ("timeout_bars",) in raw_user_keys,
+        "trade_filter.wakeup_regime.exit.no_fresh_candidate.timeout_bars",
+        errors,
+        required=nf_enabled,
+    )
+
+    if wakeup_enabled and not any((ttl_enabled, nf_enabled)):
+        errors.append(
+            "trade_filter.wakeup_regime requires at least one enabled exit condition"
+        )
+
+    action_mode_present = action_path + ("mode",) in raw_user_keys
+    action_mode = wakeup_exit.action.mode
+    if wakeup_enabled and not action_mode_present:
+        errors.append(
+            "trade_filter.wakeup_regime.exit.action.mode is required when "
+            "wakeup_regime.enabled is true"
+        )
+    elif action_mode_present and action_mode not in (
+        "block_new_entries",
+        "close_position",
+    ):
+        errors.append(
+            "trade_filter.wakeup_regime.exit.action.mode must be "
+            "'block_new_entries' or 'close_position', got "
+            f"{action_mode!r}"
+        )
+
+
+def _validate_phase0_mode_d_cross_fields(
+    tf: TradeFilterConfig,
+    errors: list[str],
+    raw_user_keys: frozenset[tuple[str, ...]],
+) -> None:
+    mode_d = _is_mode_d(tf, raw_user_keys)
+    exit_c = _is_exit_c(tf, raw_user_keys)
+    wakeup_present = ("trade_filter", "wakeup_regime") in raw_user_keys
+    wakeup = getattr(tf, "wakeup_regime", None)
+    wakeup_enabled = wakeup is not None and getattr(wakeup, "enabled", None) is True
+
+    if mode_d:
+        if not exit_c:
+            _append_validation_error(
+                errors,
+                "trade_filter.zigzag.mode='D' requires raw "
+                "trade_filter.lifecycle.exit_off_mode: 'exit C'",
+                _VALIDATION_ERROR_KEYS.get(),
+                "mode_d_requires_exit_c",
+            )
+        if not wakeup_enabled:
+            _append_validation_error(
+                errors,
+                "trade_filter.zigzag.mode='D' requires "
+                "trade_filter.wakeup_regime.enabled: true",
+                _VALIDATION_ERROR_KEYS.get(),
+                "mode_d_requires_wakeup_enabled",
+            )
+
+        ctt = getattr(tf.zigzag, "candidate_trigger_threshold", None)
+        if ctt == "auto":
+            _append_validation_error(
+                errors,
+                "trade_filter.zigzag.mode='D' requires numeric "
+                "candidate_trigger_threshold; 'auto' is not supported",
+                _VALIDATION_ERROR_KEYS.get(),
+                "mode_d_candidate_threshold_auto_rejected",
+            )
+        if ("trade_filter", "zigzag", "candidate_trigger_quantile") in raw_user_keys:
+            _append_validation_error(
+                errors,
+                "trade_filter.zigzag.candidate_trigger_quantile is not allowed "
+                "with mode D",
+                _VALIDATION_ERROR_KEYS.get(),
+                "mode_d_candidate_quantile_rejected",
+            )
+
+    if exit_c:
+        if not mode_d:
+            _append_validation_error(
+                errors,
+                "trade_filter.lifecycle.exit_off_mode='exit C' requires "
+                "trade_filter.zigzag.mode: D",
+                _VALIDATION_ERROR_KEYS.get(),
+                "exit_c_requires_mode_d",
+            )
+        if ("trade_filter", "lifecycle", "exit_off_zz_leg_count") in raw_user_keys:
+            _append_validation_error(
+                errors,
+                "trade_filter.lifecycle.exit_off_zz_leg_count is not allowed "
+                "with exit C",
+                _VALIDATION_ERROR_KEYS.get(),
+                "exit_c_rejects_exit_off_zz_leg_count",
+            )
+        if ("trade_filter", "lifecycle", "exit_b_immediate_off") in raw_user_keys:
+            _append_validation_error(
+                errors,
+                "trade_filter.lifecycle.exit_b_immediate_off is not allowed "
+                "with exit C",
+                _VALIDATION_ERROR_KEYS.get(),
+                "exit_c_rejects_exit_b_immediate_off",
+            )
+        if ("trade_filter", "triggers") in raw_user_keys:
+            _append_validation_error(
+                errors,
+                "trade_filter.triggers legacy block is not allowed with exit C",
+                _VALIDATION_ERROR_KEYS.get(),
+                "exit_c_rejects_legacy_triggers",
+            )
+
+    if wakeup_present and not mode_d:
+        _append_validation_error(
+            errors,
+            "trade_filter.wakeup_regime is allowed only with "
+            "trade_filter.zigzag.mode: D",
+            _VALIDATION_ERROR_KEYS.get(),
+            "wakeup_regime_requires_mode_d",
+        )
+    if wakeup_enabled and not mode_d:
+        _append_validation_error(
+            errors,
+            "trade_filter.wakeup_regime.enabled=true requires "
+            "trade_filter.zigzag.mode: D",
+            _VALIDATION_ERROR_KEYS.get(),
+            "wakeup_enabled_requires_mode_d",
+        )
+
+
 def _validate_caller_pipeline_gate(tf: TradeFilterConfig, errors: list[str], raw_user_keys: frozenset[tuple[str, ...]], caller_pipeline: str) -> bool:
     # ------------------------------------------------------------------
     # WP-T3 step 6 — caller_pipeline domain check
@@ -1466,6 +2068,32 @@ def _validate_caller_pipeline_gate(tf: TradeFilterConfig, errors: list[str], raw
             f"{sorted(_ZIGZAG_ST_MODE_ALLOWED_CALLERS)}"
         )
         return False
+
+    if caller_pipeline == "wf_grid":
+        if _is_mode_d(tf, raw_user_keys):
+            _append_validation_error(
+                errors,
+                "trade_filter.zigzag.mode='D' is not supported by wf_grid "
+                "in Phase 0; use tester pipeline",
+                _VALIDATION_ERROR_KEYS.get(),
+                "mode_d_unsupported_pipeline",
+            )
+        if _is_exit_c(tf, raw_user_keys):
+            _append_validation_error(
+                errors,
+                "trade_filter.lifecycle.exit_off_mode='exit C' is not "
+                "supported by wf_grid in Phase 0; use tester pipeline",
+                _VALIDATION_ERROR_KEYS.get(),
+                "exit_c_unsupported_pipeline",
+            )
+        if ("trade_filter", "wakeup_regime") in raw_user_keys:
+            _append_validation_error(
+                errors,
+                "trade_filter.wakeup_regime is not supported by wf_grid "
+                "in Phase 0; use tester pipeline",
+                _VALIDATION_ERROR_KEYS.get(),
+                "wakeup_regime_unsupported_pipeline",
+            )
 
     return True
 
@@ -1594,6 +2222,8 @@ def _validate_subfilter_legality_dispatch(
         _validate_lifecycle_block(tf, errors, raw_user_keys)
         _validate_triggers_block(tf, errors, raw_user_keys)
         _validate_time_filter_block(tf, errors, raw_user_keys)
+        _validate_wakeup_regime_block(tf, errors, raw_user_keys)
+        _validate_phase0_mode_d_cross_fields(tf, errors, raw_user_keys)
     elif zigzag_enabled and volume_enabled:
         if not _validate_zigzag_required_blocks(errors, raw_user_keys):
             return
@@ -1602,12 +2232,16 @@ def _validate_subfilter_legality_dispatch(
         _validate_triggers_block(tf, errors, raw_user_keys)
         _validate_time_filter_block(tf, errors, raw_user_keys)
         _validate_volume_block(tf, errors, raw_user_keys)
+        _validate_wakeup_regime_block(tf, errors, raw_user_keys)
+        _validate_phase0_mode_d_cross_fields(tf, errors, raw_user_keys)
     elif not zigzag_enabled and volume_enabled:
         _validate_standalone_volume_legality(tf, errors, raw_user_keys)
         if ("trade_filter", "lifecycle") in raw_user_keys:
             _validate_lifecycle_block(tf, errors, raw_user_keys)
         _validate_time_filter_block(tf, errors, raw_user_keys)
         _validate_volume_block(tf, errors, raw_user_keys)
+        _validate_wakeup_regime_block(tf, errors, raw_user_keys)
+        _validate_phase0_mode_d_cross_fields(tf, errors, raw_user_keys)
     else:
         errors.append(
             "at least one subfilter must be enabled: set "
@@ -1838,6 +2472,16 @@ __all__ = [
     "TradeFilterTimeFilterConfig",
     "TradeFilterBaselineSessionConfig",
     "TradeFilterVolumeConfig",
+    "TradeFilterWakeupRegimeConfig",
+    "TradeFilterWakeupEntryConfig",
+    "TradeFilterWakeupCandidateHeightConfig",
+    "TradeFilterWakeupCandidateAgeConfig",
+    "TradeFilterWakeupAtrExpansionConfig",
+    "TradeFilterWakeupVolumeExpansionConfig",
+    "TradeFilterWakeupExitConfig",
+    "TradeFilterWakeupTtlExitConfig",
+    "TradeFilterWakeupNoFreshCandidateExitConfig",
+    "TradeFilterWakeupExitActionConfig",
     "validate_trade_filter",
     "collect_raw_user_keys",
     "collect_trade_filter_unknown_keys",
@@ -1845,6 +2489,7 @@ __all__ = [
     "is_trade_filter_enabled",
     "is_zigzag_enabled",
     "is_volume_enabled",
+    "is_wakeup_volume_enabled",
     "resolve_zigzag_enabled_in_place",
     "resolve_volume_enabled_in_place",
     "resolve_volume_defaults_in_place",

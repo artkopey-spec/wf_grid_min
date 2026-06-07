@@ -59,6 +59,7 @@ from supertrend_optimizer.core._reset_events import (
     _infer_time_filter_events,
     detect_st_flip,
 )
+from supertrend_optimizer.core.calculator import calculate_atr_rma, calculate_true_range
 from supertrend_optimizer.utils.exceptions import ConfigError
 
 if TYPE_CHECKING:
@@ -140,6 +141,9 @@ class ZigZagGlobalStats:
     zigzag_mode: str = "A"
     candidate_duration_gate_enabled: bool = False
     candidate_duration_max_bars: Optional[int] = None
+    # Wakeup Phase 0 fields. Defaults keep legacy construction compatible.
+    wakeup_entry_candidate_height_threshold: Optional[float] = None
+    wakeup_no_fresh_candidate_height_threshold: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -964,11 +968,69 @@ def build_zigzag_global_stats(
             "see Appendix A v1.1 §12.3."
         )
 
+    def _materialize_wakeup_quantile_threshold(q_raw: object, field_path: str) -> float:
+        try:
+            q_f = float(q_raw)
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(
+                f"{field_path} must be numeric in (0, 1), got {q_raw!r}"
+            ) from exc
+        if not math.isfinite(q_f) or not (0.0 < q_f < 1.0):
+            raise ConfigError(f"{field_path} must be in (0, 1), got {q_f!r}")
+
+        required_legs = max(local_window, 10)
+        if n_legs_total < required_legs:
+            raise ConfigError(
+                "ZigZag global stats initialisation failed: wakeup quantile "
+                f"{field_path} requires at least {required_legs} confirmed legs "
+                f"(max(local_window={local_window}, 10)), got {n_legs_total}."
+            )
+
+        threshold = float(np.quantile(confirmed_heights_pct, q=q_f, method="linear"))
+        if not math.isfinite(threshold):
+            raise ConfigError(
+                "ZigZag global stats initialisation failed: materialized "
+                f"{field_path} threshold is {threshold!r}."
+            )
+        return threshold
+
+    wakeup_entry_candidate_height_threshold: Optional[float] = None
+    wakeup_no_fresh_candidate_height_threshold: Optional[float] = None
+    wakeup_cfg = getattr(trade_filter_config, "wakeup_regime", None)
+    candidate_height_cfg = None
+    no_fresh_cfg = None
+    if resolved_mode == "D" and wakeup_cfg is not None:
+        wakeup_entry = getattr(wakeup_cfg, "entry", None)
+        candidate_height_cfg = getattr(wakeup_entry, "candidate_height", None)
+        if getattr(candidate_height_cfg, "enabled", False) is True:
+            wakeup_entry_candidate_height_threshold = (
+                _materialize_wakeup_quantile_threshold(
+                    getattr(candidate_height_cfg, "quantile", None),
+                    "trade_filter.wakeup_regime.entry.candidate_height.quantile",
+                )
+            )
+
+        wakeup_exit = getattr(wakeup_cfg, "exit", None)
+        no_fresh_cfg = getattr(wakeup_exit, "no_fresh_candidate", None)
+        if getattr(no_fresh_cfg, "enabled", False) is True:
+            wakeup_no_fresh_candidate_height_threshold = (
+                _materialize_wakeup_quantile_threshold(
+                    getattr(no_fresh_cfg, "quantile", None),
+                    "trade_filter.wakeup_regime.exit.no_fresh_candidate.quantile",
+                )
+            )
+
     metadata: dict = {
         "candidate_trigger_source": candidate_trigger_source,
         "candidate_trigger_threshold_mode": threshold_mode,
         "candidate_trigger_quantile": candidate_trigger_quantile,
         "min_legs_for_quantile": min_legs_for_quantile,
+        "wakeup_entry_candidate_height_threshold": (
+            wakeup_entry_candidate_height_threshold
+        ),
+        "wakeup_no_fresh_candidate_height_threshold": (
+            wakeup_no_fresh_candidate_height_threshold
+        ),
         "n_legs_total": n_legs_total,
         "config_snapshot": {
             "reversal_threshold": reversal_threshold_f,
@@ -983,6 +1045,16 @@ def build_zigzag_global_stats(
                 "enabled": gate_enabled,
                 "max_bars": gate_max_bars,
             },
+            "wakeup_entry_candidate_height_quantile": (
+                getattr(candidate_height_cfg, "quantile", None)
+                if resolved_mode == "D" and wakeup_cfg is not None
+                else None
+            ),
+            "wakeup_no_fresh_candidate_quantile": (
+                getattr(no_fresh_cfg, "quantile", None)
+                if resolved_mode == "D" and wakeup_cfg is not None
+                else None
+            ),
         },
     }
 
@@ -1003,6 +1075,10 @@ def build_zigzag_global_stats(
         zigzag_mode=resolved_mode,
         candidate_duration_gate_enabled=gate_enabled,
         candidate_duration_max_bars=gate_max_bars,
+        wakeup_entry_candidate_height_threshold=wakeup_entry_candidate_height_threshold,
+        wakeup_no_fresh_candidate_height_threshold=(
+            wakeup_no_fresh_candidate_height_threshold
+        ),
     )
 
 
@@ -1049,6 +1125,7 @@ _TRIGGER_SOURCE_NONE: str = "none"
 _TRIGGER_SOURCE_A: str = "candidate_threshold"
 _TRIGGER_SOURCE_B: str = "confirmed_median"
 _TRIGGER_SOURCE_BOTH: str = "both"
+_TRIGGER_SOURCE_WAKEUP: str = "wakeup_regime"
 
 # ТЗ v3 §10.4 — complete ``immediate_candidate_entry_block_reason`` whitelist.
 # ``_IMM_REASON_FILTER_OFF`` (priority 2 in spec) is whitelist-compatible but
@@ -1139,6 +1216,258 @@ def _trade_mode_allows_direction(direction: int, trade_mode: str) -> bool:
     if direction == -1:
         return trade_mode in ("short", "both", "revers")
     return False
+
+
+def _is_component_enabled(component: object) -> bool:
+    return component is not None and getattr(component, "enabled", None) is True
+
+
+def _require_1d_len(name: str, values: object, n: int) -> np.ndarray:
+    if values is None:
+        raise ConfigError(f"apply() requires {name} for Mode D wakeup component")
+    arr = np.asarray(values, dtype=np.float64)
+    if arr.ndim != 1 or arr.shape[0] != n:
+        raise ConfigError(
+            f"apply() {name} must be 1-D with length n={n}; "
+            f"got shape={arr.shape}"
+        )
+    return arr
+
+
+def _resolve_mode_d_wakeup_entry(
+    trade_filter_config: Any,
+) -> tuple[object, object, object, object]:
+    wakeup = getattr(trade_filter_config, "wakeup_regime", None)
+    if wakeup is None or getattr(wakeup, "enabled", None) is not True:
+        raise ConfigError(
+            "apply() Mode D requires trade_filter.wakeup_regime.enabled=True"
+        )
+    entry = getattr(wakeup, "entry", None)
+    if entry is None:
+        raise ConfigError("apply() Mode D requires trade_filter.wakeup_regime.entry")
+    return (
+        getattr(entry, "candidate_height", None),
+        getattr(entry, "candidate_age", None),
+        getattr(entry, "atr_expansion", None),
+        getattr(entry, "volume_expansion", None),
+    )
+
+
+def _resolve_mode_d_wakeup_exit(
+    trade_filter_config: Any,
+) -> tuple[object, object, object]:
+    wakeup = getattr(trade_filter_config, "wakeup_regime", None)
+    exit_cfg = getattr(wakeup, "exit", None) if wakeup is not None else None
+    if exit_cfg is None:
+        raise ConfigError("apply() Mode D requires trade_filter.wakeup_regime.exit")
+    return (
+        getattr(exit_cfg, "ttl", None),
+        getattr(exit_cfg, "no_fresh_candidate", None),
+        getattr(exit_cfg, "action", None),
+    )
+
+
+def _wakeup_entry_component_ok(
+    *,
+    component: object,
+    value: float,
+    threshold: object,
+) -> bool:
+    if not _is_component_enabled(component):
+        return True
+    if threshold is None:
+        raise ConfigError("apply() Mode D wakeup threshold is not materialized")
+    threshold_f = float(threshold)
+    if not math.isfinite(threshold_f):
+        raise ConfigError("apply() Mode D wakeup threshold must be finite")
+    return math.isfinite(value) and value >= threshold_f
+
+
+class _WakeupEntryEvaluation(NamedTuple):
+    all_ok: bool
+    height_ok: bool
+    age_ok: bool
+    direction_ok: bool
+    trade_mode_ok: bool
+    atr_ok: bool
+    volume_ok: bool
+    candidate_age: int
+    atr_value: Optional[float]
+    volume_value: Optional[float]
+
+
+class _WakeupRuntimeState(NamedTuple):
+    cycle_age: int
+    bars_since_fresh: int
+    active_direction: int
+    exit_c_fired: bool
+
+
+def _wakeup_runtime_off() -> _WakeupRuntimeState:
+    return _WakeupRuntimeState(
+        cycle_age=-1,
+        bars_since_fresh=-1,
+        active_direction=0,
+        exit_c_fired=False,
+    )
+
+
+def _evaluate_wakeup_entry(
+    *,
+    candidate_height: float,
+    candidate_age: int,
+    candidate_direction: int,
+    trade_mode: str,
+    candidate_height_cfg: object,
+    candidate_age_cfg: object,
+    atr_cfg: object,
+    volume_cfg: object,
+    candidate_height_threshold: object,
+    wakeup_atr_ratio: "Optional[np.ndarray]",
+    wakeup_volume_ratio: "Optional[np.ndarray]",
+    t: int,
+) -> _WakeupEntryEvaluation:
+    height_ok = _wakeup_entry_component_ok(
+        component=candidate_height_cfg,
+        value=candidate_height,
+        threshold=candidate_height_threshold,
+    )
+    if _is_component_enabled(candidate_age_cfg):
+        age_ok = (
+            candidate_age > 0
+            and candidate_age <= int(getattr(candidate_age_cfg, "max_bars"))
+        )
+    else:
+        age_ok = True
+
+    atr_value: Optional[float] = None
+    if _is_component_enabled(atr_cfg):
+        if wakeup_atr_ratio is None:
+            raise ConfigError(
+                "apply() Mode D requires wakeup ATR ratio when "
+                "atr_expansion is enabled"
+            )
+        atr_value = float(wakeup_atr_ratio[t])
+        atr_ok = (
+            math.isfinite(atr_value)
+            and atr_value >= float(getattr(atr_cfg, "min_ratio"))
+        )
+    else:
+        atr_ok = True
+        if wakeup_atr_ratio is not None:
+            atr_value = float(wakeup_atr_ratio[t])
+
+    volume_value: Optional[float] = None
+    if _is_component_enabled(volume_cfg):
+        if wakeup_volume_ratio is None:
+            raise ConfigError(
+                "apply() Mode D requires wakeup volume ratio when "
+                "volume_expansion is enabled"
+            )
+        volume_value = float(wakeup_volume_ratio[t])
+        volume_ok = (
+            math.isfinite(volume_value)
+            and volume_value >= float(getattr(volume_cfg, "min_ratio"))
+        )
+    else:
+        volume_ok = True
+        if wakeup_volume_ratio is not None:
+            volume_value = float(wakeup_volume_ratio[t])
+
+    direction_ok = candidate_direction in (-1, +1)
+    trade_mode_ok = _trade_mode_allows_direction(candidate_direction, trade_mode)
+    return _WakeupEntryEvaluation(
+        all_ok=(
+            height_ok
+            and age_ok
+            and direction_ok
+            and trade_mode_ok
+            and atr_ok
+            and volume_ok
+        ),
+        height_ok=height_ok,
+        age_ok=age_ok,
+        direction_ok=direction_ok,
+        trade_mode_ok=trade_mode_ok,
+        atr_ok=atr_ok,
+        volume_ok=volume_ok,
+        candidate_age=candidate_age,
+        atr_value=atr_value,
+        volume_value=volume_value,
+    )
+
+
+def _record_wakeup_entry_diagnostics(
+    *,
+    arrays: Dict[str, np.ndarray],
+    t: int,
+    evaluation: _WakeupEntryEvaluation,
+    candidate_height: float,
+    candidate_height_threshold: object,
+    candidate_direction: int,
+) -> None:
+    arrays["wakeup_entry_all_ok_arr"][t] = np.int8(1 if evaluation.all_ok else 0)
+    arrays["wakeup_entry_candidate_height_ok_arr"][t] = np.int8(
+        1 if evaluation.height_ok else 0
+    )
+    arrays["wakeup_entry_candidate_age_ok_arr"][t] = np.int8(
+        1 if evaluation.age_ok else 0
+    )
+    arrays["wakeup_entry_candidate_direction_ok_arr"][t] = np.int8(
+        1 if evaluation.direction_ok else 0
+    )
+    arrays["wakeup_entry_trade_mode_ok_arr"][t] = np.int8(
+        1 if evaluation.trade_mode_ok else 0
+    )
+    arrays["wakeup_entry_atr_ok_arr"][t] = np.int8(1 if evaluation.atr_ok else 0)
+    arrays["wakeup_entry_volume_ok_arr"][t] = np.int8(
+        1 if evaluation.volume_ok else 0
+    )
+    arrays["wakeup_entry_candidate_height_value_arr"][t] = candidate_height
+    if candidate_height_threshold is not None:
+        arrays["wakeup_entry_candidate_height_threshold_arr"][t] = float(
+            candidate_height_threshold
+        )
+    arrays["wakeup_entry_candidate_age_bars_arr"][t] = max(
+        0,
+        int(evaluation.candidate_age),
+    )
+    arrays["wakeup_entry_candidate_leg_direction_arr"][t] = np.int8(
+        candidate_direction
+    )
+    if evaluation.atr_value is not None:
+        arrays["wakeup_entry_atr_ratio_arr"][t] = evaluation.atr_value
+    if evaluation.volume_value is not None:
+        arrays["wakeup_entry_volume_ratio_arr"][t] = evaluation.volume_value
+
+
+def _is_wakeup_fresh_candidate(
+    *,
+    no_fresh_cfg: object,
+    active_direction: int,
+    candidate_direction: int,
+    candidate_age: int,
+    candidate_height: float,
+    threshold: object,
+) -> bool:
+    if not _is_component_enabled(no_fresh_cfg):
+        return False
+    if threshold is None:
+        raise ConfigError(
+            "apply() Mode D no_fresh_candidate threshold is not materialized"
+        )
+    threshold_f = float(threshold)
+    if not math.isfinite(threshold_f):
+        raise ConfigError(
+            "apply() Mode D no_fresh_candidate threshold must be finite"
+        )
+    return (
+        candidate_direction == active_direction
+        and candidate_age > 0
+        and candidate_age <= int(getattr(no_fresh_cfg, "max_age_bars"))
+        and math.isfinite(candidate_height)
+        and candidate_height >= threshold_f
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1379,6 +1708,527 @@ def _resolve_freeze_confirmed_legs(trade_filter_config: Any) -> int:
 #  §15.7, §16, §17.1, §17.7..§17.14)
 # ---------------------------------------------------------------------------
 
+class _ApplyResetEvents(NamedTuple):
+    daily_reset_enabled: bool
+    daily_reset_event: np.ndarray
+    time_filter_enabled: bool
+    time_filter_in_window: np.ndarray
+    time_filter_reset_event: np.ndarray
+    combined_reset_event: np.ndarray
+
+
+class _ApplyVolumeRuntimeArrays(NamedTuple):
+    condition_allowed: Optional[np.ndarray]
+    condition_block_reason: Optional[np.ndarray]
+    regime: Optional[np.ndarray]
+    initial_direction: Optional[np.ndarray]
+    median_relative: Optional[np.ndarray]
+    condition_block_reason_labels: Optional[np.ndarray]
+    regime_labels: Optional[np.ndarray]
+    initial_direction_labels: Optional[np.ndarray]
+
+
+def _precompute_apply_length(
+    *,
+    per_bar: "Optional[ZigZagPerBar]",
+    trend: np.ndarray,
+    close: "Optional[np.ndarray]",
+) -> int:
+    if per_bar is not None:
+        return int(per_bar.candidate_height_pct.shape[0])
+    if trend is not None:
+        return int(np.asarray(trend).shape[0])
+    if close is not None:
+        return int(np.asarray(close).shape[0])
+    raise ConfigError("apply() requires at least one of: per_bar, trend, close")
+
+
+def _resolve_apply_reset_events(
+    *,
+    trade_filter_config: Any,
+    index: "Optional[pd.Index]",
+    n: int,
+    daily_reset_event: "Optional[np.ndarray]",
+    time_filter_events: "Optional[tuple[np.ndarray, np.ndarray]]",
+) -> _ApplyResetEvents:
+    _zz_cfg = _extract_zigzag_field(trade_filter_config, "zigzag")
+    _vol_cfg = getattr(trade_filter_config, "volume", None)
+    daily_reset_enabled = bool(
+        _extract_zigzag_field(_zz_cfg, "daily_reset", False)
+    ) if _zz_cfg is not None else False
+    daily_reset_enabled = daily_reset_enabled or bool(
+        getattr(_vol_cfg, "daily_reset", False)
+    )
+
+    if daily_reset_event is None:
+        daily_reset_event_out = _infer_daily_reset_event(
+            index, n, enabled=daily_reset_enabled
+        )
+    else:
+        daily_reset_event_out = np.asarray(daily_reset_event, dtype=bool)
+        if daily_reset_event_out.ndim != 1:
+            raise ConfigError(
+                f"apply() daily_reset_event must be 1-D, "
+                f"got ndim={daily_reset_event_out.ndim}"
+            )
+        if daily_reset_event_out.shape[0] != n:
+            raise ConfigError(
+                f"apply() daily_reset_event length "
+                f"{daily_reset_event_out.shape[0]} != n={n}"
+            )
+
+    _tfl_cfg = getattr(trade_filter_config, "time_filter", None)
+    _tfl_enabled = (
+        bool(getattr(_tfl_cfg, "enabled", False)) if _tfl_cfg is not None else False
+    )
+
+    if time_filter_events is None:
+        _tfl_sh = getattr(_tfl_cfg, "_start_hour", None) if _tfl_cfg is not None else None
+        _tfl_sm = getattr(_tfl_cfg, "_start_minute", None) if _tfl_cfg is not None else None
+        _tfl_eh = getattr(_tfl_cfg, "_end_hour", None) if _tfl_cfg is not None else None
+        _tfl_em = getattr(_tfl_cfg, "_end_minute", None) if _tfl_cfg is not None else None
+        if _tfl_enabled and any(x is None for x in (_tfl_sh, _tfl_sm, _tfl_eh, _tfl_em)):
+            raise ConfigError(
+                "apply(): time_filter.enabled=True but resolver fields are None; "
+                "ensure resolve_time_filter_in_place() is called before apply()"
+            )
+        time_filter_in_window, time_filter_reset_event_out = _infer_time_filter_events(
+            index, n,
+            enabled=_tfl_enabled,
+            start_h=int(_tfl_sh) if _tfl_sh is not None else 0,
+            start_m=int(_tfl_sm) if _tfl_sm is not None else 0,
+            end_h=int(_tfl_eh) if _tfl_eh is not None else 0,
+            end_m=int(_tfl_em) if _tfl_em is not None else 0,
+        )
+    else:
+        _raw_in_w, _raw_reset = time_filter_events
+        time_filter_in_window = np.asarray(_raw_in_w, dtype=bool)
+        time_filter_reset_event_out = np.asarray(_raw_reset, dtype=bool)
+        if time_filter_in_window.ndim != 1 or time_filter_in_window.shape[0] != n:
+            raise ConfigError(
+                f"apply() time_filter_events[0] (in_window) must be 1-D bool "
+                f"of length n={n}"
+            )
+        if time_filter_reset_event_out.ndim != 1 or time_filter_reset_event_out.shape[0] != n:
+            raise ConfigError(
+                f"apply() time_filter_events[1] (reset_event) must be 1-D bool "
+                f"of length n={n}"
+            )
+
+    return _ApplyResetEvents(
+        daily_reset_enabled=daily_reset_enabled,
+        daily_reset_event=daily_reset_event_out,
+        time_filter_enabled=_tfl_enabled,
+        time_filter_in_window=time_filter_in_window,
+        time_filter_reset_event=time_filter_reset_event_out,
+        combined_reset_event=daily_reset_event_out | time_filter_reset_event_out,
+    )
+
+
+def _materialize_apply_volume_runtime(
+    volume_runtime: "Optional[VolumeRuntime]",
+    *,
+    n: int,
+) -> _ApplyVolumeRuntimeArrays:
+    if volume_runtime is None:
+        return _ApplyVolumeRuntimeArrays(
+            None, None, None, None, None, None, None, None
+        )
+
+    from supertrend_optimizer.core.volume_metrics import (
+        materialize_volume_block_reason,
+        materialize_volume_initial_direction,
+        materialize_volume_regime,
+    )
+
+    condition_allowed = np.asarray(
+        volume_runtime.volume_condition_allowed, dtype=bool
+    )
+    condition_block_reason = np.asarray(
+        volume_runtime.volume_condition_block_reason
+    )
+    regime = np.asarray(volume_runtime.volume_regime)
+    initial_direction = np.asarray(volume_runtime.volume_initial_direction)
+    median_relative = np.asarray(
+        volume_runtime.median_relative_volume, dtype=np.float64
+    )
+    _volume_arrays = {
+        "volume_condition_allowed": condition_allowed,
+        "volume_condition_block_reason": condition_block_reason,
+        "volume_regime": regime,
+        "volume_initial_direction": initial_direction,
+        "median_relative_volume": median_relative,
+    }
+    for _name, _arr in _volume_arrays.items():
+        if _arr.ndim != 1 or _arr.shape[0] != n:
+            raise ConfigError(
+                f"apply() volume_runtime.{_name} must be 1-D with length "
+                f"n={n}; got shape={_arr.shape}"
+            )
+
+    return _ApplyVolumeRuntimeArrays(
+        condition_allowed=condition_allowed,
+        condition_block_reason=condition_block_reason,
+        regime=regime,
+        initial_direction=initial_direction,
+        median_relative=median_relative,
+        condition_block_reason_labels=materialize_volume_block_reason(
+            condition_block_reason
+        ),
+        regime_labels=materialize_volume_regime(regime),
+        initial_direction_labels=materialize_volume_initial_direction(
+            initial_direction
+        ),
+    )
+
+
+def _atr_rma_or_nan(tr: np.ndarray, period: int) -> np.ndarray:
+    out = np.full(len(tr), np.nan, dtype=np.float64)
+    if len(tr) < period:
+        return out
+    return calculate_atr_rma(tr, period)
+
+
+def _rolling_mean_or_nan(values: np.ndarray, window: int) -> np.ndarray:
+    values_f = np.asarray(values, dtype=np.float64)
+    n = len(values_f)
+    out = np.full(n, np.nan, dtype=np.float64)
+    if n < window:
+        return out
+    finite = np.isfinite(values_f)
+    clean = np.where(finite, values_f, 0.0)
+    csum = np.cumsum(np.insert(clean, 0, 0.0))
+    ccount = np.cumsum(np.insert(finite.astype(np.int64), 0, 0))
+    sums = csum[window:] - csum[:-window]
+    counts = ccount[window:] - ccount[:-window]
+    valid = counts == window
+    out[window - 1:] = np.where(valid, sums / float(window), np.nan)
+    return out
+
+
+def _compute_wakeup_atr_ratio(
+    high: np.ndarray,
+    low: np.ndarray,
+    close: np.ndarray,
+    short_window: int,
+    long_window: int,
+) -> np.ndarray:
+    high_f = np.asarray(high, dtype=np.float64)
+    low_f = np.asarray(low, dtype=np.float64)
+    close_f = np.asarray(close, dtype=np.float64)
+    n = len(close_f)
+    if not (len(high_f) == len(low_f) == n):
+        raise ConfigError(
+            "wakeup ATR ratio requires high, low, close arrays of equal length"
+        )
+    if short_window < 1 or long_window < 1:
+        raise ConfigError("wakeup ATR ratio windows must be >= 1")
+
+    ratio = np.full(n, np.nan, dtype=np.float64)
+    if n < long_window:
+        return ratio
+
+    tr = calculate_true_range(high_f, low_f, close_f)
+    short_atr = _atr_rma_or_nan(tr, short_window)
+    long_atr = _atr_rma_or_nan(tr, long_window)
+    valid = np.isfinite(short_atr) & np.isfinite(long_atr) & (long_atr > 0.0)
+    np.divide(short_atr, long_atr, out=ratio, where=valid)
+    ratio[:long_window - 1] = np.nan
+    return ratio
+
+
+def _compute_wakeup_volume_ratio(
+    volume: np.ndarray,
+    short_window: int,
+    baseline_window: int,
+) -> np.ndarray:
+    volume_f = np.asarray(volume, dtype=np.float64)
+    n = len(volume_f)
+    if short_window < 1 or baseline_window < 1:
+        raise ConfigError("wakeup volume ratio windows must be >= 1")
+
+    ratio = np.full(n, np.nan, dtype=np.float64)
+    if n < baseline_window:
+        return ratio
+
+    short_mean = _rolling_mean_or_nan(volume_f, short_window)
+    baseline_mean = _rolling_mean_or_nan(volume_f, baseline_window)
+    valid = (
+        np.isfinite(short_mean)
+        & np.isfinite(baseline_mean)
+        & (baseline_mean > 0.0)
+    )
+    np.divide(short_mean, baseline_mean, out=ratio, where=valid)
+    ratio[:baseline_window - 1] = np.nan
+    return ratio
+
+
+def _allocate_apply_arrays(
+    *,
+    n: int,
+    zigzag_global_stats: ZigZagGlobalStats,
+    candidate_trigger_threshold: float,
+    global_median: float,
+    freeze_confirmed_legs: int,
+    trade_filter_config: Any,
+    exit_off_mode_echo: str,
+    exit_off_zz_leg_echo: int,
+    exit_b_immediate_off_flag: bool,
+    resolved_mode: str,
+    gate_enabled: bool,
+    gate_max_bars: int,
+) -> Dict[str, np.ndarray]:
+    try:
+        _zcfg = _extract_zigzag_field(trade_filter_config, "zigzag")
+        _lw_val = int(_extract_zigzag_field(_zcfg, "local_window") or 0)
+    except Exception:
+        _lw_val = 0
+
+    return {
+        "filtered_positions": np.zeros(n, dtype=np.int8),
+        "state_arr": np.full(
+            n, _FSM_STATE_NAMES[int(ZigZagFSMState.OFF)], dtype=object
+        ),
+        "state_code_arr": np.full(n, int(ZigZagFSMState.OFF), dtype=np.int64),
+        "trigger_source_arr": np.full(n, _TRIGGER_SOURCE_NONE, dtype=object),
+        "confirmed_legs_since_start_arr": np.full(n, -1, dtype=np.int64),
+        "st_flip_dir_arr": np.zeros(n, dtype=np.int8),
+        "trade_filter_enabled_arr": np.ones(n, dtype=np.int8),
+        "reversal_threshold_arr": np.full(
+            n, float(zigzag_global_stats.reversal_threshold), dtype=np.float64
+        ),
+        "ctt_diag_arr": np.full(
+            n, float(candidate_trigger_threshold), dtype=np.float64
+        ),
+        "local_window_arr": np.full(n, _lw_val, dtype=np.int64),
+        "global_median_arr": np.full(n, float(global_median), dtype=np.float64),
+        "global_stats_available_arr": np.ones(n, dtype=np.int8),
+        "freeze_confirmed_legs_arr": np.full(
+            n, int(freeze_confirmed_legs), dtype=np.int64
+        ),
+        "median_stop_triggered_arr": np.zeros(n, dtype=np.int8),
+        "stopping_started_at_arr": np.full(n, -1, dtype=np.int64),
+        "filter_allowed_entry_arr": np.zeros(n, dtype=np.int8),
+        "filter_block_reason_arr": np.full(n, "none", dtype=object),
+        "exit_off_mode_arr": np.full(n, exit_off_mode_echo, dtype=object),
+        "exit_off_zz_leg_count_arr": np.full(
+            n, np.int64(exit_off_zz_leg_echo), dtype=np.int64
+        ),
+        "zz_legs_since_lifecycle_start_arr": np.full(n, -1, dtype=np.int64),
+        "zz_leg_stop_triggered_arr": np.zeros(n, dtype=np.int8),
+        "exit_b_immediate_off_triggered_arr": np.zeros(n, dtype=np.int8),
+        "exit_b_immediate_off_config_arr": np.full(
+            n, np.int8(1 if exit_b_immediate_off_flag else 0), dtype=np.int8
+        ),
+        "candidate_threshold_ok_arr": np.zeros(n, dtype=np.int8),
+        "candidate_component_ok_arr": np.zeros(n, dtype=np.int8),
+        "confirmed_median_ok_arr": np.zeros(n, dtype=np.int8),
+        "b_component_ok_arr": np.zeros(n, dtype=np.int8),
+        "immediate_allowed_arr": np.zeros(n, dtype=np.int8),
+        "candidate_duration_gate_passed_arr": np.zeros(n, dtype=np.int8),
+        "state_at_bar_start_arr": np.full(
+            n, int(ZigZagFSMState.OFF), dtype=np.int64
+        ),
+        "held_pos_at_bar_start_arr": np.zeros(n, dtype=np.int8),
+        "confirmed_legs_at_bar_start_arr": np.full(n, -1, dtype=np.int64),
+        "zigzag_mode_arr": np.full(n, resolved_mode, dtype=object),
+        "candidate_duration_gate_enabled_arr": np.full(
+            n, np.int8(1 if gate_enabled else 0), dtype=np.int8
+        ),
+        "candidate_duration_max_bars_arr": np.full(
+            n, gate_max_bars, dtype=np.int64
+        ),
+        "immediate_used_arr": np.zeros(n, dtype=np.int8),
+        "immediate_block_reason_arr": np.full(n, "mode_not_c", dtype=object),
+        "wakeup_regime_active_arr": np.zeros(n, dtype=np.int8),
+        "wakeup_entry_all_ok_arr": np.zeros(n, dtype=np.int8),
+        "wakeup_entry_candidate_height_ok_arr": np.zeros(n, dtype=np.int8),
+        "wakeup_entry_candidate_age_ok_arr": np.zeros(n, dtype=np.int8),
+        "wakeup_entry_candidate_direction_ok_arr": np.zeros(n, dtype=np.int8),
+        "wakeup_entry_trade_mode_ok_arr": np.zeros(n, dtype=np.int8),
+        "wakeup_entry_atr_ok_arr": np.zeros(n, dtype=np.int8),
+        "wakeup_entry_volume_ok_arr": np.zeros(n, dtype=np.int8),
+        "wakeup_entry_candidate_height_value_arr": np.full(
+            n, np.nan, dtype=np.float64
+        ),
+        "wakeup_entry_candidate_height_threshold_arr": np.full(
+            n, np.nan, dtype=np.float64
+        ),
+        "wakeup_entry_candidate_age_bars_arr": np.zeros(n, dtype=np.int64),
+        "wakeup_entry_candidate_leg_direction_arr": np.zeros(n, dtype=np.int8),
+        "wakeup_entry_atr_ratio_arr": np.full(n, np.nan, dtype=np.float64),
+        "wakeup_entry_volume_ratio_arr": np.full(n, np.nan, dtype=np.float64),
+        "wakeup_cycle_age_bars_arr": np.full(n, -1, dtype=np.int64),
+        "wakeup_bars_since_fresh_candidate_arr": np.full(n, -1, dtype=np.int64),
+        "wakeup_exit_ttl_triggered_arr": np.zeros(n, dtype=np.int8),
+        "wakeup_exit_no_fresh_candidate_triggered_arr": np.zeros(n, dtype=np.int8),
+        "wakeup_exit_close_triggered_arr": np.zeros(n, dtype=np.int8),
+        "wakeup_exit_action_mode_arr": np.full(n, "none", dtype=object),
+        "wakeup_exit_reason_arr": np.full(n, "none", dtype=object),
+    }
+
+
+def _finalize_apply_result(
+    *,
+    n: int,
+    arrays: Dict[str, np.ndarray],
+    cand_height: np.ndarray,
+    local_median_N: np.ndarray,
+    local_median_available: np.ndarray,
+    cand_age_bars: np.ndarray,
+    cand_leg_dir: np.ndarray,
+    reset_events: _ApplyResetEvents,
+    volume_runtime: "Optional[VolumeRuntime]",
+    volume_arrays: _ApplyVolumeRuntimeArrays,
+) -> "ZigZagSTFilterResult":
+    filter_diagnostics_out: Dict[str, np.ndarray] = {
+        "trade_filter_state": arrays["state_arr"],
+        "trade_filter_state_code": arrays["state_code_arr"],
+        "trade_filter_trigger_source": arrays["trigger_source_arr"],
+        "confirmed_legs_since_start": arrays["confirmed_legs_since_start_arr"],
+        "st_flip_dir": arrays["st_flip_dir_arr"],
+        "trade_filter_enabled": arrays["trade_filter_enabled_arr"],
+        "zigzag_reversal_threshold": arrays["reversal_threshold_arr"],
+        "candidate_height_pct": np.asarray(cand_height, dtype=np.float64),
+        "candidate_trigger_threshold": arrays["ctt_diag_arr"],
+        "local_median_N": np.asarray(local_median_N, dtype=np.float64),
+        "local_median_available": np.asarray(local_median_available, dtype=np.int8),
+        "local_window": arrays["local_window_arr"],
+        "global_median": arrays["global_median_arr"],
+        "global_stats_available": arrays["global_stats_available_arr"],
+        "freeze_confirmed_legs": arrays["freeze_confirmed_legs_arr"],
+        "median_stop_triggered": arrays["median_stop_triggered_arr"],
+        "stopping_started_at_index": arrays["stopping_started_at_arr"],
+        "filter_allowed_entry": arrays["filter_allowed_entry_arr"],
+        "filter_block_reason": arrays["filter_block_reason_arr"],
+        "exit_off_mode": arrays["exit_off_mode_arr"],
+        "exit_off_zz_leg_count": arrays["exit_off_zz_leg_count_arr"],
+        "zz_legs_since_lifecycle_start": arrays["zz_legs_since_lifecycle_start_arr"],
+        "zz_leg_stop_triggered": arrays["zz_leg_stop_triggered_arr"],
+        "exit_b_immediate_off_triggered": arrays[
+            "exit_b_immediate_off_triggered_arr"
+        ],
+        "exit_b_immediate_off_config": arrays["exit_b_immediate_off_config_arr"],
+        "daily_reset_enabled": np.full(
+            n, int(reset_events.daily_reset_enabled), dtype=np.int8
+        ),
+        "daily_reset_event": np.asarray(reset_events.daily_reset_event, dtype=np.int8),
+        "time_filter_enabled": np.full(
+            n,
+            np.int8(1 if reset_events.time_filter_enabled else 0),
+            dtype=np.int8,
+        ),
+        "time_filter_in_window": np.asarray(
+            reset_events.time_filter_in_window, dtype=np.int8
+        ),
+        "time_filter_reset_event": np.asarray(
+            reset_events.time_filter_reset_event, dtype=np.int8
+        ),
+        "candidate_threshold_ok": arrays["candidate_threshold_ok_arr"],
+        "candidate_component_ok": arrays["candidate_component_ok_arr"],
+        "confirmed_median_ok": arrays["confirmed_median_ok_arr"],
+        "b_component_ok": arrays["b_component_ok_arr"],
+        "immediate_allowed": arrays["immediate_allowed_arr"],
+        "candidate_duration_gate_passed": arrays[
+            "candidate_duration_gate_passed_arr"
+        ],
+        "state_at_bar_start": arrays["state_at_bar_start_arr"],
+        "held_pos_at_bar_start": arrays["held_pos_at_bar_start_arr"],
+        "confirmed_legs_at_bar_start": arrays["confirmed_legs_at_bar_start_arr"],
+        "zigzag_mode": arrays["zigzag_mode_arr"],
+        "candidate_age_bars": cand_age_bars,
+        "candidate_leg_direction": cand_leg_dir,
+        "candidate_duration_gate_enabled": arrays[
+            "candidate_duration_gate_enabled_arr"
+        ],
+        "candidate_duration_max_bars": arrays[
+            "candidate_duration_max_bars_arr"
+        ],
+        "immediate_candidate_entry_used": arrays["immediate_used_arr"],
+        "immediate_candidate_entry_block_reason": arrays[
+            "immediate_block_reason_arr"
+        ],
+    }
+    if volume_runtime is not None:
+        filter_diagnostics_out.update(
+            {
+                "volume_regime": volume_arrays.regime_labels,
+                "volume_condition_allowed": volume_arrays.condition_allowed,
+                "volume_condition_block_reason": (
+                    volume_arrays.condition_block_reason_labels
+                ),
+                "volume_initial_direction": volume_arrays.initial_direction_labels,
+                "median_relative_volume": volume_arrays.median_relative,
+            }
+        )
+    zigzag_mode_arr = arrays.get("zigzag_mode_arr")
+    if (
+        zigzag_mode_arr is not None
+        and len(zigzag_mode_arr) > 0
+        and str(zigzag_mode_arr[0]) == "D"
+    ):
+        filter_diagnostics_out.update(
+            {
+                "wakeup_regime_active": arrays["wakeup_regime_active_arr"],
+                "wakeup_entry_all_ok": arrays["wakeup_entry_all_ok_arr"],
+                "wakeup_entry_candidate_height_ok": arrays[
+                    "wakeup_entry_candidate_height_ok_arr"
+                ],
+                "wakeup_entry_candidate_age_ok": arrays[
+                    "wakeup_entry_candidate_age_ok_arr"
+                ],
+                "wakeup_entry_candidate_direction_ok": arrays[
+                    "wakeup_entry_candidate_direction_ok_arr"
+                ],
+                "wakeup_entry_trade_mode_ok": arrays[
+                    "wakeup_entry_trade_mode_ok_arr"
+                ],
+                "wakeup_entry_atr_ok": arrays["wakeup_entry_atr_ok_arr"],
+                "wakeup_entry_volume_ok": arrays["wakeup_entry_volume_ok_arr"],
+                "wakeup_entry_candidate_height_value": arrays[
+                    "wakeup_entry_candidate_height_value_arr"
+                ],
+                "wakeup_entry_candidate_height_threshold": arrays[
+                    "wakeup_entry_candidate_height_threshold_arr"
+                ],
+                "wakeup_entry_candidate_age_bars": arrays[
+                    "wakeup_entry_candidate_age_bars_arr"
+                ],
+                "wakeup_entry_candidate_leg_direction": arrays[
+                    "wakeup_entry_candidate_leg_direction_arr"
+                ],
+                "wakeup_entry_atr_ratio": arrays["wakeup_entry_atr_ratio_arr"],
+                "wakeup_entry_volume_ratio": arrays[
+                    "wakeup_entry_volume_ratio_arr"
+                ],
+                "wakeup_cycle_age_bars": arrays["wakeup_cycle_age_bars_arr"],
+                "wakeup_bars_since_fresh_candidate": arrays[
+                    "wakeup_bars_since_fresh_candidate_arr"
+                ],
+                "wakeup_exit_ttl_triggered": arrays[
+                    "wakeup_exit_ttl_triggered_arr"
+                ],
+                "wakeup_exit_no_fresh_candidate_triggered": arrays[
+                    "wakeup_exit_no_fresh_candidate_triggered_arr"
+                ],
+                "wakeup_exit_close_triggered": arrays[
+                    "wakeup_exit_close_triggered_arr"
+                ],
+                "wakeup_exit_action_mode": arrays["wakeup_exit_action_mode_arr"],
+                "wakeup_exit_reason": arrays["wakeup_exit_reason_arr"],
+            }
+        )
+
+    return ZigZagSTFilterResult(
+        positions=arrays["filtered_positions"],
+        filter_diagnostics=filter_diagnostics_out,
+        internal_legs=None,
+        filter_config_snapshot=(
+            volume_runtime.filter_config_snapshot if volume_runtime is not None else None
+        ),
+    )
+
+
 def apply(
     *,
     trend: np.ndarray,
@@ -1389,6 +2239,8 @@ def apply(
     close: "Optional[np.ndarray]" = None,
     # open_prices accepted for run_backtest_fast API symmetry; not used here.
     open_prices: "Optional[np.ndarray]" = None,
+    high: "Optional[np.ndarray]" = None,
+    low: "Optional[np.ndarray]" = None,
     global_offset: int = 0,
     execution_model: Any = None,
     # Optional test override: inject a pre-computed ZigZagPerBar instead of
@@ -1403,6 +2255,7 @@ def apply(
     # _infer_time_filter_events (docs/time_filter_plan_v1_final.txt §4.1).
     time_filter_events: "Optional[tuple[np.ndarray, np.ndarray]]" = None,
     volume_runtime: "Optional[VolumeRuntime]" = None,
+    volume: "Optional[np.ndarray]" = None,
 ) -> "ZigZagSTFilterResult":
     """Run the ZigZag ST FSM and build ``filtered_positions``.
 
@@ -1461,16 +2314,20 @@ def apply(
     # 1) Pre-compute n из самого надёжного источника (план v3 §6.1 / §0.14).
     #    Приоритет: per_bar (test-override) > trend > close.
     # ------------------------------------------------------------------
-    if per_bar is not None:
-        n_pre = int(per_bar.candidate_height_pct.shape[0])
-    elif trend is not None:
-        n_pre = int(np.asarray(trend).shape[0])
-    elif close is not None:
-        n_pre = int(np.asarray(close).shape[0])
-    else:
-        raise ConfigError(
-            "apply() requires at least one of: per_bar, trend, close"
-        )
+    n_pre = _precompute_apply_length(per_bar=per_bar, trend=trend, close=close)
+    reset_events = _resolve_apply_reset_events(
+        trade_filter_config=trade_filter_config,
+        index=index,
+        n=n_pre,
+        daily_reset_event=daily_reset_event,
+        time_filter_events=time_filter_events,
+    )
+    daily_reset_enabled = reset_events.daily_reset_enabled
+    daily_reset_event = reset_events.daily_reset_event
+    time_filter_in_window = reset_events.time_filter_in_window
+    time_filter_reset_event = reset_events.time_filter_reset_event
+    combined_reset_event = reset_events.combined_reset_event
+    _tfl_enabled = reset_events.time_filter_enabled
 
     # ------------------------------------------------------------------
     # 2) Resolve daily_reset_enabled из config (план v3 §6.1).
@@ -1673,6 +2530,7 @@ def apply(
         volume_initial_direction_labels = materialize_volume_initial_direction(
             volume_initial_direction_runtime
         )
+    volume_arrays = _materialize_apply_volume_runtime(volume_runtime, n=n)
 
     a_enabled, b_enabled = _resolve_trigger_toggles(trade_filter_config)
     freeze_confirmed_legs = _resolve_freeze_confirmed_legs(trade_filter_config)
@@ -1695,6 +2553,9 @@ def apply(
                 exit_off_zz_leg_echo = int(_c_v)
             else:
                 exit_off_zz_leg_echo = -1
+        elif _eom_v == "exit C":
+            exit_off_mode_echo = "exit C"
+            exit_off_zz_leg_echo = -1
 
     if is_exit_b and exit_off_zz_target < 1:
         raise ConfigError(
@@ -1843,6 +2704,63 @@ def apply(
     if cand_leg_dir is None:
         cand_leg_dir = np.zeros(n, dtype=np.int8)
 
+    mode_d_enabled = resolved_mode == "D"
+    wakeup_candidate_height_cfg = None
+    wakeup_candidate_age_cfg = None
+    wakeup_atr_cfg = None
+    wakeup_volume_cfg = None
+    wakeup_ttl_cfg = None
+    wakeup_no_fresh_cfg = None
+    wakeup_action_cfg = None
+    wakeup_atr_ratio = None
+    wakeup_volume_ratio = None
+    wakeup_entry_candidate_height_threshold = None
+    wakeup_no_fresh_candidate_height_threshold = None
+    wakeup_exit_action_mode = "none"
+    if mode_d_enabled:
+        (
+            wakeup_candidate_height_cfg,
+            wakeup_candidate_age_cfg,
+            wakeup_atr_cfg,
+            wakeup_volume_cfg,
+        ) = _resolve_mode_d_wakeup_entry(trade_filter_config)
+        (
+            wakeup_ttl_cfg,
+            wakeup_no_fresh_cfg,
+            wakeup_action_cfg,
+        ) = _resolve_mode_d_wakeup_exit(trade_filter_config)
+        wakeup_entry_candidate_height_threshold = getattr(
+            zigzag_global_stats,
+            "wakeup_entry_candidate_height_threshold",
+            None,
+        )
+        wakeup_no_fresh_candidate_height_threshold = getattr(
+            zigzag_global_stats,
+            "wakeup_no_fresh_candidate_height_threshold",
+            None,
+        )
+        wakeup_exit_action_mode = str(
+            getattr(wakeup_action_cfg, "mode", None) or "none"
+        )
+        if _is_component_enabled(wakeup_atr_cfg):
+            high_arr = _require_1d_len("high", high, n)
+            low_arr = _require_1d_len("low", low, n)
+            close_arr = _require_1d_len("close", close, n)
+            wakeup_atr_ratio = _compute_wakeup_atr_ratio(
+                high_arr,
+                low_arr,
+                close_arr,
+                int(getattr(wakeup_atr_cfg, "short_window")),
+                int(getattr(wakeup_atr_cfg, "long_window")),
+            )
+        if _is_component_enabled(wakeup_volume_cfg):
+            volume_arr = _require_1d_len("volume", volume, n)
+            wakeup_volume_ratio = _compute_wakeup_volume_ratio(
+                volume_arr,
+                int(getattr(wakeup_volume_cfg, "short_window")),
+                int(getattr(wakeup_volume_cfg, "baseline_window")),
+            )
+
     # WP-V3-7: §10.2 additional diagnostic arrays (enabled filter path only).
     # Disabled-filter path never calls apply(), so these arrays never appear
     # in the disabled baseline — satisfying the "no new arrays for disabled
@@ -1858,18 +2776,110 @@ def apply(
     immediate_used_arr = np.zeros(n, dtype=np.int8)
     # Default "mode_not_c" is overwritten per-bar inside the loop.
     immediate_block_reason_arr = np.full(n, "mode_not_c", dtype=object)
+    _apply_arrays = _allocate_apply_arrays(
+        n=n,
+        zigzag_global_stats=zigzag_global_stats,
+        candidate_trigger_threshold=candidate_trigger_threshold,
+        global_median=global_median,
+        freeze_confirmed_legs=freeze_confirmed_legs,
+        trade_filter_config=trade_filter_config,
+        exit_off_mode_echo=exit_off_mode_echo,
+        exit_off_zz_leg_echo=exit_off_zz_leg_echo,
+        exit_b_immediate_off_flag=exit_b_immediate_off_flag,
+        resolved_mode=resolved_mode,
+        gate_enabled=gate_enabled,
+        gate_max_bars=gate_max_bars,
+    )
+    filtered_positions = _apply_arrays["filtered_positions"]
+    state_arr = _apply_arrays["state_arr"]
+    state_code_arr = _apply_arrays["state_code_arr"]
+    trigger_source_arr = _apply_arrays["trigger_source_arr"]
+    confirmed_legs_since_start_arr = _apply_arrays[
+        "confirmed_legs_since_start_arr"
+    ]
+    st_flip_dir_arr = _apply_arrays["st_flip_dir_arr"]
+    trade_filter_enabled_arr = _apply_arrays["trade_filter_enabled_arr"]
+    reversal_threshold_arr = _apply_arrays["reversal_threshold_arr"]
+    ctt_diag_arr = _apply_arrays["ctt_diag_arr"]
+    local_window_arr = _apply_arrays["local_window_arr"]
+    global_median_arr = _apply_arrays["global_median_arr"]
+    global_stats_available_arr = _apply_arrays["global_stats_available_arr"]
+    freeze_confirmed_legs_arr = _apply_arrays["freeze_confirmed_legs_arr"]
+    median_stop_triggered_arr = _apply_arrays["median_stop_triggered_arr"]
+    stopping_started_at_arr = _apply_arrays["stopping_started_at_arr"]
+    filter_allowed_entry_arr = _apply_arrays["filter_allowed_entry_arr"]
+    filter_block_reason_arr = _apply_arrays["filter_block_reason_arr"]
+    exit_off_mode_arr = _apply_arrays["exit_off_mode_arr"]
+    exit_off_zz_leg_count_arr = _apply_arrays["exit_off_zz_leg_count_arr"]
+    zz_legs_since_lifecycle_start_arr = _apply_arrays[
+        "zz_legs_since_lifecycle_start_arr"
+    ]
+    zz_leg_stop_triggered_arr = _apply_arrays["zz_leg_stop_triggered_arr"]
+    exit_b_immediate_off_triggered_arr = _apply_arrays[
+        "exit_b_immediate_off_triggered_arr"
+    ]
+    exit_b_immediate_off_config_arr = _apply_arrays[
+        "exit_b_immediate_off_config_arr"
+    ]
+    candidate_threshold_ok_arr = _apply_arrays["candidate_threshold_ok_arr"]
+    candidate_component_ok_arr = _apply_arrays["candidate_component_ok_arr"]
+    confirmed_median_ok_arr = _apply_arrays["confirmed_median_ok_arr"]
+    b_component_ok_arr = _apply_arrays["b_component_ok_arr"]
+    immediate_allowed_arr = _apply_arrays["immediate_allowed_arr"]
+    candidate_duration_gate_passed_arr = _apply_arrays[
+        "candidate_duration_gate_passed_arr"
+    ]
+    state_at_bar_start_arr = _apply_arrays["state_at_bar_start_arr"]
+    held_pos_at_bar_start_arr = _apply_arrays["held_pos_at_bar_start_arr"]
+    confirmed_legs_at_bar_start_arr = _apply_arrays[
+        "confirmed_legs_at_bar_start_arr"
+    ]
+    zigzag_mode_arr = _apply_arrays["zigzag_mode_arr"]
+    candidate_duration_gate_enabled_arr = _apply_arrays[
+        "candidate_duration_gate_enabled_arr"
+    ]
+    candidate_duration_max_bars_arr = _apply_arrays[
+        "candidate_duration_max_bars_arr"
+    ]
+    immediate_used_arr = _apply_arrays["immediate_used_arr"]
+    immediate_block_reason_arr = _apply_arrays["immediate_block_reason_arr"]
+    wakeup_regime_active_arr = _apply_arrays["wakeup_regime_active_arr"]
+    wakeup_cycle_age_bars_arr = _apply_arrays["wakeup_cycle_age_bars_arr"]
+    wakeup_bars_since_fresh_candidate_arr = _apply_arrays[
+        "wakeup_bars_since_fresh_candidate_arr"
+    ]
+    wakeup_exit_ttl_triggered_arr = _apply_arrays[
+        "wakeup_exit_ttl_triggered_arr"
+    ]
+    wakeup_exit_no_fresh_candidate_triggered_arr = _apply_arrays[
+        "wakeup_exit_no_fresh_candidate_triggered_arr"
+    ]
+    wakeup_exit_close_triggered_arr = _apply_arrays[
+        "wakeup_exit_close_triggered_arr"
+    ]
+    wakeup_exit_action_mode_arr = _apply_arrays["wakeup_exit_action_mode_arr"]
+    wakeup_exit_reason_arr = _apply_arrays["wakeup_exit_reason_arr"]
+    if mode_d_enabled:
+        wakeup_exit_action_mode_arr[:] = wakeup_exit_action_mode
 
     state = ZigZagFSMState.OFF
     confirmed_legs_since_start = -1   # -1 = lifecycle never started
     zz_legs_since_lifecycle_start = -1
     held_pos: int = 0                 # FSM-owned position (§2.2 / §5.4)
     _stopping_start: int = -1         # bar index when STOPPING lifecycle started
+    (
+        wakeup_cycle_age,
+        wakeup_bars_since_fresh,
+        wakeup_active_direction,
+        wakeup_exit_c_fired,
+    ) = _wakeup_runtime_off()
 
     # ------------------------------------------------------------------
     # 4) Main FSM loop.
     # ------------------------------------------------------------------
     for t in range(n):
         just_reached_exit_b_threshold = False
+        wakeup_exit_c_triggered_this_bar = False
         # ----- §9 step 0: Capture immutable bar-start snapshots ----------
         # WP-V3-4 P7 / ТЗ v3 §9 step 0: snapshots are captured BEFORE the
         # daily-reset wipe (§9 step 1) so that on a reset bar the snapshot
@@ -1888,11 +2898,22 @@ def apply(
         # combined_reset_event covers both daily_reset and time_filter_reset
         # (docs/time_filter_plan_v1_final.txt §4.4).
         if combined_reset_event[t]:
+            if mode_d_enabled and state_at_bar_start in (
+                ZigZagFSMState.ST_ACTIVE_FREEZE,
+                ZigZagFSMState.ST_STOPPING,
+            ):
+                wakeup_exit_reason_arr[t] = "reset"
             state = ZigZagFSMState.OFF
             confirmed_legs_since_start = -1
             zz_legs_since_lifecycle_start = -1
             held_pos = 0
             _stopping_start = -1
+            (
+                wakeup_cycle_age,
+                wakeup_bars_since_fresh,
+                wakeup_active_direction,
+                wakeup_exit_c_fired,
+            ) = _wakeup_runtime_off()
 
         # ----- Detect events at close(t) --------------------------------
         prev_trend = int(trend_arr[t - 1]) if t > 0 else 0
@@ -1980,6 +3001,32 @@ def apply(
             1 if cand_duration_gate_passed else 0
         )
 
+        wakeup_entry_all_ok = False
+        if mode_d_enabled:
+            wakeup_entry = _evaluate_wakeup_entry(
+                candidate_height=c_h,
+                candidate_age=int(cand_age_bars[t]),
+                candidate_direction=cand_dir_t,
+                trade_mode=trade_mode,
+                candidate_height_cfg=wakeup_candidate_height_cfg,
+                candidate_age_cfg=wakeup_candidate_age_cfg,
+                atr_cfg=wakeup_atr_cfg,
+                volume_cfg=wakeup_volume_cfg,
+                candidate_height_threshold=wakeup_entry_candidate_height_threshold,
+                wakeup_atr_ratio=wakeup_atr_ratio,
+                wakeup_volume_ratio=wakeup_volume_ratio,
+                t=t,
+            )
+            wakeup_entry_all_ok = wakeup_entry.all_ok
+            _record_wakeup_entry_diagnostics(
+                arrays=_apply_arrays,
+                t=t,
+                evaluation=wakeup_entry,
+                candidate_height=c_h,
+                candidate_height_threshold=wakeup_entry_candidate_height_threshold,
+                candidate_direction=cand_dir_t,
+            )
+
         # ------------------------------------------------------------------
         # WP-V3-5: Unified mode dispatcher (§8 Mode Semantics + §9 step 2).
         # Mode-specific OFF transitions ONLY when state_at_bar_start == OFF
@@ -1994,47 +3041,166 @@ def apply(
         # inside the time_filter window. When time_filter is disabled,
         # in_window is all-ones (short-circuit), so no behaviour change.
         if state_at_bar_start == ZigZagFSMState.OFF and not is_reset and bool(time_filter_in_window[t]):
-            volume_allowed = (
-                volume_condition_allowed_runtime is None
-                or bool(volume_condition_allowed_runtime[t])
-            )
-            lifecycle_start = _try_lifecycle_start_from_off(
-                t=t,
-                state=state_at_bar_start,
-                resolved_mode=resolved_mode,
-                candidate_component_ok=candidate_component_ok,
-                b_component_ok=b_component_ok,
-                immediate_allowed=immediate_allowed,
-                is_exit_b=is_exit_b,
-                cand_dir_t=cand_dir_t,
-                volume_allowed=volume_allowed,
-            )
-            if lifecycle_start is None and not volume_allowed:
-                volume_blocked_lifecycle_start = (
-                    _try_lifecycle_start_from_off(
-                        t=t,
-                        state=state_at_bar_start,
-                        resolved_mode=resolved_mode,
-                        candidate_component_ok=candidate_component_ok,
-                        b_component_ok=b_component_ok,
-                        immediate_allowed=immediate_allowed,
-                        is_exit_b=is_exit_b,
-                        cand_dir_t=cand_dir_t,
-                        volume_allowed=True,
+            if mode_d_enabled:
+                if wakeup_entry_all_ok:
+                    state = ZigZagFSMState.ST_ACTIVE_FREEZE
+                    held_pos = cand_dir_t
+                    confirmed_legs_since_start = -1
+                    zz_legs_since_lifecycle_start = -1
+                    trigger_source_arr[t] = _TRIGGER_SOURCE_WAKEUP
+            else:
+                volume_allowed = (
+                    volume_condition_allowed_runtime is None
+                    or bool(volume_condition_allowed_runtime[t])
+                )
+                lifecycle_start = _try_lifecycle_start_from_off(
+                    t=t,
+                    state=state_at_bar_start,
+                    resolved_mode=resolved_mode,
+                    candidate_component_ok=candidate_component_ok,
+                    b_component_ok=b_component_ok,
+                    immediate_allowed=immediate_allowed,
+                    is_exit_b=is_exit_b,
+                    cand_dir_t=cand_dir_t,
+                    volume_allowed=volume_allowed,
+                )
+                if lifecycle_start is None and not volume_allowed:
+                    volume_blocked_lifecycle_start = (
+                        _try_lifecycle_start_from_off(
+                            t=t,
+                            state=state_at_bar_start,
+                            resolved_mode=resolved_mode,
+                            candidate_component_ok=candidate_component_ok,
+                            b_component_ok=b_component_ok,
+                            immediate_allowed=immediate_allowed,
+                            is_exit_b=is_exit_b,
+                            cand_dir_t=cand_dir_t,
+                            volume_allowed=True,
+                        )
+                        is not None
                     )
-                    is not None
+                if lifecycle_start is not None:
+                    state = lifecycle_start.state
+                    held_pos = lifecycle_start.held_pos
+                    confirmed_legs_since_start = (
+                        lifecycle_start.confirmed_legs_since_start
+                    )
+                    zz_legs_since_lifecycle_start = (
+                        lifecycle_start.zz_legs_since_lifecycle_start
+                    )
+                    trigger_source_arr[t] = lifecycle_start.trigger_source
+                    immediate_used_this_bar = lifecycle_start.immediate_used_this_bar
+
+        if mode_d_enabled:
+            wakeup_state_active = state in (
+                ZigZagFSMState.ST_ACTIVE_FREEZE,
+                ZigZagFSMState.ST_STOPPING,
+            )
+            if wakeup_state_active and wakeup_active_direction == 0:
+                wakeup_active_direction = held_pos
+            wakeup_fresh_candidate = _is_wakeup_fresh_candidate(
+                no_fresh_cfg=wakeup_no_fresh_cfg,
+                active_direction=wakeup_active_direction,
+                candidate_direction=cand_dir_t,
+                candidate_age=int(cand_age_bars[t]),
+                candidate_height=c_h,
+                threshold=wakeup_no_fresh_candidate_height_threshold,
+            )
+            if trigger_source_arr[t] == _TRIGGER_SOURCE_WAKEUP:
+                wakeup_cycle_age = 0
+                wakeup_active_direction = cand_dir_t
+                wakeup_bars_since_fresh = 0 if wakeup_fresh_candidate else 1
+                wakeup_exit_c_fired = False
+            elif (
+                state_at_bar_start in (
+                    ZigZagFSMState.ST_ACTIVE_FREEZE,
+                    ZigZagFSMState.ST_STOPPING,
                 )
-            if lifecycle_start is not None:
-                state = lifecycle_start.state
-                held_pos = lifecycle_start.held_pos
-                confirmed_legs_since_start = (
-                    lifecycle_start.confirmed_legs_since_start
+                and wakeup_state_active
+                and not is_reset
+            ):
+                wakeup_cycle_age = max(0, wakeup_cycle_age + 1)
+                if wakeup_fresh_candidate:
+                    wakeup_bars_since_fresh = 0
+                elif wakeup_bars_since_fresh >= 0:
+                    wakeup_bars_since_fresh += 1
+            elif not wakeup_state_active:
+                (
+                    wakeup_cycle_age,
+                    wakeup_bars_since_fresh,
+                    wakeup_active_direction,
+                    wakeup_exit_c_fired,
+                ) = _wakeup_runtime_off()
+
+            if wakeup_state_active:
+                wakeup_regime_active_arr[t] = np.int8(1)
+                wakeup_cycle_age_bars_arr[t] = int(wakeup_cycle_age)
+                wakeup_bars_since_fresh_candidate_arr[t] = int(
+                    wakeup_bars_since_fresh
                 )
-                zz_legs_since_lifecycle_start = (
-                    lifecycle_start.zz_legs_since_lifecycle_start
+
+            wakeup_opposite_flip_this_bar = (
+                state_at_bar_start
+                in (
+                    ZigZagFSMState.ST_ACTIVE_FREEZE,
+                    ZigZagFSMState.ST_STOPPING,
                 )
-                trigger_source_arr[t] = lifecycle_start.trigger_source
-                immediate_used_this_bar = lifecycle_start.immediate_used_this_bar
+                and wakeup_state_active
+                and not is_reset
+                and flip_dir != 0
+                and (
+                    (held_pos_at_bar_start > 0 and flip_dir == -1)
+                    or (held_pos_at_bar_start < 0 and flip_dir == +1)
+                )
+            )
+            if wakeup_opposite_flip_this_bar:
+                wakeup_exit_reason_arr[t] = "opposite_st_flip"
+                state = ZigZagFSMState.OFF
+                held_pos = 0
+                (
+                    wakeup_cycle_age,
+                    wakeup_bars_since_fresh,
+                    wakeup_active_direction,
+                    wakeup_exit_c_fired,
+                ) = _wakeup_runtime_off()
+
+            if (
+                wakeup_state_active
+                and not wakeup_opposite_flip_this_bar
+                and not wakeup_exit_c_fired
+                and not is_reset
+            ):
+                wakeup_exit_reason_this_bar = None
+                if (
+                    _is_component_enabled(wakeup_ttl_cfg)
+                    and wakeup_cycle_age >= int(getattr(wakeup_ttl_cfg, "bars"))
+                ):
+                    wakeup_exit_ttl_triggered_arr[t] = np.int8(1)
+                    wakeup_exit_reason_this_bar = "ttl"
+                elif (
+                    _is_component_enabled(wakeup_no_fresh_cfg)
+                    and wakeup_bars_since_fresh
+                    >= int(getattr(wakeup_no_fresh_cfg, "timeout_bars"))
+                ):
+                    wakeup_exit_no_fresh_candidate_triggered_arr[t] = np.int8(1)
+                    wakeup_exit_reason_this_bar = "no_fresh_candidate"
+
+                if wakeup_exit_reason_this_bar is not None:
+                    wakeup_exit_reason_arr[t] = wakeup_exit_reason_this_bar
+                    wakeup_exit_c_fired = True
+                    wakeup_exit_c_triggered_this_bar = True
+                    if wakeup_exit_action_mode == "block_new_entries":
+                        state = ZigZagFSMState.ST_STOPPING
+                    elif wakeup_exit_action_mode == "close_position":
+                        wakeup_exit_close_triggered_arr[t] = np.int8(1)
+                        state = ZigZagFSMState.OFF
+                        held_pos = 0
+                        (
+                            wakeup_cycle_age,
+                            wakeup_bars_since_fresh,
+                            wakeup_active_direction,
+                            wakeup_exit_c_fired,
+                        ) = _wakeup_runtime_off()
 
         # WP-V3-7: §10.4 immediate_candidate_entry_block_reason priority.
         # Computed AFTER the dispatcher so ``immediate_used_this_bar`` is
@@ -2120,7 +3286,7 @@ def apply(
         ):
             zz_legs_since_lifecycle_start += 1
 
-        if not is_exit_b:
+        if not is_exit_b and not mode_d_enabled:
             # 4) FREEZE → MONITORING once freeze_confirmed_legs legs have
             #    accumulated.  ``freeze_confirmed_legs == 0`` → immediate
             #    transition (counter=0 >= 0).
@@ -2174,6 +3340,7 @@ def apply(
         #    not double-apply on the same bar).
         if (
             flip_dir != 0
+            and not mode_d_enabled
             and state in (
                 ZigZagFSMState.ST_ACTIVE_FREEZE,
                 ZigZagFSMState.ST_ACTIVE_MONITORING,
@@ -2219,7 +3386,9 @@ def apply(
             else:  # ST_STOPPING — only reachable here when cur_pos != 0
                 # Hold; close only on opposite ST flip (§4.5 / §17.21..§17.23).
                 # No new entries, no reverses.  Exit B: no close on threshold bar.
-                if just_reached_exit_b_threshold:
+                if just_reached_exit_b_threshold or (
+                    mode_d_enabled and wakeup_exit_c_triggered_this_bar
+                ):
                     next_pos = np.int8(cur_pos)
                 elif flip_dir != 0 and (
                     (cur_pos > 0 and flip_dir == -1)
@@ -2230,6 +3399,14 @@ def apply(
                     confirmed_legs_since_start = -1
                     zz_legs_since_lifecycle_start = -1
                     held_pos = 0
+                    if mode_d_enabled:
+                        wakeup_exit_reason_arr[t] = "opposite_st_flip"
+                        (
+                            wakeup_cycle_age,
+                            wakeup_bars_since_fresh,
+                            wakeup_active_direction,
+                            wakeup_exit_c_fired,
+                        ) = _wakeup_runtime_off()
                 else:
                     next_pos = np.int8(cur_pos)
 
@@ -2403,13 +3580,17 @@ def apply(
             }
         )
 
-    return ZigZagSTFilterResult(
-        positions=filtered_positions,
-        filter_diagnostics=filter_diagnostics_out,
-        internal_legs=None,
-        filter_config_snapshot=(
-            volume_runtime.filter_config_snapshot if volume_runtime is not None else None
-        ),
+    return _finalize_apply_result(
+        n=n,
+        arrays=_apply_arrays,
+        cand_height=cand_height,
+        local_median_N=local_median_N,
+        local_median_available=local_median_available,
+        cand_age_bars=cand_age_bars,
+        cand_leg_dir=cand_leg_dir,
+        reset_events=reset_events,
+        volume_runtime=volume_runtime,
+        volume_arrays=volume_arrays,
     )
 
 
@@ -2421,152 +3602,9 @@ def attach_trade_filter_diagnostics(
     trades_df: "Any",
     filter_diagnostics: Dict[str, np.ndarray],
 ) -> "Any":
-    """Attach per-trade filter diagnostics columns to ``trades_df``.
+    """Backward-compatible wrapper around the canonical diagnostics helper."""
+    from supertrend_optimizer.core.filter_trade_diagnostics import (
+        attach_trade_filter_diagnostics as _attach_trade_filter_diagnostics,
+    )
 
-    Called inside ``run_single_backtest`` after ``extract_trades``, on the
-    extended-slice indices BEFORE any OOS trim or rebase.
-
-    Indexing rule (``OPEN_TO_OPEN``, plan §8.4):
-    - ``entry_signal_idx = max(entry_index - 1, 0)``  (close-decision bar)
-    - ``exit_signal_idx  = max(exit_index  - 1, 0)``  (close-decision bar)
-    - A trade whose ``exit_index`` is the last position slot may be either
-      a real close on the final transition or a still-open trade emitted by
-      ``extract_trades``' pending fallback.  Exit diagnostics are checked
-      before the pending sentinel so final-slot reset exits stay visible.
-
-    Columns added
-    -------------
-    entry_filter_state : str
-        ``trade_filter_state`` on the close-decision bar for entry.
-    entry_trigger_source : str
-        ``trade_filter_trigger_source`` on the close-decision bar for entry.
-    exit_reason : str
-        Priority order (highest → lowest,
-        docs/time_filter_plan_v1_final.txt §4.9 / §5.2 Plan v3):
-
-        1. ``"filter_daily_reset"``          — daily_reset_event[exit_signal_idx]==1
-        2. ``"filter_time_reset"``           — time_filter_reset_event[exit_signal_idx]==1
-                                               (new, time_filter_plan §4.9)
-        3. ``"pending_open_trade_at_end"``   — exit_index >= n_diag - 1
-        4. ``"filter_exit_b_immediate_off"`` — exit_b_immediate_off_triggered
-                                               [exit_signal_idx]==1 (new, Plan v3)
-        5. ``"filter_stopping_opposite_flip"`` — FSM was in ST_STOPPING (legacy)
-        6. ``"st_flip"``                     — fallback
-
-        Backward compat: absent keys in ``filter_diagnostics`` are silently
-        treated as all-zeros (imm_at_exit=False, tf_reset_at_exit=False);
-        priorities for remaining reasons are unchanged (§5.3 / §10.3.F).
-
-    Parameters
-    ----------
-    trades_df : pd.DataFrame
-        Output of ``extract_trades`` with ``entry_index`` and
-        ``exit_index`` columns (execution bars, 0-based).
-    filter_diagnostics : dict[str, np.ndarray]
-        Per-bar diagnostic arrays from ``apply()``, length ==
-        ``len(positions)`` (already truncated for early-exit if
-        applicable).
-
-    Returns
-    -------
-    pd.DataFrame
-        Copy of ``trades_df`` with three additional columns appended.
-
-    Notes
-    -----
-    Plan reference:  §8.3, §8.4, §8.4.1.
-    Spec  reference: Appendix A v1.1 §10, §13, §15.4, §17.13.
-    """
-    import pandas as _pd
-
-    state_arr = filter_diagnostics.get("trade_filter_state")
-    trigger_arr = filter_diagnostics.get("trade_filter_trigger_source")
-    daily_reset_arr = filter_diagnostics.get("daily_reset_event")
-    # Plan v3 §5.1: backward compat — absent key → imm_at_exit always False
-    imm_triggered_arr = filter_diagnostics.get("exit_b_immediate_off_triggered")
-    # docs/time_filter_plan_v1_final.txt §4.9: backward compat — absent key → False
-    tf_reset_arr = filter_diagnostics.get("time_filter_reset_event")
-    if state_arr is None:
-        raise ConfigError(
-            "attach_trade_filter_diagnostics: 'trade_filter_state' key "
-            "missing from filter_diagnostics"
-        )
-    n_diag = len(state_arr)
-    # Pending-trade sentinel: extract_trades also uses exit_idx=n for trades
-    # that remain open after the loop.  The same index can be a real close on
-    # the final transition, so concrete exit diagnostics take priority below.
-    pending_exit_idx = n_diag - 1
-
-    entry_filter_states = []
-    entry_trigger_sources = []
-    exit_reasons = []
-
-    for row in trades_df.itertuples(index=False):
-        entry_index = int(row.entry_index)
-        exit_index = int(row.exit_index)
-
-        # Entry side
-        entry_signal_idx = max(entry_index - 1, 0)
-        if entry_signal_idx < n_diag:
-            entry_filter_states.append(str(state_arr[entry_signal_idx]))
-        else:
-            entry_filter_states.append("UNKNOWN")
-
-        if trigger_arr is not None and entry_signal_idx < len(trigger_arr):
-            entry_trigger_sources.append(str(trigger_arr[entry_signal_idx]))
-        else:
-            entry_trigger_sources.append("none")
-
-        # Exit side
-        exit_signal_idx = max(exit_index - 1, 0)
-        if exit_signal_idx < n_diag:
-            fsm_at_exit = str(state_arr[exit_signal_idx])
-        else:
-            fsm_at_exit = "UNKNOWN"
-        reset_at_exit = (
-            daily_reset_arr is not None
-            and exit_signal_idx < len(daily_reset_arr)
-            and int(daily_reset_arr[exit_signal_idx]) == 1
-        )
-        # docs/time_filter_plan_v1_final.txt §4.9: backward compat
-        tf_reset_at_exit = (
-            tf_reset_arr is not None
-            and exit_signal_idx < len(tf_reset_arr)
-            and int(tf_reset_arr[exit_signal_idx]) == 1
-        )
-        # Plan v3 §5.1: only True when array present AND bar flag==1
-        imm_at_exit = (
-            imm_triggered_arr is not None
-            and exit_signal_idx < len(imm_triggered_arr)
-            and int(imm_triggered_arr[exit_signal_idx]) == 1
-        )
-
-        # Priority chain (docs/time_filter_plan_v1_final.txt §4.9):
-        # 1. filter_daily_reset
-        # 2. filter_time_reset  ← new
-        # 3. pending_open_trade_at_end
-        # 4. filter_exit_b_immediate_off
-        # 5. filter_stopping_opposite_flip
-        # 6. st_flip
-        if reset_at_exit:
-            exit_reasons.append("filter_daily_reset")
-        elif tf_reset_at_exit:
-            exit_reasons.append("filter_time_reset")
-        elif exit_index >= pending_exit_idx:
-            # Priority #2 wins over immediate-off: if the exit execution bar
-            # is the last position slot, the trade is classified as pending
-            # regardless of whether immediate-off was triggered (§5.2 rationale
-            # and §10.3.E / §10.3.G).
-            exit_reasons.append("pending_open_trade_at_end")
-        elif imm_at_exit:
-            exit_reasons.append("filter_exit_b_immediate_off")
-        elif fsm_at_exit == "ST_STOPPING":
-            exit_reasons.append("filter_stopping_opposite_flip")
-        else:
-            exit_reasons.append("st_flip")
-
-    result = trades_df.copy()
-    result["entry_filter_state"] = entry_filter_states
-    result["entry_trigger_source"] = entry_trigger_sources
-    result["exit_reason"] = exit_reasons
-    return result
+    return _attach_trade_filter_diagnostics(trades_df, filter_diagnostics)

@@ -38,6 +38,32 @@ def _volume_disabled_cfg():
     )
 
 
+def _wakeup_volume_cfg(*, enabled: bool = True):
+    return SimpleNamespace(
+        enabled=True,
+        wakeup_regime=SimpleNamespace(
+            enabled=True,
+            entry=SimpleNamespace(
+                volume_expansion=SimpleNamespace(enabled=enabled),
+            ),
+        ),
+    )
+
+
+def _mode_d_wakeup_volume_cfg():
+    return SimpleNamespace(
+        enabled=True,
+        zigzag=SimpleNamespace(enabled=True, mode="D"),
+        lifecycle=SimpleNamespace(exit_off_mode="exit C"),
+        wakeup_regime=SimpleNamespace(
+            enabled=True,
+            entry=SimpleNamespace(
+                volume_expansion=SimpleNamespace(enabled=True),
+            ),
+        ),
+    )
+
+
 def test_disabled_volume_filter_is_noop_without_volume_column():
     df = _df()
 
@@ -71,6 +97,58 @@ def test_enabled_volume_filter_rejects_bad_volume_data(volume, expected):
 
     with pytest.raises(DataValidationError, match="trade_filter\\.volume") as exc:
         validate_volume_filter_data(df, _volume_enabled_cfg())
+
+    assert expected in str(exc.value)
+
+
+def test_enabled_wakeup_volume_filter_rejects_missing_volume_column():
+    df = _df()
+
+    with pytest.raises(
+        DataValidationError,
+        match="trade_filter\\.wakeup_regime\\.entry\\.volume_expansion",
+    ) as exc:
+        validate_volume_filter_data(df, _wakeup_volume_cfg())
+
+    assert "requires a 'volume' column" in str(exc.value)
+
+
+def test_mode_d_wakeup_volume_expansion_rejects_missing_volume_column():
+    df = _df()
+
+    with pytest.raises(
+        DataValidationError,
+        match="trade_filter\\.wakeup_regime\\.entry\\.volume_expansion",
+    ) as exc:
+        validate_volume_filter_data(df, _mode_d_wakeup_volume_cfg())
+
+    assert "requires a 'volume' column" in str(exc.value)
+
+
+def test_disabled_wakeup_volume_filter_is_noop_without_volume_column():
+    df = _df()
+
+    result = validate_volume_filter_data(df, _wakeup_volume_cfg(enabled=False))
+
+    assert result is df
+
+
+@pytest.mark.parametrize(
+    ("volume", "expected"),
+    [
+        ([1.0, np.nan, 3.0, 4.0], "contains NaN"),
+        ([1.0, np.inf, 3.0, 4.0], "contains inf"),
+        ([1.0, -1.0, 3.0, 4.0], "contains negative"),
+    ],
+)
+def test_enabled_wakeup_volume_filter_rejects_bad_volume_values(volume, expected):
+    df = _df(volume=volume)
+
+    with pytest.raises(
+        DataValidationError,
+        match="trade_filter\\.wakeup_regime\\.entry\\.volume_expansion",
+    ) as exc:
+        validate_volume_filter_data(df, _wakeup_volume_cfg())
 
     assert expected in str(exc.value)
 

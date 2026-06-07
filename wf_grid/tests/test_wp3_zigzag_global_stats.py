@@ -44,6 +44,16 @@ from wf_grid.config.schema import (
     TradeFilterLifecycleConfig,
     TradeFilterTriggerToggleConfig,
     TradeFilterTriggersConfig,
+    TradeFilterWakeupAtrExpansionConfig,
+    TradeFilterWakeupCandidateAgeConfig,
+    TradeFilterWakeupCandidateHeightConfig,
+    TradeFilterWakeupEntryConfig,
+    TradeFilterWakeupExitActionConfig,
+    TradeFilterWakeupExitConfig,
+    TradeFilterWakeupNoFreshCandidateExitConfig,
+    TradeFilterWakeupRegimeConfig,
+    TradeFilterWakeupTtlExitConfig,
+    TradeFilterWakeupVolumeExpansionConfig,
     TradeFilterZigZagConfig,
 )
 from wf_grid.tests.zigzag_st_close_only_fixture import (
@@ -115,6 +125,72 @@ def _make_filter_config(
         ) if include_triggers else None,
         lifecycle=TradeFilterLifecycleConfig(),
         diagnostics=TradeFilterDiagnosticsConfig(),
+    )
+
+
+def _make_mode_d_filter_config(
+    *,
+    entry_candidate_height_enabled: bool = True,
+    entry_quantile: float = 0.65,
+    no_fresh_enabled: bool = True,
+    no_fresh_quantile: float = 0.60,
+    local_window: int = 5,
+) -> TradeFilterConfig:
+    return TradeFilterConfig(
+        enabled=True,
+        type="zigzag_st_mode",
+        zigzag=TradeFilterZigZagConfig(
+            enabled=True,
+            mode="D",
+            reversal_threshold=MANY_LEG_SAWTOOTH.reversal_threshold,
+            candidate_trigger_threshold=0.012,
+            candidate_trigger_quantile=None,
+            local_window=local_window,
+        ),
+        triggers=None,
+        lifecycle=TradeFilterLifecycleConfig(exit_off_mode="exit C"),
+        diagnostics=TradeFilterDiagnosticsConfig(),
+        wakeup_regime=TradeFilterWakeupRegimeConfig(
+            enabled=True,
+            entry=TradeFilterWakeupEntryConfig(
+                candidate_height=TradeFilterWakeupCandidateHeightConfig(
+                    enabled=entry_candidate_height_enabled,
+                    quantile=entry_quantile,
+                ),
+                candidate_age=TradeFilterWakeupCandidateAgeConfig(
+                    enabled=False,
+                    max_bars=None,
+                ),
+                atr_expansion=TradeFilterWakeupAtrExpansionConfig(
+                    enabled=False,
+                    short_window=None,
+                    long_window=None,
+                    min_ratio=None,
+                ),
+                volume_expansion=TradeFilterWakeupVolumeExpansionConfig(
+                    enabled=False,
+                    short_window=None,
+                    baseline_window=None,
+                    min_ratio=None,
+                ),
+            ),
+            exit=TradeFilterWakeupExitConfig(
+                ttl=TradeFilterWakeupTtlExitConfig(
+                    enabled=True,
+                    bars=45,
+                ),
+                no_fresh_candidate=TradeFilterWakeupNoFreshCandidateExitConfig(
+                    enabled=no_fresh_enabled,
+                    quantile=no_fresh_quantile,
+                    max_age_bars=15,
+                    timeout_bars=20,
+                ),
+                action=TradeFilterWakeupExitActionConfig(
+                    mode="block_new_entries",
+                ),
+            ),
+        ),
+        _raw_triggers_present=False,
     )
 
 
@@ -355,6 +431,94 @@ class TestBuildGlobalStatsHappyPath:
 # build_zigzag_global_stats — init-failure paths (Appendix A v1.1 §12.3)
 # ---------------------------------------------------------------------------
 
+class TestWakeupGlobalStats:
+    """Phase 0 wakeup thresholds materialized from full-dataset ZigZag legs."""
+
+    def test_mode_d_materializes_wakeup_quantile_thresholds(self):
+        cfg = _make_mode_d_filter_config(
+            entry_quantile=0.65,
+            no_fresh_quantile=0.60,
+        )
+
+        stats = build_zigzag_global_stats(MANY_LEG_SAWTOOTH.close, cfg)
+
+        expected_entry = float(
+            np.quantile(
+                MANY_LEG_SAWTOOTH.expected_heights_pct,
+                q=0.65,
+                method="linear",
+            )
+        )
+        expected_no_fresh = float(
+            np.quantile(
+                MANY_LEG_SAWTOOTH.expected_heights_pct,
+                q=0.60,
+                method="linear",
+            )
+        )
+        assert stats.zigzag_mode == "D"
+        assert stats.wakeup_entry_candidate_height_threshold == pytest.approx(
+            expected_entry
+        )
+        assert stats.wakeup_no_fresh_candidate_height_threshold == pytest.approx(
+            expected_no_fresh
+        )
+        assert stats.metadata["wakeup_entry_candidate_height_threshold"] == pytest.approx(
+            expected_entry
+        )
+        assert stats.metadata["wakeup_no_fresh_candidate_height_threshold"] == pytest.approx(
+            expected_no_fresh
+        )
+
+        snap = stats.metadata["config_snapshot"]
+        assert snap["wakeup_entry_candidate_height_quantile"] == pytest.approx(0.65)
+        assert snap["wakeup_no_fresh_candidate_quantile"] == pytest.approx(0.60)
+
+    def test_disabled_wakeup_quantile_components_remain_none(self):
+        cfg = _make_mode_d_filter_config(
+            entry_candidate_height_enabled=False,
+            no_fresh_enabled=False,
+        )
+
+        stats = build_zigzag_global_stats(MANY_LEG_SAWTOOTH.close, cfg)
+
+        assert stats.wakeup_entry_candidate_height_threshold is None
+        assert stats.wakeup_no_fresh_candidate_height_threshold is None
+
+    def test_wakeup_quantile_min_leg_guard_uses_max_local_window_and_ten(self):
+        cfg = _make_mode_d_filter_config(local_window=5)
+        cfg = replace(
+            cfg,
+            zigzag=replace(
+                cfg.zigzag,
+                reversal_threshold=_FEW_LEGS_R,
+                local_window=5,
+            ),
+        )
+
+        with pytest.raises(ConfigError, match="wakeup quantile"):
+            build_zigzag_global_stats(_FEW_LEGS_CLOSE, cfg)
+
+    def test_legacy_mode_does_not_run_wakeup_quantile_checks(self):
+        cfg = _make_filter_config(
+            reversal_threshold=_FEW_LEGS_R,
+            candidate_trigger_threshold=0.012,
+            candidate_trigger_quantile=None,
+            local_window=5,
+            mode="A",
+        )
+        cfg = replace(
+            cfg,
+            wakeup_regime=_make_mode_d_filter_config().wakeup_regime,
+        )
+
+        stats = build_zigzag_global_stats(_FEW_LEGS_CLOSE, cfg)
+
+        assert stats.n_legs_total == 1
+        assert stats.wakeup_entry_candidate_height_threshold is None
+        assert stats.wakeup_no_fresh_candidate_height_threshold is None
+
+
 class TestInitFailures:
 
     def test_no_confirmed_legs_raises_config_error(self):
@@ -547,6 +711,9 @@ class TestAntiDrift:
         import supertrend_optimizer.core.zigzag_st_filter as zzmod
 
         text = Path(zzmod.__file__).read_text(encoding="utf-8")
+        start = text.index("def build_zigzag_global_stats(")
+        end = text.index("\ndef _is_component_enabled(", start)
+        text = text[start:end]
         # Strip both single-line comments and the module-level docstring so
         # that the grep gate only inspects executable code.
         # We keep the check token-based (whole word) to avoid catching e.g.
@@ -745,3 +912,5 @@ class TestV3DisabledFilterPath:
         assert stats.zigzag_mode == "A"
         assert stats.candidate_duration_gate_enabled is False
         assert stats.candidate_duration_max_bars is None
+        assert stats.wakeup_entry_candidate_height_threshold is None
+        assert stats.wakeup_no_fresh_candidate_height_threshold is None

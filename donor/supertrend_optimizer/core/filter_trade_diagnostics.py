@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any, Dict
 
 import numpy as np
-
 from supertrend_optimizer.utils.exceptions import ConfigError
 
 
@@ -32,6 +31,8 @@ def attach_trade_filter_diagnostics(
     volume_reason_arr = filter_diagnostics.get("volume_condition_block_reason")
     block_reason_arr = filter_diagnostics.get("filter_block_reason")
     wakeup_exit_reason_arr = filter_diagnostics.get("wakeup_exit_reason")
+    wakeup_position_action_arr = filter_diagnostics.get("wakeup_position_action")
+    state_at_bar_start_arr = filter_diagnostics.get("state_at_bar_start")
 
     n_diag = len(state_arr)
     pending_exit_idx = n_diag - 1
@@ -64,11 +65,20 @@ def attach_trade_filter_diagnostics(
         fsm_at_exit = (
             str(state_arr[exit_signal_idx]) if exit_signal_idx < n_diag else "UNKNOWN"
         )
+        fsm_at_exit_start = (
+            _state_name_at(state_at_bar_start_arr, exit_signal_idx)
+            if state_at_bar_start_arr is not None
+            else "UNKNOWN"
+        )
         reset_at_exit = _flag_at(daily_reset_arr, exit_signal_idx)
         time_reset_at_exit = _flag_at(time_reset_arr, exit_signal_idx)
         imm_at_exit = _flag_at(imm_triggered_arr, exit_signal_idx)
         wakeup_exit_reason = _wakeup_exit_reason_at(
             wakeup_exit_reason_arr,
+            exit_signal_idx,
+        )
+        wakeup_position_action = _wakeup_position_action_at(
+            wakeup_position_action_arr,
             exit_signal_idx,
         )
         block_at_exit = (
@@ -91,7 +101,9 @@ def attach_trade_filter_diagnostics(
             exit_reasons.append("filter_volume_reversal")
         elif block_at_exit == "trade_mode_forced_exit":
             exit_reasons.append("filter_trade_mode_forced_exit")
-        elif fsm_at_exit == "ST_STOPPING":
+        elif wakeup_position_action is not None:
+            exit_reasons.append(wakeup_position_action)
+        elif fsm_at_exit == "ST_STOPPING" or fsm_at_exit_start == "ST_STOPPING":
             exit_reasons.append("filter_stopping_opposite_flip")
         else:
             exit_reasons.append("st_flip")
@@ -118,6 +130,34 @@ def _wakeup_exit_reason_at(arr: Any, idx: int) -> str | None:
         "reset": "wakeup_exit_reset",
         "opposite_st_flip": "wakeup_exit_opposite_st_flip",
     }.get(str(arr[idx]))
+
+
+def _wakeup_position_action_at(arr: Any, idx: int) -> str | None:
+    if arr is None or idx >= len(arr):
+        return None
+    return {
+        "reverse_on_st_flip": "wakeup_reverse_on_st_flip",
+        "flat_on_disallowed_st_flip": "wakeup_flat_on_disallowed_st_flip",
+    }.get(str(arr[idx]))
+
+
+def _state_name_at(arr: Any, idx: int) -> str:
+    if arr is None or idx >= len(arr):
+        return "UNKNOWN"
+    value = arr[idx]
+    if isinstance(value, str):
+        return value
+    try:
+        return {
+            0: "OFF",
+            1: "WAIT_FIRST_ST_FLIP",
+            2: "ST_ACTIVE_FREEZE",
+            3: "ST_ACTIVE_MONITORING",
+            4: "ST_STOPPING",
+            5: "ST_COUNTING_ZZ_LEGS",
+        }[int(value)]
+    except (KeyError, TypeError, ValueError):
+        return "UNKNOWN"
 
 
 __all__ = ["attach_trade_filter_diagnostics"]

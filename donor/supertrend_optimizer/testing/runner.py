@@ -456,6 +456,9 @@ def _build_wakeup_summary_fields(
     exit_reason = np.asarray(
         filter_diagnostics.get("wakeup_exit_reason", []), dtype=object
     )
+    position_action = np.asarray(
+        filter_diagnostics.get("wakeup_position_action", []), dtype=object
+    )
 
     def _sum_int8(key: str) -> int:
         arr = filter_diagnostics.get(key)
@@ -474,6 +477,15 @@ def _build_wakeup_summary_fields(
         "wakeup_exit_reset_count": int(np.sum(exit_reason == "reset")),
         "wakeup_exit_opposite_st_flip_count": int(
             np.sum(exit_reason == "opposite_st_flip")
+        ),
+        "wakeup_reverse_on_st_flip_count": int(
+            np.sum(position_action == "reverse_on_st_flip")
+        ),
+        "wakeup_flat_on_disallowed_st_flip_count": int(
+            np.sum(position_action == "flat_on_disallowed_st_flip")
+        ),
+        "wakeup_restore_allowed_position_on_st_flip_count": int(
+            np.sum(position_action == "restore_allowed_position_on_st_flip")
         ),
         "wakeup_bars_active": _sum_int8("wakeup_regime_active"),
         "wakeup_entry_candidate_height_threshold": getattr(

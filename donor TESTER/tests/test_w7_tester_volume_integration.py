@@ -46,17 +46,27 @@ def test_run_batch_tester_passes_index_to_volume_metrics():
     assert all(any(keyword.arg == "index" for keyword in call.keywords) for call in calls)
 
 
-def test_repo_config_tester_yaml_loads_volume_aggregation_and_baseline_session():
+def test_repo_config_tester_yaml_loads_active_mode_d_wakeup_volume_profile():
     path = Path(__file__).resolve().parents[2] / "config_tester.yaml"
 
     cfg = load_tester_config(str(path))
 
+    tf_cfg = cfg["trade_filter"]
+    assert tf_cfg.enabled is True
+    assert tf_cfg.zigzag.mode == "D"
+    assert tf_cfg.lifecycle.exit_off_mode == "exit C"
+
     volume = cfg["trade_filter"].volume
+    assert volume.enabled is False
     assert volume.aggregation == "mean"
     assert volume.baseline_session.enabled is True
     assert volume.baseline_session.window == "09:00-19:00"
-    assert volume.baseline_session._start_hour == 9
-    assert volume.baseline_session._end_hour == 19
+
+    wakeup_volume = tf_cfg.wakeup_regime.entry.volume_expansion
+    assert wakeup_volume.enabled is True
+    assert wakeup_volume.short_window == 10
+    assert wakeup_volume.baseline_window == 100
+    assert wakeup_volume.min_ratio == 1.3
 
 
 def _df(n: int = 80) -> pd.DataFrame:

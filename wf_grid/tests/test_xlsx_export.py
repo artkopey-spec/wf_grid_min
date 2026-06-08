@@ -20,6 +20,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -178,6 +179,31 @@ def _sheets(path: Path):
     names = wb.sheetnames
     wb.close()
     return names
+
+
+def test_retained_filter_diagnostics_export_passes_through_wakeup_keys(tmp_path):
+    cfg = _cfg()
+    cfg.export.retain_per_bar_filter_diagnostics = True
+    step_results_oos = {
+        "atr10_m2.50_both": [
+            SimpleNamespace(
+                wf_step=1,
+                filter_diagnostics_oos={
+                    "trade_filter_state": ["ST_ACTIVE_FREEZE", "ST_ACTIVE_FREEZE"],
+                    "wakeup_position_action": ["none", "reverse_on_st_flip"],
+                    "wakeup_active_direction": [1, -1],
+                },
+            )
+        ]
+    }
+
+    path = _export(tmp_path, config=cfg, step_results_oos=step_results_oos)
+
+    df = pd.read_excel(path, sheet_name="WF_FilterDiagnostics")
+    assert "wakeup_position_action" in df.columns
+    assert "wakeup_active_direction" in df.columns
+    assert df["wakeup_position_action"].tolist() == ["none", "reverse_on_st_flip"]
+    assert df["wakeup_active_direction"].tolist() == [1, -1]
 
 
 def _read_sheet(path: Path, sheet: str) -> pd.DataFrame:

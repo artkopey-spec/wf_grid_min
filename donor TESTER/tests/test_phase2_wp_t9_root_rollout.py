@@ -53,13 +53,18 @@ def test_root_entrypoint_help_smoke() -> None:
 def test_root_config_loads_as_current_operator_sample() -> None:
     text = ROOT_CONFIG.read_text(encoding="utf-8")
 
-    assert "segmentation.mode: legacy" in text
+    assert "mode: legacy" in text
     assert "trade_filter:" in text
+    assert "wakeup_regime:" in text
 
     cfg = load_tester_config(str(ROOT_CONFIG))
     tf_cfg = cfg.get("trade_filter")
     assert tf_cfg is not None
-    assert isinstance(tf_cfg.enabled, bool)
+    assert tf_cfg.enabled is True
+    assert tf_cfg.zigzag.mode == "D"
+    assert tf_cfg.lifecycle.exit_off_mode == "exit C"
+    assert tf_cfg.wakeup_regime is not None
+    assert tf_cfg.wakeup_regime.enabled is True
 
 
 def test_legacy_segmentation_accepts_zigzag_st_mode_fixture(tmp_path: Path) -> None:

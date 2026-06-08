@@ -10,3 +10,4 @@ __pycache__/
 results/
 results tester/
 !results tester/.gitkeep
+tmp/

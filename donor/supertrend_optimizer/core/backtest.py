@@ -431,8 +431,6 @@ def run_backtest_fast(
             trade_filter_config=trade_filter_config,
             zigzag_global_stats=zigzag_global_stats,
             open_prices=open_prices,
-            high=high,
-            low=low,
             global_offset=global_offset,
             execution_model=execution_model,
             index=index,                      # NEW: propogate for daily_reset

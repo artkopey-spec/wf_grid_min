@@ -9,12 +9,10 @@ from supertrend_optimizer.core.zigzag_st_filter import (
 
 
 def test_wakeup_atr_ratio_short_data_returns_all_nan_without_value_error():
-    high = np.array([11.0, 12.0, 13.0])
-    low = np.array([9.0, 10.0, 11.0])
     close = np.array([10.0, 11.0, 12.0])
 
     ratio = _compute_wakeup_atr_ratio(
-        high, low, close, short_window=2, long_window=5
+        close, short_window=2, long_window=5
     )
 
     assert ratio.dtype == np.float64
@@ -23,15 +21,22 @@ def test_wakeup_atr_ratio_short_data_returns_all_nan_without_value_error():
 
 def test_wakeup_atr_ratio_masks_bars_before_long_window():
     close = np.arange(10.0, 18.0, dtype=np.float64)
-    high = close + 1.0
-    low = close - 1.0
 
     ratio = _compute_wakeup_atr_ratio(
-        high, low, close, short_window=2, long_window=4
+        close, short_window=2, long_window=4
     )
 
     assert np.isnan(ratio[:3]).all()
-    np.testing.assert_allclose(ratio[3:], np.ones(5, dtype=np.float64))
+    np.testing.assert_allclose(
+        ratio[3:],
+        np.array([
+            1.1666666666666667,
+            1.1538461538461537,
+            1.1272727272727272,
+            1.1004366812227073,
+            1.0774125132555674,
+        ]),
+    )
 
 
 def test_wakeup_volume_ratio_short_data_returns_all_nan():

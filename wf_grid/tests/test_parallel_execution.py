@@ -362,7 +362,7 @@ class TestPackDataRoundTrip:
         assert str(round_trip.index.tz) == "UTC"
 
     def test_us_resolution_index_normalized_to_ns(self):
-        """Regression: datetime64[us] payload must not be restored as ns."""
+        """Regression: datetime64[us] payload is stored safely and restored losslessly."""
         df = _ohlc_frame(n=20, tz="UTC+03:00", freq="min")
         df.index = df.index.as_unit("us")
         assert "datetime64[us" in str(df.index.dtype)
@@ -371,14 +371,16 @@ class TestPackDataRoundTrip:
         round_trip = mph.unpack_data(packed)
 
         assert packed["index_unit"] == "ns"
-        assert "datetime64[ns" in str(round_trip.index.dtype)
+        assert packed["index_restore_unit"] == "us"
+        assert "datetime64[us" in str(round_trip.index.dtype)
         assert str(round_trip.index.tz) == "UTC+03:00"
         assert round_trip.index[10] == df.index[10]
         assert round_trip.index[10].year == 2024
         pd.testing.assert_frame_equal(
-            df.reset_index(drop=True),
-            round_trip.reset_index(drop=True),
+            df,
+            round_trip,
             check_exact=True,
+            check_index_type=True,
         )
 
     def test_non_utc_aware_index_dst_boundary(self):

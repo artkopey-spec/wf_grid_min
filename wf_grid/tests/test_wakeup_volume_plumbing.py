@@ -93,8 +93,8 @@ def test_run_backtest_fast_passes_raw_volume_to_zigzag_apply(monkeypatch):
 
     def fake_apply(**kwargs):
         captured["volume"] = kwargs.get("volume")
-        captured["high"] = kwargs.get("high")
-        captured["low"] = kwargs.get("low")
+        captured["has_high"] = "high" in kwargs
+        captured["has_low"] = "low" in kwargs
         return SimpleNamespace(
             positions=np.zeros(len(kwargs["trend"]), dtype=np.int8),
             filter_diagnostics=None,
@@ -128,5 +128,5 @@ def test_run_backtest_fast_passes_raw_volume_to_zigzag_apply(monkeypatch):
     )
 
     assert captured["volume"] is volume
-    assert captured["high"] is high
-    assert captured["low"] is low
+    assert captured["has_high"] is False
+    assert captured["has_low"] is False

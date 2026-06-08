@@ -1546,6 +1546,27 @@ def _update_held_pos(held_pos: int, flip_dir: int, trade_mode: str) -> int:
     return held_pos
 
 
+def _apply_mode_d_internal_st_flip(
+    held_pos: int,
+    wakeup_active_direction: int,
+    flip_dir: int,
+    trade_mode: str,
+) -> tuple[int, int, str]:
+    if flip_dir == 0:
+        return held_pos, wakeup_active_direction, "none"
+    if trade_mode in ("both", "revers"):
+        return flip_dir, flip_dir, "reverse_on_st_flip"
+    if trade_mode == "long":
+        if flip_dir == -1:
+            return 0, +1, "flat_on_disallowed_st_flip"
+        return +1, +1, "restore_allowed_position_on_st_flip"
+    if trade_mode == "short":
+        if flip_dir == +1:
+            return 0, -1, "flat_on_disallowed_st_flip"
+        return -1, -1, "restore_allowed_position_on_st_flip"
+    return held_pos, wakeup_active_direction, "none"
+
+
 def _resolve_trigger_toggles(trade_filter_config: Any) -> tuple[bool, bool]:
     """Read ``triggers.candidate_threshold.enabled`` and
     ``triggers.confirmed_median.enabled`` flags.
@@ -1907,20 +1928,12 @@ def _rolling_mean_or_nan(values: np.ndarray, window: int) -> np.ndarray:
 
 
 def _compute_wakeup_atr_ratio(
-    high: np.ndarray,
-    low: np.ndarray,
     close: np.ndarray,
     short_window: int,
     long_window: int,
 ) -> np.ndarray:
-    high_f = np.asarray(high, dtype=np.float64)
-    low_f = np.asarray(low, dtype=np.float64)
     close_f = np.asarray(close, dtype=np.float64)
     n = len(close_f)
-    if not (len(high_f) == len(low_f) == n):
-        raise ConfigError(
-            "wakeup ATR ratio requires high, low, close arrays of equal length"
-        )
     if short_window < 1 or long_window < 1:
         raise ConfigError("wakeup ATR ratio windows must be >= 1")
 
@@ -1928,7 +1941,7 @@ def _compute_wakeup_atr_ratio(
     if n < long_window:
         return ratio
 
-    tr = calculate_true_range(high_f, low_f, close_f)
+    tr = calculate_true_range(close_f, close_f, close_f)
     short_atr = _atr_rma_or_nan(tr, short_window)
     long_atr = _atr_rma_or_nan(tr, long_window)
     valid = np.isfinite(short_atr) & np.isfinite(long_atr) & (long_atr > 0.0)
@@ -2065,6 +2078,8 @@ def _allocate_apply_arrays(
         "wakeup_exit_close_triggered_arr": np.zeros(n, dtype=np.int8),
         "wakeup_exit_action_mode_arr": np.full(n, "none", dtype=object),
         "wakeup_exit_reason_arr": np.full(n, "none", dtype=object),
+        "wakeup_position_action_arr": np.full(n, "none", dtype=object),
+        "wakeup_active_direction_arr": np.zeros(n, dtype=np.int8),
     }
 
 
@@ -2216,6 +2231,8 @@ def _finalize_apply_result(
                 ],
                 "wakeup_exit_action_mode": arrays["wakeup_exit_action_mode_arr"],
                 "wakeup_exit_reason": arrays["wakeup_exit_reason_arr"],
+                "wakeup_position_action": arrays["wakeup_position_action_arr"],
+                "wakeup_active_direction": arrays["wakeup_active_direction_arr"],
             }
         )
 
@@ -2239,8 +2256,6 @@ def apply(
     close: "Optional[np.ndarray]" = None,
     # open_prices accepted for run_backtest_fast API symmetry; not used here.
     open_prices: "Optional[np.ndarray]" = None,
-    high: "Optional[np.ndarray]" = None,
-    low: "Optional[np.ndarray]" = None,
     global_offset: int = 0,
     execution_model: Any = None,
     # Optional test override: inject a pre-computed ZigZagPerBar instead of
@@ -2743,12 +2758,8 @@ def apply(
             getattr(wakeup_action_cfg, "mode", None) or "none"
         )
         if _is_component_enabled(wakeup_atr_cfg):
-            high_arr = _require_1d_len("high", high, n)
-            low_arr = _require_1d_len("low", low, n)
             close_arr = _require_1d_len("close", close, n)
             wakeup_atr_ratio = _compute_wakeup_atr_ratio(
-                high_arr,
-                low_arr,
                 close_arr,
                 int(getattr(wakeup_atr_cfg, "short_window")),
                 int(getattr(wakeup_atr_cfg, "long_window")),
@@ -2859,6 +2870,8 @@ def apply(
     ]
     wakeup_exit_action_mode_arr = _apply_arrays["wakeup_exit_action_mode_arr"]
     wakeup_exit_reason_arr = _apply_arrays["wakeup_exit_reason_arr"]
+    wakeup_position_action_arr = _apply_arrays["wakeup_position_action_arr"]
+    wakeup_active_direction_arr = _apply_arrays["wakeup_active_direction_arr"]
     if mode_d_enabled:
         wakeup_exit_action_mode_arr[:] = wakeup_exit_action_mode
 
@@ -2880,6 +2893,10 @@ def apply(
     for t in range(n):
         just_reached_exit_b_threshold = False
         wakeup_exit_c_triggered_this_bar = False
+        wakeup_exit_reason_this_bar = "none"
+        wakeup_position_action_this_bar = "none"
+        wakeup_internal_st_flip_this_bar = False
+        wakeup_active_direction_for_diag = 0
         # ----- §9 step 0: Capture immutable bar-start snapshots ----------
         # WP-V3-4 P7 / ТЗ v3 §9 step 0: snapshots are captured BEFORE the
         # daily-reset wipe (§9 step 1) so that on a reset bar the snapshot
@@ -2898,11 +2915,9 @@ def apply(
         # combined_reset_event covers both daily_reset and time_filter_reset
         # (docs/time_filter_plan_v1_final.txt §4.4).
         if combined_reset_event[t]:
-            if mode_d_enabled and state_at_bar_start in (
-                ZigZagFSMState.ST_ACTIVE_FREEZE,
-                ZigZagFSMState.ST_STOPPING,
-            ):
-                wakeup_exit_reason_arr[t] = "reset"
+            if mode_d_enabled and state_at_bar_start == ZigZagFSMState.ST_ACTIVE_FREEZE:
+                wakeup_exit_reason_this_bar = "reset"
+                wakeup_position_action_this_bar = "exit_reset"
             state = ZigZagFSMState.OFF
             confirmed_legs_since_start = -1
             zz_legs_since_lifecycle_start = -1
@@ -3092,15 +3107,15 @@ def apply(
                     immediate_used_this_bar = lifecycle_start.immediate_used_this_bar
 
         if mode_d_enabled:
-            wakeup_state_active = state in (
-                ZigZagFSMState.ST_ACTIVE_FREEZE,
-                ZigZagFSMState.ST_STOPPING,
+            wakeup_state_active = state == ZigZagFSMState.ST_ACTIVE_FREEZE
+            wakeup_fresh_active_direction = (
+                cand_dir_t
+                if trigger_source_arr[t] == _TRIGGER_SOURCE_WAKEUP
+                else wakeup_active_direction
             )
-            if wakeup_state_active and wakeup_active_direction == 0:
-                wakeup_active_direction = held_pos
             wakeup_fresh_candidate = _is_wakeup_fresh_candidate(
                 no_fresh_cfg=wakeup_no_fresh_cfg,
-                active_direction=wakeup_active_direction,
+                active_direction=wakeup_fresh_active_direction,
                 candidate_direction=cand_dir_t,
                 candidate_age=int(cand_age_bars[t]),
                 candidate_height=c_h,
@@ -3112,10 +3127,7 @@ def apply(
                 wakeup_bars_since_fresh = 0 if wakeup_fresh_candidate else 1
                 wakeup_exit_c_fired = False
             elif (
-                state_at_bar_start in (
-                    ZigZagFSMState.ST_ACTIVE_FREEZE,
-                    ZigZagFSMState.ST_STOPPING,
-                )
+                state_at_bar_start == ZigZagFSMState.ST_ACTIVE_FREEZE
                 and wakeup_state_active
                 and not is_reset
             ):
@@ -3138,57 +3150,39 @@ def apply(
                 wakeup_bars_since_fresh_candidate_arr[t] = int(
                     wakeup_bars_since_fresh
                 )
-
-            wakeup_opposite_flip_this_bar = (
-                state_at_bar_start
-                in (
-                    ZigZagFSMState.ST_ACTIVE_FREEZE,
-                    ZigZagFSMState.ST_STOPPING,
-                )
-                and wakeup_state_active
-                and not is_reset
-                and flip_dir != 0
-                and (
-                    (held_pos_at_bar_start > 0 and flip_dir == -1)
-                    or (held_pos_at_bar_start < 0 and flip_dir == +1)
-                )
-            )
-            if wakeup_opposite_flip_this_bar:
-                wakeup_exit_reason_arr[t] = "opposite_st_flip"
-                state = ZigZagFSMState.OFF
-                held_pos = 0
-                (
-                    wakeup_cycle_age,
-                    wakeup_bars_since_fresh,
-                    wakeup_active_direction,
-                    wakeup_exit_c_fired,
-                ) = _wakeup_runtime_off()
+                wakeup_active_direction_for_diag = wakeup_active_direction
 
             if (
                 wakeup_state_active
-                and not wakeup_opposite_flip_this_bar
+                and state_at_bar_start == ZigZagFSMState.ST_ACTIVE_FREEZE
                 and not wakeup_exit_c_fired
                 and not is_reset
             ):
-                wakeup_exit_reason_this_bar = None
+                wakeup_exit_c_reason_this_bar = None
                 if (
                     _is_component_enabled(wakeup_ttl_cfg)
                     and wakeup_cycle_age >= int(getattr(wakeup_ttl_cfg, "bars"))
                 ):
                     wakeup_exit_ttl_triggered_arr[t] = np.int8(1)
-                    wakeup_exit_reason_this_bar = "ttl"
+                    wakeup_exit_c_reason_this_bar = "ttl"
                 elif (
                     _is_component_enabled(wakeup_no_fresh_cfg)
                     and wakeup_bars_since_fresh
                     >= int(getattr(wakeup_no_fresh_cfg, "timeout_bars"))
                 ):
                     wakeup_exit_no_fresh_candidate_triggered_arr[t] = np.int8(1)
-                    wakeup_exit_reason_this_bar = "no_fresh_candidate"
+                    wakeup_exit_c_reason_this_bar = "no_fresh_candidate"
 
-                if wakeup_exit_reason_this_bar is not None:
-                    wakeup_exit_reason_arr[t] = wakeup_exit_reason_this_bar
+                if wakeup_exit_c_reason_this_bar is not None:
+                    wakeup_exit_reason_this_bar = wakeup_exit_c_reason_this_bar
                     wakeup_exit_c_fired = True
                     wakeup_exit_c_triggered_this_bar = True
+                    if wakeup_exit_c_reason_this_bar == "ttl":
+                        wakeup_position_action_this_bar = "exit_ttl"
+                    elif wakeup_exit_c_reason_this_bar == "no_fresh_candidate":
+                        wakeup_position_action_this_bar = (
+                            "exit_no_fresh_candidate"
+                        )
                     if wakeup_exit_action_mode == "block_new_entries":
                         state = ZigZagFSMState.ST_STOPPING
                     elif wakeup_exit_action_mode == "close_position":
@@ -3201,6 +3195,30 @@ def apply(
                             wakeup_active_direction,
                             wakeup_exit_c_fired,
                         ) = _wakeup_runtime_off()
+
+            wakeup_internal_st_flip_this_bar = (
+                state_at_bar_start == ZigZagFSMState.ST_ACTIVE_FREEZE
+                and state == ZigZagFSMState.ST_ACTIVE_FREEZE
+                and not is_reset
+                and not wakeup_exit_c_triggered_this_bar
+                and flip_dir != 0
+            )
+            if wakeup_internal_st_flip_this_bar:
+                (
+                    held_pos,
+                    wakeup_active_direction,
+                    wakeup_position_action_this_bar,
+                ) = _apply_mode_d_internal_st_flip(
+                    held_pos=held_pos,
+                    wakeup_active_direction=wakeup_active_direction,
+                    flip_dir=flip_dir,
+                    trade_mode=trade_mode,
+                )
+                wakeup_active_direction_for_diag = wakeup_active_direction
+
+            wakeup_exit_reason_arr[t] = wakeup_exit_reason_this_bar
+            wakeup_position_action_arr[t] = wakeup_position_action_this_bar
+            wakeup_active_direction_arr[t] = np.int8(wakeup_active_direction_for_diag)
 
         # WP-V3-7: §10.4 immediate_candidate_entry_block_reason priority.
         # Computed AFTER the dispatcher so ``immediate_used_this_bar`` is
@@ -3399,14 +3417,6 @@ def apply(
                     confirmed_legs_since_start = -1
                     zz_legs_since_lifecycle_start = -1
                     held_pos = 0
-                    if mode_d_enabled:
-                        wakeup_exit_reason_arr[t] = "opposite_st_flip"
-                        (
-                            wakeup_cycle_age,
-                            wakeup_bars_since_fresh,
-                            wakeup_active_direction,
-                            wakeup_exit_c_fired,
-                        ) = _wakeup_runtime_off()
                 else:
                     next_pos = np.int8(cur_pos)
 

@@ -8,8 +8,9 @@ spawn cannot import nested closures.
 Contracts (plan §2.2 / §2.3):
   - pack_data / unpack_data is a LOSSLESS round-trip for any OHLC frame
     that satisfies validate_ohlc_data.  It preserves dtype, timezone,
-    index name and index frequency.  DatetimeIndex storage is normalised
-    to nanoseconds and records index_unit explicitly.
+    index name and index frequency.  DatetimeIndex payload storage is
+    normalised to nanoseconds, while the original datetime unit is recorded
+    and restored explicitly.
 
 Worker state (plan §2.4):
   - _WORKER_STATE is a per-process dict populated by _init_worker.
@@ -67,9 +68,11 @@ def pack_data(full_data: pd.DataFrame) -> dict:
           - OHLC dtypes are numeric dtypes accepted by validate_ohlc_data.
 
     OHLC dtypes are NOT coerced to float64; index timezone, name and
-    frequency are preserved.  DatetimeIndex storage is normalised to
+    frequency are preserved.  DatetimeIndex payload storage is normalised to
     int64 nanoseconds with ``index_unit="ns"`` so pandas versions that
-    materialise ``datetime64[us]`` indexes cannot be misread as ns later.
+    materialise ``datetime64[us]`` indexes cannot be misread as ns later;
+    ``index_restore_unit`` records the original physical datetime unit for
+    lossless reconstruction.
     All extra columns beyond OHLC are preserved with their original dtypes.
     """
     if not isinstance(full_data.index, pd.DatetimeIndex):
@@ -94,6 +97,8 @@ def pack_data(full_data: pd.DataFrame) -> dict:
     }
 
     idx = full_data.index
+    index_dtype = str(idx.dtype)
+    index_restore_unit = index_dtype.split("[", 1)[1].split(",", 1)[0].split("]", 1)[0]
     # Store explicit nanoseconds, not whatever physical unit the pandas
     # DatetimeIndex happens to carry (ns/us/ms). This prevents a us payload
     # from being restored as ns and drifting into 1970.
@@ -116,6 +121,7 @@ def pack_data(full_data: pd.DataFrame) -> dict:
         "arrays": arrays,
         "index_int64_ns_utc": index_int64_ns_utc,
         "index_unit": index_unit,
+        "index_restore_unit": index_restore_unit,
         "index_tz": index_tz,
         "index_name": index_name,
         "index_freq": index_freq,
@@ -139,6 +145,10 @@ def unpack_data(d: dict) -> pd.DataFrame:
         idx = pd.to_datetime(
             d["index_int64_ns_utc"], unit=index_unit, utc=True
         ).tz_convert(d["index_tz"])
+
+    restore_unit = d.get("index_restore_unit")
+    if restore_unit is not None and hasattr(idx, "as_unit"):
+        idx = idx.as_unit(restore_unit)
 
     idx.name = d["index_name"]
     # Plan C3-3 / A13: preserve freq exactly.  No defensive swallow here —

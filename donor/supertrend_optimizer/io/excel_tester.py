@@ -182,6 +182,8 @@ FILTER_DIAGNOSTICS_100_DISPLAY_NAMES: Dict[str, str] = {
     "wakeup_exit_close_triggered":              "Wakeup Exit Close Triggered",
     "wakeup_exit_action_mode":                  "Wakeup Exit Action Mode",
     "wakeup_exit_reason":                       "Wakeup Exit Reason",
+    "wakeup_position_action":                   "Wakeup Position Action",
+    "wakeup_active_direction":                  "Wakeup Active Direction",
 }
 
 # ZigZag_Trigger_Events sheet column order (plan §9.2, extended by WP-V3-8 §11.2)
@@ -1850,6 +1852,9 @@ def _build_filters_summary_df(period_results: List[PeriodResult]) -> Optional[pd
                 "Wakeup Exit Close": s.get("wakeup_exit_close_count", ctr.get("wakeup_exit_close_count", 0)),
                 "Wakeup Exit Reset": s.get("wakeup_exit_reset_count", ctr.get("wakeup_exit_reset_count", 0)),
                 "Wakeup Exit Opposite ST Flip": s.get("wakeup_exit_opposite_st_flip_count", ctr.get("wakeup_exit_opposite_st_flip_count", 0)),
+                "Wakeup Reverse On ST Flip": s.get("wakeup_reverse_on_st_flip_count", ctr.get("wakeup_reverse_on_st_flip_count", 0)),
+                "Wakeup Flat On Disallowed ST Flip": s.get("wakeup_flat_on_disallowed_st_flip_count", ctr.get("wakeup_flat_on_disallowed_st_flip_count", 0)),
+                "Wakeup Restore Allowed Position On ST Flip": s.get("wakeup_restore_allowed_position_on_st_flip_count", ctr.get("wakeup_restore_allowed_position_on_st_flip_count", 0)),
                 "Wakeup Bars Active": s.get("wakeup_bars_active", ctr.get("wakeup_bars_active", 0)),
             })
         period_rows.append(row)

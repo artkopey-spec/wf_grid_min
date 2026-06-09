@@ -243,6 +243,7 @@ _ALLOWED_KEYS: dict[str, set[str]] = {
         "lock_cycle_direction",
         "entry",
         "exit",
+        "position_freeze",
     },
     "trade_filter.wakeup_regime.entry": {
         "candidate_height",
@@ -287,6 +288,12 @@ _ALLOWED_KEYS: dict[str, set[str]] = {
     },
     "trade_filter.wakeup_regime.exit.action": {
         "mode",
+    },
+    "trade_filter.wakeup_regime.position_freeze": {
+        "enabled",
+        "min_hold_bars",
+        "apply_to",
+        "release_action",
     },
 }
 

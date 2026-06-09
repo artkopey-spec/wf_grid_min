@@ -89,6 +89,7 @@ trade_filter:
 
   wakeup_regime:
     enabled: true
+    lock_cycle_direction: false
 
     entry:
       candidate_height:
@@ -119,3 +120,6 @@ trade_filter:
         timeout_bars: 20
       action:
         mode: close_position
+
+    position_freeze:
+      enabled: false

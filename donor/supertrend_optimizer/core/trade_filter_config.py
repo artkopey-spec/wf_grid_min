@@ -80,6 +80,12 @@ _V3_INIT_FAILURE_KEYS = frozenset({
     "exit_c_rejects_legacy_triggers",
     "wakeup_regime_requires_mode_d",
     "wakeup_enabled_requires_mode_d",
+    "position_freeze_enabled_invalid_type",
+    "position_freeze_enabled_requires_wakeup_enabled",
+    "position_freeze_enabled_requires_mode_d",
+    "position_freeze_min_hold_bars_invalid",
+    "position_freeze_apply_to_invalid",
+    "position_freeze_release_action_invalid",
 })
 
 # WP-T3 step 6 — caller_pipeline whitelist for type=zigzag_st_mode.
@@ -318,6 +324,14 @@ class TradeFilterWakeupExitConfig:
 
 
 @dataclass
+class TradeFilterWakeupPositionFreezeConfig:
+    enabled: object = False
+    min_hold_bars: object = None
+    apply_to: object = None
+    release_action: object = None
+
+
+@dataclass
 class TradeFilterWakeupRegimeConfig:
     enabled: object = False
     lock_cycle_direction: object = False
@@ -326,6 +340,9 @@ class TradeFilterWakeupRegimeConfig:
     )
     exit: TradeFilterWakeupExitConfig = field(
         default_factory=TradeFilterWakeupExitConfig
+    )
+    position_freeze: TradeFilterWakeupPositionFreezeConfig = field(
+        default_factory=TradeFilterWakeupPositionFreezeConfig
     )
 
 
@@ -519,7 +536,7 @@ TRADE_FILTER_ALLOWED_KEYS: dict[str, frozenset[str]] = {
         "enabled", "window",
     }),
     "trade_filter.wakeup_regime": frozenset({
-        "enabled", "lock_cycle_direction", "entry", "exit",
+        "enabled", "lock_cycle_direction", "entry", "exit", "position_freeze",
     }),
     "trade_filter.wakeup_regime.entry": frozenset({
         "candidate_height", "candidate_age", "atr_expansion",
@@ -548,6 +565,9 @@ TRADE_FILTER_ALLOWED_KEYS: dict[str, frozenset[str]] = {
     }),
     "trade_filter.wakeup_regime.exit.action": frozenset({
         "mode",
+    }),
+    "trade_filter.wakeup_regime.position_freeze": frozenset({
+        "enabled", "min_hold_bars", "apply_to", "release_action",
     }),
 }
 
@@ -726,6 +746,8 @@ def build_trade_filter_config_from_raw(tf_raw: dict) -> TradeFilterConfig:
         ttl_raw: dict = exit_raw.get("ttl") or {}
         no_fresh_raw: dict = exit_raw.get("no_fresh_candidate") or {}
         action_raw: dict = exit_raw.get("action") or {}
+        position_freeze_raw = wakeup_raw.get("position_freeze") or {}
+        position_freeze_raw_is_mapping = isinstance(position_freeze_raw, dict)
 
         wakeup_regime = TradeFilterWakeupRegimeConfig(
             enabled=wakeup_raw.get("enabled", False),
@@ -767,6 +789,24 @@ def build_trade_filter_config_from_raw(tf_raw: dict) -> TradeFilterConfig:
                 ),
                 action=TradeFilterWakeupExitActionConfig(
                     mode=action_raw.get("mode", None),
+                ),
+            ),
+            position_freeze=TradeFilterWakeupPositionFreezeConfig(
+                enabled=(
+                    position_freeze_raw.get("enabled", False)
+                    if position_freeze_raw_is_mapping else position_freeze_raw
+                ),
+                min_hold_bars=(
+                    position_freeze_raw.get("min_hold_bars", None)
+                    if position_freeze_raw_is_mapping else None
+                ),
+                apply_to=(
+                    position_freeze_raw.get("apply_to", None)
+                    if position_freeze_raw_is_mapping else None
+                ),
+                release_action=(
+                    position_freeze_raw.get("release_action", None)
+                    if position_freeze_raw_is_mapping else None
                 ),
             ),
         )
@@ -1955,6 +1995,76 @@ def _validate_wakeup_regime_block(
             f"{action_mode!r}"
         )
 
+    position_freeze_path = wakeup_key + ("position_freeze",)
+    if position_freeze_path in raw_user_keys:
+        position_freeze = getattr(wakeup, "position_freeze", None)
+        if position_freeze is None:
+            return
+        enabled = getattr(position_freeze, "enabled", False)
+        if not isinstance(enabled, bool):
+            _append_validation_error(
+                errors,
+                "trade_filter.wakeup_regime.position_freeze.enabled must be "
+                f"bool (true/false), got {type(enabled).__name__!r} ({enabled!r})",
+                _VALIDATION_ERROR_KEYS.get(),
+                "position_freeze_enabled_invalid_type",
+            )
+            return
+
+        if enabled is True:
+            if wakeup_enabled is not True:
+                _append_validation_error(
+                    errors,
+                    "trade_filter.wakeup_regime.position_freeze.enabled=true "
+                    "requires trade_filter.wakeup_regime.enabled=true",
+                    _VALIDATION_ERROR_KEYS.get(),
+                    "position_freeze_enabled_requires_wakeup_enabled",
+                )
+            if not _is_mode_d(tf, raw_user_keys):
+                _append_validation_error(
+                    errors,
+                    "trade_filter.wakeup_regime.position_freeze.enabled=true "
+                    "requires trade_filter.zigzag.mode: D",
+                    _VALIDATION_ERROR_KEYS.get(),
+                    "position_freeze_enabled_requires_mode_d",
+                )
+
+            min_hold = getattr(position_freeze, "min_hold_bars", None)
+            if (
+                not isinstance(min_hold, int)
+                or isinstance(min_hold, bool)
+                or min_hold < 1
+            ):
+                _append_validation_error(
+                    errors,
+                    "trade_filter.wakeup_regime.position_freeze.min_hold_bars "
+                    "must be integer >= 1 when position_freeze.enabled is true",
+                    _VALIDATION_ERROR_KEYS.get(),
+                    "position_freeze_min_hold_bars_invalid",
+                )
+
+            apply_to = getattr(position_freeze, "apply_to", None)
+            if apply_to != "internal_opposite_st_flip":
+                _append_validation_error(
+                    errors,
+                    "trade_filter.wakeup_regime.position_freeze.apply_to must "
+                    "be 'internal_opposite_st_flip' when position_freeze.enabled "
+                    f"is true, got {apply_to!r}",
+                    _VALIDATION_ERROR_KEYS.get(),
+                    "position_freeze_apply_to_invalid",
+                )
+
+            release_action = getattr(position_freeze, "release_action", None)
+            if release_action != "apply_if_still_opposite":
+                _append_validation_error(
+                    errors,
+                    "trade_filter.wakeup_regime.position_freeze.release_action "
+                    "must be 'apply_if_still_opposite' when "
+                    f"position_freeze.enabled is true, got {release_action!r}",
+                    _VALIDATION_ERROR_KEYS.get(),
+                    "position_freeze_release_action_invalid",
+                )
+
 
 def _validate_phase0_mode_d_cross_fields(
     tf: TradeFilterConfig,
@@ -2492,6 +2602,7 @@ __all__ = [
     "TradeFilterWakeupTtlExitConfig",
     "TradeFilterWakeupNoFreshCandidateExitConfig",
     "TradeFilterWakeupExitActionConfig",
+    "TradeFilterWakeupPositionFreezeConfig",
     "validate_trade_filter",
     "collect_raw_user_keys",
     "collect_trade_filter_unknown_keys",

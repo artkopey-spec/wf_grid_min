@@ -1106,6 +1106,7 @@ class TestWakeupWhitelistPhase0Schema:
             "trade_filter.wakeup_regime.exit.ttl",
             "trade_filter.wakeup_regime.exit.no_fresh_candidate",
             "trade_filter.wakeup_regime.exit.action",
+            "trade_filter.wakeup_regime.position_freeze",
         ]
 
         for path in wakeup_paths:
@@ -1145,6 +1146,11 @@ trade_filter:
         timeout_bars: 20
       action:
         mode: block_new_entries
+    position_freeze:
+      enabled: true
+      min_hold_bars: 3
+      apply_to: internal_opposite_st_flip
+      release_action: apply_if_still_opposite
 """
         _assert_error(tmp_path, yaml, "wakeup_regime is not supported by wf_grid")
 
@@ -2164,6 +2170,12 @@ class TestExitBImmediateOffFailureKeysRegistry:
         "exit_c_rejects_legacy_triggers",
         "wakeup_regime_requires_mode_d",
         "wakeup_enabled_requires_mode_d",
+        "position_freeze_enabled_invalid_type",
+        "position_freeze_enabled_requires_wakeup_enabled",
+        "position_freeze_enabled_requires_mode_d",
+        "position_freeze_min_hold_bars_invalid",
+        "position_freeze_apply_to_invalid",
+        "position_freeze_release_action_invalid",
         # time_filter (docs/time_filter_plan_v1_final.txt §1.2, §7.3)
         "time_filter_enabled_invalid_type",
         "time_filter_window_missing",

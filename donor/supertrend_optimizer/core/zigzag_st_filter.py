@@ -1554,6 +1554,8 @@ def _apply_mode_d_internal_st_flip(
 ) -> tuple[int, int, str]:
     if flip_dir == 0:
         return held_pos, wakeup_active_direction, "none"
+    if held_pos != 0 and flip_dir == held_pos:
+        return held_pos, wakeup_active_direction, "none"
     if trade_mode in ("both", "revers"):
         return flip_dir, flip_dir, "reverse_on_st_flip"
     if trade_mode == "long":
@@ -1565,6 +1567,21 @@ def _apply_mode_d_internal_st_flip(
             return 0, -1, "flat_on_disallowed_st_flip"
         return -1, -1, "restore_allowed_position_on_st_flip"
     return held_pos, wakeup_active_direction, "none"
+
+
+def _effective_wakeup_trade_mode(
+    *,
+    raw_trade_mode: str,
+    wakeup_lock_cycle_direction: bool,
+    cycle_direction: int,
+) -> str | None:
+    if wakeup_lock_cycle_direction:
+        if cycle_direction == +1:
+            return "long"
+        if cycle_direction == -1:
+            return "short"
+        return None
+    return raw_trade_mode
 
 
 def _resolve_trigger_toggles(trade_filter_config: Any) -> tuple[bool, bool]:
@@ -2086,6 +2103,14 @@ def _allocate_apply_arrays(
             np.int8(1 if wakeup_lock_cycle_direction else 0),
             dtype=np.int8,
         ),
+        "position_freeze_active_arr": np.zeros(n, dtype=np.int8),
+        "position_freeze_bars_left_arr": np.zeros(n, dtype=np.int64),
+        "position_freeze_ignored_opposite_st_flip_arr": np.zeros(
+            n, dtype=np.int8
+        ),
+        "position_freeze_release_action_arr": np.full(
+            n, "none", dtype=object
+        ),
     }
 
 
@@ -2241,6 +2266,16 @@ def _finalize_apply_result(
                 "wakeup_active_direction": arrays["wakeup_active_direction_arr"],
                 "wakeup_lock_cycle_direction_config": arrays[
                     "wakeup_lock_cycle_direction_config_arr"
+                ],
+                "position_freeze_active": arrays["position_freeze_active_arr"],
+                "position_freeze_bars_left": arrays[
+                    "position_freeze_bars_left_arr"
+                ],
+                "position_freeze_ignored_opposite_st_flip": arrays[
+                    "position_freeze_ignored_opposite_st_flip_arr"
+                ],
+                "position_freeze_release_action": arrays[
+                    "position_freeze_release_action_arr"
                 ],
             }
         )
@@ -2788,6 +2823,21 @@ def apply(
         and getattr(wakeup_regime_cfg, "enabled", False) is True
         and getattr(wakeup_regime_cfg, "lock_cycle_direction", False) is True
     )
+    position_freeze_cfg = (
+        getattr(wakeup_regime_cfg, "position_freeze", None)
+        if wakeup_regime_cfg is not None else None
+    )
+    position_freeze_enabled = (
+        mode_d_enabled
+        and wakeup_regime_cfg is not None
+        and getattr(wakeup_regime_cfg, "enabled", False) is True
+        and position_freeze_cfg is not None
+        and getattr(position_freeze_cfg, "enabled", False) is True
+    )
+    position_freeze_min_hold_bars = (
+        int(getattr(position_freeze_cfg, "min_hold_bars", 0) or 0)
+        if position_freeze_enabled else 0
+    )
 
     # WP-V3-7: §10.2 additional diagnostic arrays (enabled filter path only).
     # Disabled-filter path never calls apply(), so these arrays never appear
@@ -2890,6 +2940,16 @@ def apply(
     wakeup_exit_reason_arr = _apply_arrays["wakeup_exit_reason_arr"]
     wakeup_position_action_arr = _apply_arrays["wakeup_position_action_arr"]
     wakeup_active_direction_arr = _apply_arrays["wakeup_active_direction_arr"]
+    position_freeze_active_arr = _apply_arrays["position_freeze_active_arr"]
+    position_freeze_bars_left_arr = _apply_arrays[
+        "position_freeze_bars_left_arr"
+    ]
+    position_freeze_ignored_opposite_st_flip_arr = _apply_arrays[
+        "position_freeze_ignored_opposite_st_flip_arr"
+    ]
+    position_freeze_release_action_arr = _apply_arrays[
+        "position_freeze_release_action_arr"
+    ]
     if mode_d_enabled:
         wakeup_exit_action_mode_arr[:] = wakeup_exit_action_mode
 
@@ -2905,6 +2965,8 @@ def apply(
         wakeup_exit_c_fired,
     ) = _wakeup_runtime_off()
     cycle_direction = 0
+    pos_freeze_until = -1
+    pos_freeze_pending = False
 
     # ------------------------------------------------------------------
     # 4) Main FSM loop.
@@ -2949,6 +3011,8 @@ def apply(
                 wakeup_active_direction,
                 wakeup_exit_c_fired,
             ) = _wakeup_runtime_off()
+            pos_freeze_until = -1
+            pos_freeze_pending = False
 
         # ----- Detect events at close(t) --------------------------------
         prev_trend = int(trend_arr[t - 1]) if t > 0 else 0
@@ -3213,6 +3277,8 @@ def apply(
                         state = ZigZagFSMState.OFF
                         held_pos = 0
                         cycle_direction = 0
+                        pos_freeze_until = -1
+                        pos_freeze_pending = False
                         (
                             wakeup_cycle_age,
                             wakeup_bars_since_fresh,
@@ -3228,34 +3294,127 @@ def apply(
                 and flip_dir != 0
             )
             if wakeup_internal_st_flip_this_bar:
-                if wakeup_lock_cycle_direction:
-                    if cycle_direction in (-1, 1):
-                        effective_trade_mode = (
-                            "long" if cycle_direction == 1 else "short"
+                freeze_active = (
+                    position_freeze_enabled
+                    and state_at_bar_start == ZigZagFSMState.ST_ACTIVE_FREEZE
+                    and state == ZigZagFSMState.ST_ACTIVE_FREEZE
+                    and held_pos != 0
+                    and t <= pos_freeze_until
+                )
+                opposite_to_position = (
+                    flip_dir != 0
+                    and held_pos != 0
+                    and flip_dir == -held_pos
+                )
+                if freeze_active and opposite_to_position:
+                    wakeup_position_action_this_bar = (
+                        "position_freeze_ignored_opposite_st_flip"
+                    )
+                    pos_freeze_pending = True
+                    position_freeze_ignored_opposite_st_flip_arr[t] = np.int8(1)
+                else:
+                    effective_trade_mode = _effective_wakeup_trade_mode(
+                        raw_trade_mode=trade_mode,
+                        wakeup_lock_cycle_direction=wakeup_lock_cycle_direction,
+                        cycle_direction=cycle_direction,
+                    )
+                    if effective_trade_mode is not None:
+                        effective_direction = (
+                            cycle_direction
+                            if wakeup_lock_cycle_direction
+                            else wakeup_active_direction
                         )
                         (
                             held_pos,
-                            _active_direction,
+                            wakeup_active_direction,
                             wakeup_position_action_this_bar,
                         ) = _apply_mode_d_internal_st_flip(
                             held_pos=held_pos,
-                            wakeup_active_direction=cycle_direction,
+                            wakeup_active_direction=effective_direction,
                             flip_dir=flip_dir,
                             trade_mode=effective_trade_mode,
                         )
-                        wakeup_active_direction = cycle_direction
-                else:
-                    (
-                        held_pos,
-                        wakeup_active_direction,
-                        wakeup_position_action_this_bar,
-                    ) = _apply_mode_d_internal_st_flip(
-                        held_pos=held_pos,
-                        wakeup_active_direction=wakeup_active_direction,
-                        flip_dir=flip_dir,
-                        trade_mode=trade_mode,
-                    )
+                        if wakeup_lock_cycle_direction:
+                            wakeup_active_direction = cycle_direction
                 wakeup_active_direction_for_diag = wakeup_active_direction
+
+            if (
+                position_freeze_enabled
+                and pos_freeze_pending
+                and t <= pos_freeze_until
+                and state == ZigZagFSMState.ST_ACTIVE_FREEZE
+                and held_pos != 0
+                and curr_trend == held_pos
+            ):
+                pos_freeze_pending = False
+
+            release_due = (
+                position_freeze_enabled
+                and state_at_bar_start == ZigZagFSMState.ST_ACTIVE_FREEZE
+                and state == ZigZagFSMState.ST_ACTIVE_FREEZE
+                and held_pos != 0
+                and pos_freeze_pending
+                and t > pos_freeze_until
+                and not is_reset
+                and not wakeup_exit_c_triggered_this_bar
+            )
+            if release_due:
+                st_now = curr_trend
+                if st_now == held_pos:
+                    pos_freeze_pending = False
+                    position_freeze_release_action_arr[t] = "noop_st_realigned"
+                else:
+                    effective_trade_mode = _effective_wakeup_trade_mode(
+                        raw_trade_mode=trade_mode,
+                        wakeup_lock_cycle_direction=wakeup_lock_cycle_direction,
+                        cycle_direction=cycle_direction,
+                    )
+                    if effective_trade_mode is None:
+                        pos_freeze_pending = False
+                        position_freeze_release_action_arr[t] = (
+                            "noop_invalid_lock_state"
+                        )
+                    else:
+                        effective_direction = (
+                            cycle_direction
+                            if wakeup_lock_cycle_direction
+                            else wakeup_active_direction
+                        )
+                        (
+                            held_pos,
+                            wakeup_active_direction,
+                            release_action,
+                        ) = _apply_mode_d_internal_st_flip(
+                            held_pos=held_pos,
+                            wakeup_active_direction=effective_direction,
+                            flip_dir=st_now,
+                            trade_mode=effective_trade_mode,
+                        )
+                        if wakeup_lock_cycle_direction:
+                            wakeup_active_direction = cycle_direction
+                        pos_freeze_pending = False
+                        if release_action == "none":
+                            position_freeze_release_action_arr[t] = (
+                                "noop_st_realigned"
+                            )
+                        else:
+                            position_freeze_release_action_arr[t] = (
+                                "applied_" + release_action
+                            )
+                            wakeup_position_action_this_bar = release_action
+                        wakeup_active_direction_for_diag = wakeup_active_direction
+
+            if (
+                position_freeze_enabled
+                and state_at_bar_start == ZigZagFSMState.ST_ACTIVE_FREEZE
+                and state == ZigZagFSMState.ST_ACTIVE_FREEZE
+                and held_pos != 0
+                and t <= pos_freeze_until
+            ):
+                position_freeze_active_arr[t] = np.int8(1)
+                position_freeze_bars_left_arr[t] = max(
+                    int(pos_freeze_until) - t + 1, 0
+                )
 
             wakeup_exit_reason_arr[t] = wakeup_exit_reason_this_bar
             wakeup_position_action_arr[t] = wakeup_position_action_this_bar
@@ -3412,6 +3571,41 @@ def apply(
             )
         ):
             held_pos = _update_held_pos(held_pos, flip_dir, trade_mode)
+
+        if mode_d_enabled:
+            real_opened = (
+                trigger_source_arr[t] == _TRIGGER_SOURCE_WAKEUP
+                and held_pos != 0
+                and state == ZigZagFSMState.ST_ACTIVE_FREEZE
+            )
+            real_reversed = (
+                wakeup_position_action_this_bar == "reverse_on_st_flip"
+                and held_pos != 0
+                and state == ZigZagFSMState.ST_ACTIVE_FREEZE
+            )
+            restored = (
+                wakeup_position_action_this_bar
+                == "restore_allowed_position_on_st_flip"
+            )
+            if (
+                position_freeze_enabled
+                and (real_opened or real_reversed)
+                and not restored
+            ):
+                pos_freeze_until = t + position_freeze_min_hold_bars
+                pos_freeze_pending = False
+
+            if (
+                wakeup_exit_c_triggered_this_bar
+                or held_pos == 0
+                or state in (
+                    ZigZagFSMState.OFF,
+                    ZigZagFSMState.WAIT_FIRST_ST_FLIP,
+                    ZigZagFSMState.ST_STOPPING,
+                )
+            ):
+                pos_freeze_until = -1
+                pos_freeze_pending = False
 
         # ----- Compute filtered_positions[t+1] --------------------------
         # Decision at close(t), execution at open(t+1) (§5.5 / §17.13).

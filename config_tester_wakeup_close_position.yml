@@ -69,3 +69,5 @@ trade_filter:
         enabled: false
       action:
         mode: close_position
+    position_freeze:
+      enabled: false

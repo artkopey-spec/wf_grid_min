@@ -191,6 +191,10 @@ FILTER_DIAGNOSTICS_100_DISPLAY_NAMES: Dict[str, str] = {
     "wakeup_position_action":                   "Wakeup Position Action",
     "wakeup_active_direction":                  "Wakeup Active Direction",
     "wakeup_lock_cycle_direction_config":       "Wakeup Lock Cycle Direction Config",
+    "position_freeze_active":                   "Wakeup Position Freeze Active",
+    "position_freeze_bars_left":                "Wakeup Position Freeze Bars Left",
+    "position_freeze_ignored_opposite_st_flip": "Wakeup Position Freeze Ignored Opposite ST Flip",
+    "position_freeze_release_action":           "Wakeup Position Freeze Release Action",
 }
 
 # ZigZag_Trigger_Events sheet column order (plan §9.2, extended by WP-V3-8 §11.2)
@@ -1862,6 +1866,10 @@ def _build_filters_summary_df(period_results: List[PeriodResult]) -> Optional[pd
                 "Wakeup Reverse On ST Flip": s.get("wakeup_reverse_on_st_flip_count", ctr.get("wakeup_reverse_on_st_flip_count", 0)),
                 "Wakeup Flat On Disallowed ST Flip": s.get("wakeup_flat_on_disallowed_st_flip_count", ctr.get("wakeup_flat_on_disallowed_st_flip_count", 0)),
                 "Wakeup Restore Allowed Position On ST Flip": s.get("wakeup_restore_allowed_position_on_st_flip_count", ctr.get("wakeup_restore_allowed_position_on_st_flip_count", 0)),
+                "Wakeup Position Freeze Ignored Opposite ST Flip": s.get("wakeup_position_freeze_ignored_opposite_st_flip_count", ctr.get("wakeup_position_freeze_ignored_opposite_st_flip_count", 0)),
+                "Wakeup Position Freeze Release Flat": s.get("wakeup_position_freeze_release_flat_count", ctr.get("wakeup_position_freeze_release_flat_count", 0)),
+                "Wakeup Position Freeze Release Reverse": s.get("wakeup_position_freeze_release_reverse_count", ctr.get("wakeup_position_freeze_release_reverse_count", 0)),
+                "Wakeup Position Freeze Release Noop": s.get("wakeup_position_freeze_release_noop_count", ctr.get("wakeup_position_freeze_release_noop_count", 0)),
                 "Wakeup Bars Active": s.get("wakeup_bars_active", ctr.get("wakeup_bars_active", 0)),
             })
         period_rows.append(row)

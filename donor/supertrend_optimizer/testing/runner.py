@@ -459,6 +459,9 @@ def _build_wakeup_summary_fields(
     position_action = np.asarray(
         filter_diagnostics.get("wakeup_position_action", []), dtype=object
     )
+    position_freeze_release_action = np.asarray(
+        filter_diagnostics.get("position_freeze_release_action", []), dtype=object
+    )
 
     def _sum_int8(key: str) -> int:
         arr = filter_diagnostics.get(key)
@@ -486,6 +489,26 @@ def _build_wakeup_summary_fields(
         ),
         "wakeup_restore_allowed_position_on_st_flip_count": int(
             np.sum(position_action == "restore_allowed_position_on_st_flip")
+        ),
+        "wakeup_position_freeze_ignored_opposite_st_flip_count": _sum_int8(
+            "position_freeze_ignored_opposite_st_flip"
+        ),
+        "wakeup_position_freeze_release_flat_count": int(
+            np.sum(
+                position_freeze_release_action
+                == "applied_flat_on_disallowed_st_flip"
+            )
+        ),
+        "wakeup_position_freeze_release_reverse_count": int(
+            np.sum(position_freeze_release_action == "applied_reverse_on_st_flip")
+        ),
+        "wakeup_position_freeze_release_noop_count": int(
+            np.sum(
+                np.isin(
+                    position_freeze_release_action,
+                    ["noop_st_realigned", "noop_invalid_lock_state"],
+                )
+            )
         ),
         "wakeup_bars_active": _sum_int8("wakeup_regime_active"),
         "wakeup_entry_candidate_height_threshold": getattr(

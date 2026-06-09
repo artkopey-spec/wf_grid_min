@@ -39,6 +39,8 @@ def attach_trade_filter_diagnostics(
     entry_filter_states = []
     entry_trigger_sources = []
     exit_reasons = []
+    wakeup_cycle_exit_reasons = []
+    wakeup_position_actions = []
     entry_volume_block_reasons = []
 
     for row in trades_df.itertuples(index=False):
@@ -81,6 +83,12 @@ def attach_trade_filter_diagnostics(
             wakeup_position_action_arr,
             exit_signal_idx,
         )
+        wakeup_cycle_exit_reasons.append(
+            _raw_diag_value_at(wakeup_exit_reason_arr, exit_signal_idx)
+        )
+        wakeup_position_actions.append(
+            _raw_diag_value_at(wakeup_position_action_arr, exit_signal_idx)
+        )
         block_at_exit = (
             str(block_reason_arr[exit_signal_idx])
             if block_reason_arr is not None and exit_signal_idx < len(block_reason_arr)
@@ -113,6 +121,10 @@ def attach_trade_filter_diagnostics(
     out["entry_trigger_source"] = entry_trigger_sources
     if volume_reason_arr is not None:
         out["entry_volume_block_reason"] = entry_volume_block_reasons
+    if wakeup_exit_reason_arr is not None:
+        out["wakeup_cycle_exit_reason"] = wakeup_cycle_exit_reasons
+    if wakeup_position_action_arr is not None:
+        out["wakeup_position_action"] = wakeup_position_actions
     out["exit_reason"] = exit_reasons
     return out
 
@@ -139,6 +151,12 @@ def _wakeup_position_action_at(arr: Any, idx: int) -> str | None:
         "reverse_on_st_flip": "wakeup_reverse_on_st_flip",
         "flat_on_disallowed_st_flip": "wakeup_flat_on_disallowed_st_flip",
     }.get(str(arr[idx]))
+
+
+def _raw_diag_value_at(arr: Any, idx: int) -> str:
+    if arr is None or idx >= len(arr):
+        return "none"
+    return str(arr[idx])
 
 
 def _state_name_at(arr: Any, idx: int) -> str:

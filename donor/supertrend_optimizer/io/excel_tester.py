@@ -90,14 +90,20 @@ TRADES_DISPLAY_NAMES = {
     "net_pnl_pct":         "Net PnL %",
     "supertrend_color":    "SuperTrend Color",
     # WP-T7: filter trade diagnostics (plan §9.5 — after canonical donor columns)
-    "entry_filter_state":  "Entry Filter State",
-    "entry_trigger_source":"Entry Trigger Source",
-    "exit_reason":         "Exit Reason",
+    "entry_filter_state":         "Entry Filter State",
+    "entry_trigger_source":       "Entry Trigger Source",
+    "wakeup_cycle_exit_reason":   "Wakeup Cycle Exit Reason",
+    "wakeup_position_action":     "Wakeup Position Action",
+    "exit_reason":                "Trade Close Reason",
 }
 
 # Internal keys of filter-specific trade columns (used to separate canonical vs filter cols)
 _FILTER_TRADE_COLUMN_KEYS: frozenset = frozenset({
-    "entry_filter_state", "entry_trigger_source", "exit_reason",
+    "entry_filter_state",
+    "entry_trigger_source",
+    "wakeup_cycle_exit_reason",
+    "wakeup_position_action",
+    "exit_reason",
 })
 
 # Canonical trade column display names (no filter cols — for disabled-path empty header)
@@ -2202,7 +2208,8 @@ def export_tester_results(
     Export tester results to Excel file.
 
     WP-T7 additions (plan §9.2):
-    - Trades_<period>: includes Entry Filter State / Entry Trigger Source / Exit Reason
+    - Trades_<period>: includes Entry Filter State / Entry Trigger Source,
+      explicit wakeup-cycle/action fields, and Trade Close Reason
       when ``trade_filter_config.enabled=True`` and data is present.
     - Summary: adds Filter Diagnostics Summary block after standard metrics (enabled only).
     - Signals: filter columns (Filter State at Signal / Filter Decision / Filter Block

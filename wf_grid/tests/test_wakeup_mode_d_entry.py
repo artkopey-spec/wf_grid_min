@@ -427,6 +427,34 @@ def test_mode_d_wakeup_diagnostics_keyset_lengths_and_dtypes():
     assert int(diag["wakeup_entry_candidate_leg_direction"][1]) == 1
 
 
+def test_mode_d_trade_diagnostics_expose_cycle_reason_and_position_action():
+    trades = pd.DataFrame(
+        {
+            "trade_id": [1],
+            "entry_index": [1],
+            "exit_index": [3],
+        }
+    )
+    diag = {
+        "trade_filter_state": np.array(
+            ["OFF", "ST_ACTIVE_FREEZE", "ST_ACTIVE_FREEZE", "OFF", "OFF"],
+            dtype=object,
+        ),
+        "trade_filter_trigger_source": np.array(["none"] * 5, dtype=object),
+        "wakeup_exit_reason": np.array(["none"] * 5, dtype=object),
+        "wakeup_position_action": np.array(
+            ["none", "none", "reverse_on_st_flip", "none", "none"],
+            dtype=object,
+        ),
+    }
+
+    enriched = attach_trade_filter_diagnostics(trades, diag)
+
+    assert enriched["wakeup_cycle_exit_reason"].iloc[0] == "none"
+    assert enriched["wakeup_position_action"].iloc[0] == "reverse_on_st_flip"
+    assert enriched["exit_reason"].iloc[0] == "wakeup_reverse_on_st_flip"
+
+
 def test_non_mode_d_output_does_not_include_mode_d_wakeup_diagnostics():
     result = apply(
         trend=np.array([1, 1, -1, -1, 1, 1], dtype=np.int64),
@@ -1044,12 +1072,22 @@ def test_mode_d_full_tester_xlsx_export_for_both_action_modes(
         summary_sheet = xlsx.parse("filters_summary", header=None)
 
     assert "Wakeup Exit Reason" in set(filter_diag.columns)
+    assert "Exit Reason" not in set(trades.columns)
+    assert "Trade Close Reason" in set(trades.columns)
+    assert "Wakeup Cycle Exit Reason" in set(trades.columns)
+    assert "Wakeup Position Action" in set(trades.columns)
     trigger_row = trigger_events.iloc[0]
     assert trigger_row["Trigger Source"] == "wakeup_regime"
     assert trigger_row["Linked Trade ID"] == 1
     assert trigger_row["Threshold Used"] == pytest.approx(0.10)
     assert trigger_row["Quantile Used"] == pytest.approx(0.65)
-    assert trades["Exit Reason"].iloc[0] == expected_exit_reason
+    assert trades["Trade Close Reason"].iloc[0] == expected_exit_reason
+    if action_mode == "close_position":
+        assert trades["Wakeup Cycle Exit Reason"].iloc[0] == "ttl"
+        assert trades["Wakeup Position Action"].iloc[0] == "exit_ttl"
+    else:
+        assert trades["Wakeup Cycle Exit Reason"].iloc[0] == "none"
+        assert trades["Wakeup Position Action"].iloc[0] == "none"
     period_header_idx = int(
         summary_sheet.index[summary_sheet.iloc[:, 0] == "Period"][0]
     )

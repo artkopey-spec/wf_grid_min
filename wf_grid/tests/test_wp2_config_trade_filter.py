@@ -1175,6 +1175,7 @@ from supertrend_optimizer.core.trade_filter_config import (
     TRADE_FILTER_ALLOWED_KEYS as _SHARED_ALLOWED,
     build_trade_filter_config_from_raw as _build_tf,
     collect_raw_user_keys as _collect_ruk,
+    collect_trade_filter_unknown_keys as _collect_unknown,
     validate_trade_filter as _shared_validate,
 )
 
@@ -1305,8 +1306,23 @@ def _superset_assert(
 
 
 class TestWakeupPhase0Validation:
+    def test_lock_cycle_direction_absent_defaults_false(self):
+        tf = _build_tf(_mode_d_raw())
+
+        assert tf.wakeup_regime.lock_cycle_direction is False
+
     def test_tester_accepts_mode_d_exit_c_wakeup_block_new_entries(self):
         errors, ekeys = _run_phase0_raw(_mode_d_raw("block_new_entries"), "tester")
+        assert errors == []
+        assert ekeys == []
+
+    @pytest.mark.parametrize("value", [True, False])
+    def test_tester_accepts_mode_d_wakeup_lock_cycle_direction_bool(self, value):
+        raw = _mode_d_raw()
+        raw["wakeup_regime"]["lock_cycle_direction"] = value
+
+        errors, ekeys = _run_phase0_raw(raw, "tester")
+
         assert errors == []
         assert ekeys == []
 
@@ -1326,6 +1342,63 @@ class TestWakeupPhase0Validation:
         raw["wakeup_regime"]["enabled"] = False
         _, ekeys = _run_phase0_raw(raw, "tester")
         _superset_assert(ekeys, {"mode_d_requires_wakeup_enabled"})
+
+    def test_tester_mode_d_wakeup_disabled_with_lock_still_requires_enabled(self):
+        raw = _mode_d_raw()
+        raw["wakeup_regime"]["enabled"] = False
+        raw["wakeup_regime"]["lock_cycle_direction"] = True
+
+        _, ekeys = _run_phase0_raw(raw, "tester")
+
+        _superset_assert(ekeys, {"mode_d_requires_wakeup_enabled"})
+
+    @pytest.mark.parametrize("value", ["true", 1, None, [], {}])
+    def test_wakeup_lock_cycle_direction_rejects_non_bool_values(self, value):
+        raw = _mode_d_raw()
+        raw["wakeup_regime"]["lock_cycle_direction"] = value
+
+        errors, _ = _run_phase0_raw(raw, "tester")
+
+        assert any(
+            "trade_filter.wakeup_regime.lock_cycle_direction must be bool" in err
+            for err in errors
+        ), errors
+
+    def test_wakeup_lock_cycle_direction_validated_when_wakeup_disabled(self):
+        raw = _mode_d_raw()
+        raw["wakeup_regime"]["enabled"] = False
+        raw["wakeup_regime"]["lock_cycle_direction"] = "true"
+
+        errors, ekeys = _run_phase0_raw(raw, "tester")
+
+        assert any(
+            "trade_filter.wakeup_regime.lock_cycle_direction must be bool" in err
+            for err in errors
+        ), errors
+        _superset_assert(ekeys, {"mode_d_requires_wakeup_enabled"})
+
+    def test_wakeup_unknown_sibling_key_still_rejected(self):
+        raw = {"trade_filter": _mode_d_raw()}
+        raw["trade_filter"]["wakeup_regime"]["unknown_lock_key"] = True
+
+        errors = _collect_unknown(raw["trade_filter"])
+
+        assert "unknown config key: 'trade_filter.wakeup_regime.unknown_lock_key'" in errors
+
+    def test_wf_grid_rejects_mode_d_exit_c_wakeup_with_lock_via_shared_gate(self):
+        raw = _mode_d_raw()
+        raw["wakeup_regime"]["lock_cycle_direction"] = True
+
+        _, ekeys = _run_phase0_raw(raw, "wf_grid")
+
+        _superset_assert(
+            ekeys,
+            {
+                "mode_d_unsupported_pipeline",
+                "exit_c_unsupported_pipeline",
+                "wakeup_regime_unsupported_pipeline",
+            },
+        )
 
     def test_tester_rejects_mode_d_candidate_threshold_auto(self):
         raw = _mode_d_raw()

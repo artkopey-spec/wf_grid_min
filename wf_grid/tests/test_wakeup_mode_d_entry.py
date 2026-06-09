@@ -43,6 +43,7 @@ def _cfg(
     no_fresh_enabled: bool = False,
     no_fresh_timeout_bars: int = 3,
     action_mode: str = "block_new_entries",
+    lock_cycle_direction: bool = False,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         lifecycle=SimpleNamespace(
@@ -52,6 +53,7 @@ def _cfg(
         ),
         wakeup_regime=SimpleNamespace(
             enabled=True,
+            lock_cycle_direction=lock_cycle_direction,
             entry=SimpleNamespace(
                 candidate_height=SimpleNamespace(
                     enabled=height_enabled,
@@ -261,6 +263,23 @@ def test_mode_d_block_new_entries_holds_until_opposite_st_flip():
     assert int(diag["wakeup_active_direction"][4]) == 0
 
 
+def test_mode_d_lock_stopping_does_not_apply_locked_st_flip_handling():
+    result = apply(
+        trend=np.array([0, 0, 1, 1, -1, -1], dtype=np.int64),
+        trade_mode="both",
+        trade_filter_config=_cfg(ttl_bars=1, lock_cycle_direction=True),
+        zigzag_global_stats=_stats(),
+        per_bar=_per_bar(t=1),
+    )
+
+    diag = result.filter_diagnostics
+    assert result.positions.tolist() == [0, 0, 1, 1, 1, 0]
+    assert diag["trade_filter_state"][2] == "ST_STOPPING"
+    assert diag["wakeup_position_action"][4] == "none"
+    assert diag["wakeup_exit_reason"][4] == "none"
+    assert diag["trade_filter_state"][4] == "OFF"
+
+
 def test_mode_d_close_position_action_closes_on_exit_c_bar():
     result = apply(
         trend=np.zeros(6, dtype=np.int64),
@@ -297,10 +316,11 @@ def test_mode_d_reset_closes_active_cycle_and_writes_reason():
     assert int(diag["wakeup_cycle_age_bars"][2]) == -1
 
 
-def test_mode_d_active_freeze_st_flip_reverses_without_ending_cycle():
+@pytest.mark.parametrize("trade_mode", ["both", "revers"])
+def test_mode_d_active_freeze_st_flip_reverses_without_ending_cycle(trade_mode):
     result = apply(
         trend=np.array([1, 1, 1, 1, 1, -1, -1], dtype=np.int64),
-        trade_mode="both",
+        trade_mode=trade_mode,
         trade_filter_config=_cfg(ttl_bars=10),
         zigzag_global_stats=_stats(),
         per_bar=_per_bar(t=1, n=7),
@@ -363,6 +383,113 @@ def test_mode_d_short_internal_st_flip_flats_then_restores_active_cycle():
     assert diag["trade_filter_state"][5] == "ST_ACTIVE_FREEZE"
 
 
+def test_mode_d_lock_long_cycle_flats_then_restores_without_reversing():
+    result = apply(
+        trend=np.array([1, 1, 1, 1, -1, 1, 1], dtype=np.int64),
+        trade_mode="both",
+        trade_filter_config=_cfg(ttl_bars=10, lock_cycle_direction=True),
+        zigzag_global_stats=_stats(),
+        per_bar=_per_bar(t=1, n=7),
+    )
+
+    diag = result.filter_diagnostics
+    assert result.positions.tolist() == [0, 0, 1, 1, 1, 0, 1]
+    assert min(result.positions.tolist()[2:]) >= 0
+    assert diag["wakeup_position_action"][4] == "flat_on_disallowed_st_flip"
+    assert int(diag["wakeup_active_direction"][4]) == 1
+    assert diag["wakeup_position_action"][5] == (
+        "restore_allowed_position_on_st_flip"
+    )
+    assert int(diag["wakeup_active_direction"][5]) == 1
+    assert diag["trade_filter_state"][5] == "ST_ACTIVE_FREEZE"
+
+
+def test_mode_d_lock_short_cycle_flats_then_restores_without_reversing():
+    result = apply(
+        trend=np.array([-1, -1, -1, -1, 1, -1, -1], dtype=np.int64),
+        trade_mode="both",
+        trade_filter_config=_cfg(ttl_bars=10, lock_cycle_direction=True),
+        zigzag_global_stats=_stats(),
+        per_bar=_per_bar(t=1, direction=-1, n=7),
+    )
+
+    diag = result.filter_diagnostics
+    assert result.positions.tolist() == [0, 0, -1, -1, -1, 0, -1]
+    assert max(result.positions.tolist()[2:]) <= 0
+    assert diag["wakeup_position_action"][4] == "flat_on_disallowed_st_flip"
+    assert int(diag["wakeup_active_direction"][4]) == -1
+    assert diag["wakeup_position_action"][5] == (
+        "restore_allowed_position_on_st_flip"
+    )
+    assert int(diag["wakeup_active_direction"][5]) == -1
+    assert diag["trade_filter_state"][5] == "ST_ACTIVE_FREEZE"
+
+
+def test_mode_d_lock_new_cycle_can_start_opposite_direction_after_off():
+    per_bar = _per_bar(t=1, n=8)
+    per_bar.candidate_height_pct[4] = 0.12
+    per_bar.candidate_age_bars[4] = 3
+    per_bar.candidate_leg_direction[4] = -1
+
+    result = apply(
+        trend=np.zeros(8, dtype=np.int64),
+        trade_mode="both",
+        trade_filter_config=_cfg(
+            ttl_bars=1,
+            action_mode="close_position",
+            lock_cycle_direction=True,
+        ),
+        zigzag_global_stats=_stats(),
+        per_bar=per_bar,
+    )
+
+    diag = result.filter_diagnostics
+    assert result.positions.tolist() == [0, 0, 1, 0, 0, -1, 0, 0]
+    assert diag["trade_filter_state"][2] == "OFF"
+    assert diag["trade_filter_trigger_source"][1] == "wakeup_regime"
+    assert diag["trade_filter_trigger_source"][4] == "wakeup_regime"
+    assert int(diag["wakeup_active_direction"][1]) == 1
+    assert int(diag["wakeup_active_direction"][4]) == -1
+    assert int(diag["wakeup_lock_cycle_direction_config"][4]) == 1
+
+
+@pytest.mark.parametrize(
+    ("lock_cycle_direction", "expected_active_direction", "expected_since_fresh"),
+    [
+        (False, -1, 0),
+        (True, 1, 4),
+    ],
+)
+def test_mode_d_no_fresh_reference_follows_lock_semantics(
+    lock_cycle_direction,
+    expected_active_direction,
+    expected_since_fresh,
+):
+    per_bar = _per_bar(t=1, n=7, age=2)
+    per_bar.candidate_height_pct[5] = 0.12
+    per_bar.candidate_age_bars[5] = 1
+    per_bar.candidate_leg_direction[5] = -1
+
+    result = apply(
+        trend=np.array([1, 1, 1, 1, -1, -1, -1], dtype=np.int64),
+        trade_mode="both",
+        trade_filter_config=_cfg(
+            ttl_enabled=False,
+            no_fresh_enabled=True,
+            no_fresh_timeout_bars=10,
+            lock_cycle_direction=lock_cycle_direction,
+        ),
+        zigzag_global_stats=_stats(no_fresh_threshold=0.10),
+        per_bar=per_bar,
+    )
+
+    diag = result.filter_diagnostics
+    assert int(diag["wakeup_active_direction"][5]) == expected_active_direction
+    assert int(diag["wakeup_bars_since_fresh_candidate"][5]) == (
+        expected_since_fresh
+    )
+
+
 def test_mode_d_wakeup_diagnostics_keyset_lengths_and_dtypes():
     result = apply(
         trend=np.zeros(6, dtype=np.int64),
@@ -397,6 +524,7 @@ def test_mode_d_wakeup_diagnostics_keyset_lengths_and_dtypes():
         "wakeup_exit_reason": object,
         "wakeup_position_action": object,
         "wakeup_active_direction": np.int8,
+        "wakeup_lock_cycle_direction_config": np.int8,
     }
     assert set(wakeup_dtypes).issubset(diag)
     for key, dtype in wakeup_dtypes.items():
@@ -420,11 +548,81 @@ def test_mode_d_wakeup_diagnostics_keyset_lengths_and_dtypes():
         }
     )
     assert set(diag["wakeup_active_direction"]).issubset({-1, 0, 1})
+    assert set(diag["wakeup_lock_cycle_direction_config"]) == {0}
     assert int(diag["wakeup_entry_all_ok"][1]) == 1
     assert diag["wakeup_entry_candidate_height_value"][1] == pytest.approx(0.12)
     assert diag["wakeup_entry_candidate_height_threshold"][1] == pytest.approx(0.10)
     assert int(diag["wakeup_entry_candidate_age_bars"][1]) == 3
     assert int(diag["wakeup_entry_candidate_leg_direction"][1]) == 1
+
+
+@pytest.mark.parametrize(
+    ("cfg", "expected"),
+    [
+        (_cfg(lock_cycle_direction=True), 1),
+        (_cfg(lock_cycle_direction=False), 0),
+        (
+            SimpleNamespace(
+                lifecycle=_cfg().lifecycle,
+                wakeup_regime=SimpleNamespace(
+                    enabled=True,
+                    entry=_cfg().wakeup_regime.entry,
+                    exit=_cfg().wakeup_regime.exit,
+                ),
+            ),
+            0,
+        ),
+    ],
+)
+def test_mode_d_wakeup_lock_cycle_direction_config_echo(cfg, expected):
+    result = apply(
+        trend=np.zeros(6, dtype=np.int64),
+        trade_mode="both",
+        trade_filter_config=cfg,
+        zigzag_global_stats=_stats(),
+        per_bar=_per_bar(t=1),
+    )
+
+    diag = result.filter_diagnostics
+    assert set(diag["wakeup_lock_cycle_direction_config"]) == {expected}
+
+
+def test_mode_d_wakeup_diagnostics_keyset_includes_only_expected_wakeup_keys():
+    result = apply(
+        trend=np.zeros(6, dtype=np.int64),
+        trade_mode="both",
+        trade_filter_config=_cfg(lock_cycle_direction=True),
+        zigzag_global_stats=_stats(),
+        per_bar=_per_bar(t=1),
+    )
+
+    wakeup_keys = {key for key in result.filter_diagnostics if key.startswith("wakeup_")}
+    assert wakeup_keys == {
+        "wakeup_regime_active",
+        "wakeup_entry_all_ok",
+        "wakeup_entry_candidate_height_ok",
+        "wakeup_entry_candidate_age_ok",
+        "wakeup_entry_candidate_direction_ok",
+        "wakeup_entry_trade_mode_ok",
+        "wakeup_entry_atr_ok",
+        "wakeup_entry_volume_ok",
+        "wakeup_entry_candidate_height_value",
+        "wakeup_entry_candidate_height_threshold",
+        "wakeup_entry_candidate_age_bars",
+        "wakeup_entry_candidate_leg_direction",
+        "wakeup_entry_atr_ratio",
+        "wakeup_entry_volume_ratio",
+        "wakeup_cycle_age_bars",
+        "wakeup_bars_since_fresh_candidate",
+        "wakeup_exit_ttl_triggered",
+        "wakeup_exit_no_fresh_candidate_triggered",
+        "wakeup_exit_close_triggered",
+        "wakeup_exit_action_mode",
+        "wakeup_exit_reason",
+        "wakeup_position_action",
+        "wakeup_active_direction",
+        "wakeup_lock_cycle_direction_config",
+    }
 
 
 def test_mode_d_trade_diagnostics_expose_cycle_reason_and_position_action():
@@ -468,6 +666,7 @@ def test_non_mode_d_output_does_not_include_mode_d_wakeup_diagnostics():
     assert diag["zigzag_mode"][0] == "A"
     assert "wakeup_position_action" not in diag
     assert "wakeup_active_direction" not in diag
+    assert "wakeup_lock_cycle_direction_config" not in diag
     assert "wakeup_exit_reason" not in diag
 
 
@@ -569,6 +768,47 @@ def test_mode_d_tester_summary_counts_position_actions():
     assert summary["wakeup_exit_opposite_st_flip_count"] == 0
 
 
+def test_mode_d_tester_summary_counts_locked_both_position_actions():
+    cfg = _cfg(ttl_bars=10, lock_cycle_direction=True)
+    stats = _stats()
+    result = apply(
+        trend=np.array([1, 1, 1, 1, -1, 1, 1], dtype=np.int64),
+        trade_mode="both",
+        trade_filter_config=cfg,
+        zigzag_global_stats=stats,
+        per_bar=_per_bar(t=1, n=7),
+    )
+    root_cfg = SimpleNamespace(
+        enabled=True,
+        zigzag=SimpleNamespace(
+            enabled=True,
+            reversal_threshold=0.01,
+            local_window=2,
+        ),
+        lifecycle=cfg.lifecycle,
+        wakeup_regime=cfg.wakeup_regime,
+    )
+    bt_result = SimpleNamespace(
+        filter_diagnostics=result.filter_diagnostics,
+        trend=np.zeros(7, dtype=np.int64),
+        trade_mode="both",
+        positions=result.positions,
+        trades_df=None,
+    )
+
+    summary = _build_filter_diagnostics_summary(
+        bt_result,
+        root_cfg,
+        stats,
+        global_offset=0,
+    )
+
+    assert summary["wakeup_reverse_on_st_flip_count"] == 0
+    assert summary["wakeup_flat_on_disallowed_st_flip_count"] == 1
+    assert summary["wakeup_restore_allowed_position_on_st_flip_count"] == 1
+    assert summary["wakeup_exit_opposite_st_flip_count"] == 0
+
+
 def test_mode_d_excel_display_names_and_filters_summary_rows():
     wakeup_keys = {
         "wakeup_regime_active",
@@ -594,6 +834,7 @@ def test_mode_d_excel_display_names_and_filters_summary_rows():
         "wakeup_exit_reason",
         "wakeup_position_action",
         "wakeup_active_direction",
+        "wakeup_lock_cycle_direction_config",
     }
     assert wakeup_keys.issubset(FILTER_DIAGNOSTICS_100_DISPLAY_NAMES)
     assert (
@@ -603,6 +844,10 @@ def test_mode_d_excel_display_names_and_filters_summary_rows():
     assert (
         FILTER_DIAGNOSTICS_100_DISPLAY_NAMES["wakeup_active_direction"]
         == "Wakeup Active Direction"
+    )
+    assert (
+        FILTER_DIAGNOSTICS_100_DISPLAY_NAMES["wakeup_lock_cycle_direction_config"]
+        == "Wakeup Lock Cycle Direction Config"
     )
 
     summary = {
@@ -826,11 +1071,18 @@ def test_mode_d_trade_exit_reason_reset_has_priority_over_position_action():
     assert enriched["exit_reason"].iloc[0] == "filter_daily_reset"
 
 
-def test_mode_d_trade_exit_reason_exit_c_beats_same_bar_st_flip_action():
+@pytest.mark.parametrize("lock_cycle_direction", [False, True])
+def test_mode_d_trade_exit_reason_exit_c_beats_same_bar_st_flip_action(
+    lock_cycle_direction,
+):
     result = apply(
         trend=np.array([1, 1, -1, -1, -1], dtype=np.int64),
         trade_mode="both",
-        trade_filter_config=_cfg(ttl_bars=1, action_mode="close_position"),
+        trade_filter_config=_cfg(
+            ttl_bars=1,
+            action_mode="close_position",
+            lock_cycle_direction=lock_cycle_direction,
+        ),
         zigzag_global_stats=_stats(),
         per_bar=_per_bar(t=1, n=5),
     )
@@ -1124,13 +1376,35 @@ def test_mode_d_enters_active_freeze_without_st_flip_open_to_open():
     assert forbidden.isdisjoint(set(diag["trade_filter_state"]))
 
 
-def test_mode_d_rejects_direction_disallowed_by_trade_mode():
+def test_mode_d_lock_start_bar_st_flip_does_not_override_start_direction():
+    result = apply(
+        trend=np.array([1, -1, -1, -1, -1, -1], dtype=np.int64),
+        trade_mode="both",
+        trade_filter_config=_cfg(lock_cycle_direction=True),
+        zigzag_global_stats=_stats(),
+        per_bar=_per_bar(t=1),
+    )
+
+    diag = result.filter_diagnostics
+    assert diag["trade_filter_trigger_source"][1] == "wakeup_regime"
+    assert int(diag["wakeup_active_direction"][1]) == 1
+    assert diag["wakeup_position_action"][1] == "none"
+
+
+@pytest.mark.parametrize(
+    ("trade_mode", "direction"),
+    [
+        ("long", -1),
+        ("short", 1),
+    ],
+)
+def test_mode_d_rejects_direction_disallowed_by_trade_mode(trade_mode, direction):
     result = apply(
         trend=np.zeros(6, dtype=np.int64),
-        trade_mode="long",
+        trade_mode=trade_mode,
         trade_filter_config=_cfg(),
         zigzag_global_stats=_stats(),
-        per_bar=_per_bar(direction=-1),
+        per_bar=_per_bar(direction=direction),
     )
 
     assert np.all(result.positions == 0)

@@ -192,6 +192,7 @@ def test_retained_filter_diagnostics_export_passes_through_wakeup_keys(tmp_path)
                     "trade_filter_state": ["ST_ACTIVE_FREEZE", "ST_ACTIVE_FREEZE"],
                     "wakeup_position_action": ["none", "reverse_on_st_flip"],
                     "wakeup_active_direction": [1, -1],
+                    "wakeup_lock_cycle_direction_config": [1, 1],
                 },
             )
         ]
@@ -202,8 +203,10 @@ def test_retained_filter_diagnostics_export_passes_through_wakeup_keys(tmp_path)
     df = pd.read_excel(path, sheet_name="WF_FilterDiagnostics")
     assert "wakeup_position_action" in df.columns
     assert "wakeup_active_direction" in df.columns
+    assert "wakeup_lock_cycle_direction_config" in df.columns
     assert df["wakeup_position_action"].tolist() == ["none", "reverse_on_st_flip"]
     assert df["wakeup_active_direction"].tolist() == [1, -1]
+    assert df["wakeup_lock_cycle_direction_config"].tolist() == [1, 1]
 
 
 def _read_sheet(path: Path, sheet: str) -> pd.DataFrame:

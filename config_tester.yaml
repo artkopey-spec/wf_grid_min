@@ -7,7 +7,7 @@ supertrend:
   atr_period: 20
   multiplier: 1.0
 
-trade_mode: long
+trade_mode: revers
 commission: 0.0
 
 warmup_period: 0
@@ -93,7 +93,7 @@ trade_filter:
     entry:
       candidate_height:
         enabled: true
-        quantile: 0.70
+        quantile: 0.75
       candidate_age:
         enabled: false
         max_bars: 10
@@ -106,12 +106,12 @@ trade_filter:
         enabled: true
         short_window: 10
         baseline_window: 1000
-        min_ratio: 3.0
+        min_ratio: 2.0
 
     exit:
       ttl:
         enabled: true
-        bars: 55
+        bars: 10
       no_fresh_candidate:
         enabled: true
         quantile: 0.60

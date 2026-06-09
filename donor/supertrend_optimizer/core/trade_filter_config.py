@@ -320,6 +320,7 @@ class TradeFilterWakeupExitConfig:
 @dataclass
 class TradeFilterWakeupRegimeConfig:
     enabled: object = False
+    lock_cycle_direction: object = False
     entry: TradeFilterWakeupEntryConfig = field(
         default_factory=TradeFilterWakeupEntryConfig
     )
@@ -518,7 +519,7 @@ TRADE_FILTER_ALLOWED_KEYS: dict[str, frozenset[str]] = {
         "enabled", "window",
     }),
     "trade_filter.wakeup_regime": frozenset({
-        "enabled", "entry", "exit",
+        "enabled", "lock_cycle_direction", "entry", "exit",
     }),
     "trade_filter.wakeup_regime.entry": frozenset({
         "candidate_height", "candidate_age", "atr_expansion",
@@ -728,6 +729,7 @@ def build_trade_filter_config_from_raw(tf_raw: dict) -> TradeFilterConfig:
 
         wakeup_regime = TradeFilterWakeupRegimeConfig(
             enabled=wakeup_raw.get("enabled", False),
+            lock_cycle_direction=wakeup_raw.get("lock_cycle_direction", False),
             entry=TradeFilterWakeupEntryConfig(
                 candidate_height=TradeFilterWakeupCandidateHeightConfig(
                     enabled=candidate_height_raw.get("enabled", False),
@@ -1766,6 +1768,14 @@ def _validate_wakeup_regime_block(
     wakeup = getattr(tf, "wakeup_regime", None)
     if wakeup is None:
         return
+
+    lock_key = wakeup_key + ("lock_cycle_direction",)
+    if lock_key in raw_user_keys:
+        _validate_bool_field(
+            getattr(wakeup, "lock_cycle_direction", False),
+            "trade_filter.wakeup_regime.lock_cycle_direction",
+            errors,
+        )
 
     if not _validate_bool_field(
         getattr(wakeup, "enabled", False),

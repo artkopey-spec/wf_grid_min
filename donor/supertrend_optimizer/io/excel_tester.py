@@ -190,6 +190,7 @@ FILTER_DIAGNOSTICS_100_DISPLAY_NAMES: Dict[str, str] = {
     "wakeup_exit_reason":                       "Wakeup Exit Reason",
     "wakeup_position_action":                   "Wakeup Position Action",
     "wakeup_active_direction":                  "Wakeup Active Direction",
+    "wakeup_lock_cycle_direction_config":       "Wakeup Lock Cycle Direction Config",
 }
 
 # ZigZag_Trigger_Events sheet column order (plan §9.2, extended by WP-V3-8 §11.2)

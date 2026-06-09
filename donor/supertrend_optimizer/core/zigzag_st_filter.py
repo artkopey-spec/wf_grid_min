@@ -1990,6 +1990,7 @@ def _allocate_apply_arrays(
     resolved_mode: str,
     gate_enabled: bool,
     gate_max_bars: int,
+    wakeup_lock_cycle_direction: bool,
 ) -> Dict[str, np.ndarray]:
     try:
         _zcfg = _extract_zigzag_field(trade_filter_config, "zigzag")
@@ -2080,6 +2081,11 @@ def _allocate_apply_arrays(
         "wakeup_exit_reason_arr": np.full(n, "none", dtype=object),
         "wakeup_position_action_arr": np.full(n, "none", dtype=object),
         "wakeup_active_direction_arr": np.zeros(n, dtype=np.int8),
+        "wakeup_lock_cycle_direction_config_arr": np.full(
+            n,
+            np.int8(1 if wakeup_lock_cycle_direction else 0),
+            dtype=np.int8,
+        ),
     }
 
 
@@ -2233,6 +2239,9 @@ def _finalize_apply_result(
                 "wakeup_exit_reason": arrays["wakeup_exit_reason_arr"],
                 "wakeup_position_action": arrays["wakeup_position_action_arr"],
                 "wakeup_active_direction": arrays["wakeup_active_direction_arr"],
+                "wakeup_lock_cycle_direction_config": arrays[
+                    "wakeup_lock_cycle_direction_config_arr"
+                ],
             }
         )
 
@@ -2772,6 +2781,14 @@ def apply(
                 int(getattr(wakeup_volume_cfg, "baseline_window")),
             )
 
+    wakeup_regime_cfg = getattr(trade_filter_config, "wakeup_regime", None)
+    wakeup_lock_cycle_direction = (
+        mode_d_enabled
+        and wakeup_regime_cfg is not None
+        and getattr(wakeup_regime_cfg, "enabled", False) is True
+        and getattr(wakeup_regime_cfg, "lock_cycle_direction", False) is True
+    )
+
     # WP-V3-7: §10.2 additional diagnostic arrays (enabled filter path only).
     # Disabled-filter path never calls apply(), so these arrays never appear
     # in the disabled baseline — satisfying the "no new arrays for disabled
@@ -2800,6 +2817,7 @@ def apply(
         resolved_mode=resolved_mode,
         gate_enabled=gate_enabled,
         gate_max_bars=gate_max_bars,
+        wakeup_lock_cycle_direction=wakeup_lock_cycle_direction,
     )
     filtered_positions = _apply_arrays["filtered_positions"]
     state_arr = _apply_arrays["state_arr"]
@@ -2886,6 +2904,7 @@ def apply(
         wakeup_active_direction,
         wakeup_exit_c_fired,
     ) = _wakeup_runtime_off()
+    cycle_direction = 0
 
     # ------------------------------------------------------------------
     # 4) Main FSM loop.
@@ -2923,6 +2942,7 @@ def apply(
             zz_legs_since_lifecycle_start = -1
             held_pos = 0
             _stopping_start = -1
+            cycle_direction = 0
             (
                 wakeup_cycle_age,
                 wakeup_bars_since_fresh,
@@ -3108,11 +3128,15 @@ def apply(
 
         if mode_d_enabled:
             wakeup_state_active = state == ZigZagFSMState.ST_ACTIVE_FREEZE
-            wakeup_fresh_active_direction = (
-                cand_dir_t
-                if trigger_source_arr[t] == _TRIGGER_SOURCE_WAKEUP
-                else wakeup_active_direction
-            )
+            wakeup_started_this_bar = trigger_source_arr[t] == _TRIGGER_SOURCE_WAKEUP
+            if wakeup_started_this_bar:
+                if wakeup_lock_cycle_direction:
+                    cycle_direction = cand_dir_t
+                    wakeup_active_direction = cycle_direction
+                else:
+                    cycle_direction = 0
+                    wakeup_active_direction = cand_dir_t
+            wakeup_fresh_active_direction = wakeup_active_direction
             wakeup_fresh_candidate = _is_wakeup_fresh_candidate(
                 no_fresh_cfg=wakeup_no_fresh_cfg,
                 active_direction=wakeup_fresh_active_direction,
@@ -3121,9 +3145,8 @@ def apply(
                 candidate_height=c_h,
                 threshold=wakeup_no_fresh_candidate_height_threshold,
             )
-            if trigger_source_arr[t] == _TRIGGER_SOURCE_WAKEUP:
+            if wakeup_started_this_bar:
                 wakeup_cycle_age = 0
-                wakeup_active_direction = cand_dir_t
                 wakeup_bars_since_fresh = 0 if wakeup_fresh_candidate else 1
                 wakeup_exit_c_fired = False
             elif (
@@ -3189,6 +3212,7 @@ def apply(
                         wakeup_exit_close_triggered_arr[t] = np.int8(1)
                         state = ZigZagFSMState.OFF
                         held_pos = 0
+                        cycle_direction = 0
                         (
                             wakeup_cycle_age,
                             wakeup_bars_since_fresh,
@@ -3204,16 +3228,33 @@ def apply(
                 and flip_dir != 0
             )
             if wakeup_internal_st_flip_this_bar:
-                (
-                    held_pos,
-                    wakeup_active_direction,
-                    wakeup_position_action_this_bar,
-                ) = _apply_mode_d_internal_st_flip(
-                    held_pos=held_pos,
-                    wakeup_active_direction=wakeup_active_direction,
-                    flip_dir=flip_dir,
-                    trade_mode=trade_mode,
-                )
+                if wakeup_lock_cycle_direction:
+                    if cycle_direction in (-1, 1):
+                        effective_trade_mode = (
+                            "long" if cycle_direction == 1 else "short"
+                        )
+                        (
+                            held_pos,
+                            _active_direction,
+                            wakeup_position_action_this_bar,
+                        ) = _apply_mode_d_internal_st_flip(
+                            held_pos=held_pos,
+                            wakeup_active_direction=cycle_direction,
+                            flip_dir=flip_dir,
+                            trade_mode=effective_trade_mode,
+                        )
+                        wakeup_active_direction = cycle_direction
+                else:
+                    (
+                        held_pos,
+                        wakeup_active_direction,
+                        wakeup_position_action_this_bar,
+                    ) = _apply_mode_d_internal_st_flip(
+                        held_pos=held_pos,
+                        wakeup_active_direction=wakeup_active_direction,
+                        flip_dir=flip_dir,
+                        trade_mode=trade_mode,
+                    )
                 wakeup_active_direction_for_diag = wakeup_active_direction
 
             wakeup_exit_reason_arr[t] = wakeup_exit_reason_this_bar
@@ -3387,6 +3428,7 @@ def apply(
                 confirmed_legs_since_start = -1
                 zz_legs_since_lifecycle_start = -1
                 held_pos = 0
+                cycle_direction = 0
 
         if t + 1 < n:
             if state in (ZigZagFSMState.OFF, ZigZagFSMState.WAIT_FIRST_ST_FLIP):
@@ -3417,6 +3459,7 @@ def apply(
                     confirmed_legs_since_start = -1
                     zz_legs_since_lifecycle_start = -1
                     held_pos = 0
+                    cycle_direction = 0
                 else:
                     next_pos = np.int8(cur_pos)
 

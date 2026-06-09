@@ -199,6 +199,7 @@ _EXCEL_PER_BAR_HEADERS_SNAPSHOT: dict = {
     "wakeup_exit_reason":                       "Wakeup Exit Reason",
     "wakeup_position_action":                   "Wakeup Position Action",
     "wakeup_active_direction":                  "Wakeup Active Direction",
+    "wakeup_lock_cycle_direction_config":       "Wakeup Lock Cycle Direction Config",
 }
 
 # EXCEL_SUMMARY_LABELS: ordered params labels and period column set (§14.5 / §8.2).

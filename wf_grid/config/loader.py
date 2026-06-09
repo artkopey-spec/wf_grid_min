@@ -240,6 +240,7 @@ _ALLOWED_KEYS: dict[str, set[str]] = {
     },
     "trade_filter.wakeup_regime": {
         "enabled",
+        "lock_cycle_direction",
         "entry",
         "exit",
     },

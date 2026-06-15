@@ -765,6 +765,8 @@ class TestCloseOnlyInvariance:
             trade_filter_config=cfg,
             zigzag_global_stats=gs,
             open_prices=open_p,
+            high=high_normal,
+            low=low_normal,
         )
         result_distorted = apply(
             close=close, trend=trend_ref,
@@ -772,6 +774,8 @@ class TestCloseOnlyInvariance:
             trade_filter_config=cfg,
             zigzag_global_stats=gs,
             open_prices=open_p,
+            high=high_distorted,
+            low=low_distorted,
         )
 
         # ZigZag-relevant: filtered_positions must be identical.

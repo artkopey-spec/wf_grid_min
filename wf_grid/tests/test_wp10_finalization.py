@@ -10,7 +10,7 @@ Gate mapping (plan §WP10 acceptance gates)
 ------------------------------------------
 A1  Raw YAML presence: numeric threshold + explicit quantile → reject;
     three-case raw-presence test (§6.4.1 p.5).
-A2  No high/low in close-only ZigZag: grep-gate + invariance unit gate (§8.3.1).
+A2  apply accepts high/low for Mode D ATR; ZigZag remains close-only (§8.3.1).
 A3  Entry AND exit diagnostics indexing pinned under OPEN_TO_OPEN (§8.4.1).
 A4  Early-exit diagnostics truncation in shared donor API (§8.2 rule 7).
 A5  Disabled export parity: no filter columns in disabled trade-level export (§10.6.6 #1).
@@ -356,28 +356,26 @@ class TestA1RawYAMLPresence:
 
 
 # ===========================================================================
-# A2. No high/low in close-only ZigZag (§8.3.1)
+# A2. high/low accepted for ATR; ZigZag remains close-only (§8.3.1)
 # ===========================================================================
 
-class TestA2NoHighLowInZigZag:
-    """A2: grep-gate + invariance unit gate for close-only ZigZag contract."""
+class TestA2HighLowContractForZigZag:
+    """A2: signature + invariance gates for the narrowed close-only contract."""
 
-    def test_grep_gate_no_high_low_in_apply_signature(self):
-        """apply() signature must not contain 'high' or 'low' parameters."""
+    def test_apply_signature_accepts_optional_high_low_for_wakeup_atr(self):
+        """apply() may accept high/low; ZigZag pivot/height remains close-only."""
         sig = inspect.signature(zigzag_apply)
-        param_names = set(sig.parameters.keys())
-        assert "high" not in param_names, (
-            "GREP GATE FAIL: apply() accepts 'high' — breaks close-only contract (§8.3.1)"
-        )
-        assert "low" not in param_names, (
-            "GREP GATE FAIL: apply() accepts 'low' — breaks close-only contract (§8.3.1)"
-        )
+        params = sig.parameters
+        assert params["high"].default is None
+        assert params["low"].default is None
 
     def test_invariance_distorted_high_low_no_change_to_zigzag_outputs(self):
-        """Distorted high/low must not change ZigZag-derived outputs (§8.3.1 invariance gate).
+        """Distorted high/low must not change close-derived ZigZag outputs.
 
         candidate_height_pct and local_median_N are ZigZag-only outputs.
-        They must be bit-identical regardless of high/low distortion.
+        They must be bit-identical regardless of high/low distortion, while
+        backtest-level positions/FSM may differ because SuperTrend consumes
+        OHLC before apply().
         """
         n = 80
         close = _make_prices(n)

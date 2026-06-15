@@ -1234,6 +1234,39 @@ def _require_1d_len(name: str, values: object, n: int) -> np.ndarray:
     return arr
 
 
+_WAKEUP_OHLC_ERROR_STEM = (
+    "apply() Mode D wakeup atr_expansion requires high, low, and close OHLC arrays"
+)
+
+
+def _require_wakeup_ohlc_array(name: str, values: object, n: int) -> np.ndarray:
+    if values is None:
+        raise ConfigError(f"{_WAKEUP_OHLC_ERROR_STEM}; missing {name}")
+    try:
+        arr = np.asarray(values, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(
+            f"{_WAKEUP_OHLC_ERROR_STEM}; {name} must be numeric"
+        ) from exc
+    if arr.ndim != 1 or arr.shape[0] != n:
+        raise ConfigError(
+            f"{_WAKEUP_OHLC_ERROR_STEM}; {name} must be 1-D with length n={n}; "
+            f"got shape={arr.shape}"
+        )
+    if not np.all(np.isfinite(arr)):
+        raise ConfigError(f"{_WAKEUP_OHLC_ERROR_STEM}; {name} contains NaN or Inf")
+    return arr
+
+
+def _validate_wakeup_ohlc(
+    high: np.ndarray,
+    low: np.ndarray,
+    close: np.ndarray,
+) -> None:
+    if np.any(high < low):
+        raise ConfigError(f"{_WAKEUP_OHLC_ERROR_STEM}; high must be >= low")
+
+
 def _resolve_mode_d_wakeup_entry(
     trade_filter_config: Any,
 ) -> tuple[object, object, object, object]:
@@ -1945,10 +1978,14 @@ def _rolling_mean_or_nan(values: np.ndarray, window: int) -> np.ndarray:
 
 
 def _compute_wakeup_atr_ratio(
+    high: np.ndarray,
+    low: np.ndarray,
     close: np.ndarray,
     short_window: int,
     long_window: int,
 ) -> np.ndarray:
+    high_f = np.asarray(high, dtype=np.float64)
+    low_f = np.asarray(low, dtype=np.float64)
     close_f = np.asarray(close, dtype=np.float64)
     n = len(close_f)
     if short_window < 1 or long_window < 1:
@@ -1958,7 +1995,7 @@ def _compute_wakeup_atr_ratio(
     if n < long_window:
         return ratio
 
-    tr = calculate_true_range(close_f, close_f, close_f)
+    tr = calculate_true_range(high_f, low_f, close_f)
     short_atr = _atr_rma_or_nan(tr, short_window)
     long_atr = _atr_rma_or_nan(tr, long_window)
     valid = np.isfinite(short_atr) & np.isfinite(long_atr) & (long_atr > 0.0)
@@ -2315,8 +2352,13 @@ def apply(
     time_filter_events: "Optional[tuple[np.ndarray, np.ndarray]]" = None,
     volume_runtime: "Optional[VolumeRuntime]" = None,
     volume: "Optional[np.ndarray]" = None,
+    high: "Optional[np.ndarray]" = None,
+    low: "Optional[np.ndarray]" = None,
 ) -> "ZigZagSTFilterResult":
     """Run the ZigZag ST FSM and build ``filtered_positions``.
+
+    ZigZag pivot/height calculation is close-only. Mode D wakeup ATR
+    expansion uses high/low/close runtime arrays.
 
     FSM is the **behavioural source of truth** for ``filtered_positions``
     (plan §2.2, §5.4).  ``generate_positions`` is NOT called on the
@@ -2340,7 +2382,11 @@ def apply(
         ``local_window`` (extracted from config path on the call site).
     close : np.ndarray, optional
         Close price array.  Required when ``per_bar`` is ``None``.
-        Passed to ``compute_zigzag_per_bar`` internally.
+        Passed to ``compute_zigzag_per_bar`` internally. Also required with
+        ``high``/``low`` when Mode D wakeup ATR expansion is enabled.
+    high, low : np.ndarray, optional
+        Runtime OHLC arrays for Mode D wakeup ATR expansion. They are not
+        used by ZigZag pivot/height calculations.
     open_prices : np.ndarray, optional
         Accepted for ``run_backtest_fast`` API symmetry (§8.3.1) but
         not used inside ZigZag pivot/height calculations.
@@ -2802,8 +2848,13 @@ def apply(
             getattr(wakeup_action_cfg, "mode", None) or "none"
         )
         if _is_component_enabled(wakeup_atr_cfg):
-            close_arr = _require_1d_len("close", close, n)
+            high_arr = _require_wakeup_ohlc_array("high", high, n)
+            low_arr = _require_wakeup_ohlc_array("low", low, n)
+            close_arr = _require_wakeup_ohlc_array("close", close, n)
+            _validate_wakeup_ohlc(high_arr, low_arr, close_arr)
             wakeup_atr_ratio = _compute_wakeup_atr_ratio(
+                high_arr,
+                low_arr,
                 close_arr,
                 int(getattr(wakeup_atr_cfg, "short_window")),
                 int(getattr(wakeup_atr_cfg, "long_window")),

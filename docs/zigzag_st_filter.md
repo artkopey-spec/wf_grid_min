@@ -81,6 +81,18 @@ trade_filter:
 `candidate_trigger_threshold: auto` берет threshold из full-dataset
 распределения ZigZag leg heights по `candidate_trigger_quantile`.
 
+## Mode D wakeup ATR
+
+`zigzag_st_filter.apply()` may receive `high` and `low` runtime arrays.
+This does not make ZigZag OHLC-based: ZigZag pivots, leg heights,
+`candidate_height_pct`, and `local_median_N` remain derived from `close` or
+precomputed `per_bar` data.
+
+When Mode D wakeup `entry.atr_expansion.enabled` is true, the wakeup ATR ratio
+uses real OHLC True Range from `high`, `low`, and `close`. In that path direct
+`apply()` calls require finite 1-D OHLC arrays of matching length with
+`high >= low`.
+
 ## Excel export
 
 Когда фильтр выключен, новые filter-колонки и filter-листы не создаются.

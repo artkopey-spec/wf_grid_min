@@ -15,7 +15,7 @@ R3. Enabled-path does NOT pollute disabled-path artifacts:
     - no entry_filter_state / entry_trigger_source / exit_reason in trades;
     - no summary columns populated when disabled.
 R4. Anti-drift gate: no stale 7-tuple unpack of run_backtest_fast in active scope.
-R5. Anti-drift gate: no high/low parameters in apply() signature.
+R5. Anti-drift gate: apply accepts high/low for ATR; ZigZag remains close-only.
 R6. Anti-drift gate: no legacy trigger_source key in filter_diagnostics.
 R7. Anti-drift gate: no module-level mutable state in zigzag_st_filter (FSM).
 R8. Force-flat does not modify filter_diagnostics (WP8 contract re-confirmed).
@@ -329,28 +329,23 @@ class TestAntiDriftNoTupleUnpack:
 
 
 # ===========================================================================
-# R5. Anti-drift: no high/low in apply() signature
+# R5. Anti-drift: high/low accepted for ATR; ZigZag remains close-only
 # ===========================================================================
 
-class TestAntiDriftNoHighLowInApply:
-    """plan §8.3.1 / spec §3.4 close-only invariant: apply() has no high/low."""
+class TestAntiDriftHighLowContractInApply:
+    """plan §8.3.1 / spec §3.4 narrowed close-only invariant."""
 
-    def test_apply_signature_has_no_high_or_low(self):
+    def test_apply_signature_accepts_optional_high_low_for_wakeup_atr(self):
         sig = inspect.signature(zigzag_apply)
-        param_names = set(sig.parameters.keys())
-        assert "high" not in param_names, (
-            "apply() must not accept 'high' parameter (close-only contract)"
-        )
-        assert "low" not in param_names, (
-            "apply() must not accept 'low' parameter (close-only contract)"
-        )
+        params = sig.parameters
+        assert params["high"].default is None
+        assert params["low"].default is None
 
     def test_distorted_high_low_does_not_change_apply_output(self):
-        """Distorted high/low passed to run_backtest_fast must not affect
-        apply() output since apply() is close-only (§8.3.1 invariance gate).
+        """Distorted high/low must not affect close-derived ZigZag diagnostics.
 
-        Checks that filter_diagnostics and positions from an enabled run are
-        identical regardless of whether high/low are distorted.
+        Backtest-level positions/FSM may legitimately differ because
+        SuperTrend consumes OHLC before apply().
         """
         n = 80
         close = _make_prices(n)
@@ -373,7 +368,7 @@ class TestAntiDriftNoHighLowInApply:
             )
 
         result_normal = _run(o, h, l)
-        # Distort high/low — SuperTrend changes, but ZigZag must not
+        # Distort high/low — SuperTrend changes, but ZigZag diagnostics must not.
         h_distorted = h * 5.0
         l_distorted = l * 0.1
         result_distorted = _run(o, h_distorted, l_distorted)

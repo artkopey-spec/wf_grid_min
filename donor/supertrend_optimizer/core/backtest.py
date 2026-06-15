@@ -426,6 +426,8 @@ def run_backtest_fast(
         from supertrend_optimizer.core.zigzag_st_filter import apply as _zz_apply
         filter_result = _zz_apply(
             close=close,
+            high=high,
+            low=low,
             trend=trend,
             trade_mode=trade_mode,
             trade_filter_config=trade_filter_config,

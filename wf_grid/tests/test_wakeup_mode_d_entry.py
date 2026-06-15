@@ -10,6 +10,7 @@ from supertrend_optimizer.core.zigzag_st_filter import (
     ZigZagFSMState,
     ZigZagGlobalStats,
     ZigZagPerBar,
+    _compute_wakeup_atr_ratio,
     _effective_wakeup_trade_mode,
     attach_trade_filter_diagnostics as attach_trade_filter_diagnostics_public,
     apply,
@@ -165,6 +166,13 @@ def _per_bar(
         candidate_age_bars=candidate_age,
         candidate_leg_direction=candidate_direction,
     )
+
+
+def _valid_ohlc(n: int = 6) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    close = np.arange(10.0, 10.0 + n, dtype=np.float64)
+    high = close + 1.0
+    low = close - 1.0
+    return high, low, close
 
 
 def test_mode_d_counters_trigger_bar_fresh_candidate_starts_at_zero():
@@ -1819,29 +1827,83 @@ def test_mode_d_requires_all_enabled_entry_components():
 
 def test_mode_d_atr_and_volume_components_can_open_entry():
     n = 6
-    close = np.arange(10.0, 16.0, dtype=np.float64)
+    high, low, close = _valid_ohlc(n)
     result = apply(
         trend=np.zeros(n, dtype=np.int64),
         trade_mode="both",
         trade_filter_config=_cfg(atr_enabled=True, volume_enabled=True),
         zigzag_global_stats=_stats(),
         per_bar=_per_bar(t=3, n=n),
+        high=high,
+        low=low,
         close=close,
         volume=np.full(n, 100.0, dtype=np.float64),
     )
 
-    assert result.positions.tolist() == [0, 0, 0, 0, 1, 1]
-    assert result.filter_diagnostics["trade_filter_trigger_source"][3] == (
-        "wakeup_regime"
+    expected_ratio = _compute_wakeup_atr_ratio(
+        high, low, close, short_window=2, long_window=4
     )
+    diag = result.filter_diagnostics
+    assert result.positions.tolist() == [0, 0, 0, 0, 1, 1]
+    assert diag["trade_filter_trigger_source"][3] == "wakeup_regime"
+    np.testing.assert_allclose(diag["wakeup_entry_atr_ratio"], expected_ratio)
+    assert np.isnan(diag["wakeup_entry_atr_ratio"][:3]).all()
+    assert int(diag["wakeup_entry_atr_ok"][2]) == 0
+    assert int(diag["wakeup_entry_atr_ok"][3]) == 1
 
 
-def test_mode_d_atr_component_requires_close_array():
-    with pytest.raises(ConfigError, match="requires close"):
+@pytest.mark.parametrize("missing", ["high", "low", "close"])
+def test_mode_d_atr_component_requires_ohlc_arrays(missing):
+    high, low, close = _valid_ohlc()
+    kwargs = {
+        "high": high,
+        "low": low,
+        "close": close,
+    }
+    kwargs[missing] = None
+
+    with pytest.raises(ConfigError, match="OHLC arrays"):
         apply(
             trend=np.zeros(6, dtype=np.int64),
             trade_mode="both",
             trade_filter_config=_cfg(atr_enabled=True),
             zigzag_global_stats=_stats(),
             per_bar=_per_bar(t=3),
+            **kwargs,
+        )
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"high": np.ones(5, dtype=np.float64)},
+        {"low": np.ones((1, 6), dtype=np.float64)},
+        {"close": np.array([10.0, 11.0, np.nan, 13.0, 14.0, 15.0])},
+        {"high": np.array([11.0, 12.0, np.inf, 14.0, 15.0, 16.0])},
+        {"high": np.array(["bad", "12", "13", "14", "15", "16"])},
+        {"low": np.array(["9", "10", "bad", "12", "13", "14"])},
+        {"close": np.array(["10", "11", "12", "bad", "14", "15"])},
+        {
+            "high": np.array([11.0, 12.0, 13.0, 9.0, 15.0, 16.0]),
+            "low": np.array([9.0, 10.0, 11.0, 12.0, 13.0, 14.0]),
+        },
+    ],
+)
+def test_mode_d_atr_component_rejects_invalid_ohlc_arrays(updates):
+    high, low, close = _valid_ohlc()
+    kwargs = {
+        "high": high,
+        "low": low,
+        "close": close,
+    }
+    kwargs.update(updates)
+
+    with pytest.raises(ConfigError, match="OHLC arrays"):
+        apply(
+            trend=np.zeros(6, dtype=np.int64),
+            trade_mode="both",
+            trade_filter_config=_cfg(atr_enabled=True),
+            zigzag_global_stats=_stats(),
+            per_bar=_per_bar(t=3),
+            **kwargs,
         )

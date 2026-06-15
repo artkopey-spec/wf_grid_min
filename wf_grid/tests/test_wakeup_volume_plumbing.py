@@ -38,6 +38,9 @@ def test_volume_plumbing_parameters_are_trailing_optional():
     for func in (run_backtest_fast, run_single_backtest, zigzag_st_filter.apply):
         param = inspect.signature(func).parameters["volume"]
         assert param.default is None
+    for name in ("high", "low"):
+        param = inspect.signature(zigzag_st_filter.apply).parameters[name]
+        assert param.default is None
 
 
 def test_run_backtest_fast_legacy_call_without_volume_still_works():
@@ -88,13 +91,14 @@ def test_run_period_passes_volume_values_to_engine(monkeypatch):
     assert result.filter_diagnostics is None
 
 
-def test_run_backtest_fast_passes_raw_volume_to_zigzag_apply(monkeypatch):
+def test_run_backtest_fast_passes_raw_ohlc_and_volume_to_zigzag_apply(monkeypatch):
     captured = {}
 
     def fake_apply(**kwargs):
         captured["volume"] = kwargs.get("volume")
-        captured["has_high"] = "high" in kwargs
-        captured["has_low"] = "low" in kwargs
+        captured["high"] = kwargs.get("high")
+        captured["low"] = kwargs.get("low")
+        captured["close"] = kwargs.get("close")
         return SimpleNamespace(
             positions=np.zeros(len(kwargs["trend"]), dtype=np.int8),
             filter_diagnostics=None,
@@ -128,5 +132,6 @@ def test_run_backtest_fast_passes_raw_volume_to_zigzag_apply(monkeypatch):
     )
 
     assert captured["volume"] is volume
-    assert captured["has_high"] is False
-    assert captured["has_low"] is False
+    assert captured["high"] is high
+    assert captured["low"] is low
+    assert captured["close"] is close

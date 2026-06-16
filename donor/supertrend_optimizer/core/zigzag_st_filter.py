@@ -691,24 +691,29 @@ def compute_zigzag_per_bar(
     local_median_available = np.zeros(n, dtype=bool)
 
     if pass_result.legs:
-        # Pre-extract heights for vectorised median over a sliding window.
         heights = np.array(
             [leg.height_pct for leg in pass_result.legs], dtype=np.float64
         )
-        for t in range(n):
-            idx = int(pass_result.confirmed_leg_idx_at_t[t])
-            if idx < 0:
-                continue
-            count = idx + 1
-            if count < local_window:
-                continue
-            window_heights = heights[idx - local_window + 1 : idx + 1]
-            median = float(np.median(window_heights))
+        m = heights.shape[0]
+        median_by_leg_idx = np.full(m, np.nan, dtype=np.float64)
+        median_available_by_leg_idx = np.zeros(m, dtype=bool)
+        for idx in range(local_window - 1, m):
+            median = float(np.median(heights[idx - local_window + 1 : idx + 1]))
             if math.isfinite(median):
-                local_median_N[t] = median
-                local_median_available[t] = True
-            # Non-finite median is left as NaN / available=False — fail-closed
-            # for downstream ST_ACTIVE_MONITORING (Appendix A v1.1 §15.7).
+                median_by_leg_idx[idx] = median
+                median_available_by_leg_idx[idx] = True
+
+        idx_at_t = pass_result.confirmed_leg_idx_at_t
+        valid_t = idx_at_t >= 0
+        if np.any(valid_t):
+            valid_idx = idx_at_t[valid_t]
+            available = median_available_by_leg_idx[valid_idx]
+            valid_positions = np.flatnonzero(valid_t)
+            available_positions = valid_positions[available]
+            local_median_N[available_positions] = median_by_leg_idx[
+                valid_idx[available]
+            ]
+            local_median_available[available_positions] = True
 
     return ZigZagPerBar(
         candidate_height_pct=pass_result.candidate_height_pct,
@@ -720,7 +725,6 @@ def compute_zigzag_per_bar(
         candidate_age_bars=pass_result.candidate_age_bars,
         candidate_leg_direction=pass_result.candidate_leg_direction,
     )
-
 
 # ---------------------------------------------------------------------------
 # Full-dataset global stats (plan WP3 / Appendix A v1.1 §12)

@@ -66,6 +66,8 @@ def run_single_backtest(
     volume_runtime: Any = None,
     global_offset: int = 0,
     volume: Optional[np.ndarray] = None,
+    *,
+    collect_filter_diagnostics: bool = True,
 ) -> BacktestResult:
     """
     Run single backtest with unified interface.
@@ -234,6 +236,7 @@ def run_single_backtest(
         global_offset=global_offset,
         index=index,                          # NEW: for daily_reset
         volume=volume,
+        collect_filter_diagnostics=collect_filter_diagnostics,
     )
     returns = _artifacts.returns
     equity_curve = _artifacts.equity_curve

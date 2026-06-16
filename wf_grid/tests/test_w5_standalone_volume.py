@@ -119,6 +119,7 @@ def _run(
     daily_reset_event: np.ndarray | None = None,
     time_filter_events: tuple[np.ndarray, np.ndarray] | None = None,
     index: pd.Index | None = None,
+    collect_filter_diagnostics: bool = True,
 ):
     n = runtime.reference_length if runtime is not None else 6
     if trend is None:
@@ -136,6 +137,7 @@ def _run(
         index=index,
         daily_reset_event=daily_reset_event,
         time_filter_events=time_filter_events,
+        collect_filter_diagnostics=collect_filter_diagnostics,
     )
 
 
@@ -735,6 +737,43 @@ def test_filter_config_snapshot_is_volume_runtime_snapshot_object():
     assert result.filter_config_snapshot is runtime.filter_config_snapshot
 
 
+def test_volume_only_collect_filter_diagnostics_false_returns_none_and_same_positions():
+    runtime = _runtime(
+        n=8,
+        direction=np.array([
+            DIR_LONG,
+            DIR_LONG,
+            DIR_SHORT,
+            DIR_SHORT,
+            DIR_LONG,
+            DIR_LONG,
+            DIR_SHORT,
+            DIR_SHORT,
+        ]),
+        allowed=np.array([True, True, True, False, True, True, True, True]),
+        block_reason=np.array([
+            BLOCK_NONE,
+            BLOCK_NONE,
+            BLOCK_NONE,
+            BLOCK_BELOW_BASELINE,
+            BLOCK_NONE,
+            BLOCK_NONE,
+            BLOCK_NONE,
+            BLOCK_NONE,
+        ]),
+        relative=np.array([1.2, 1.1, 0.7, 0.6, 1.3, 1.2, 0.9, 0.8]),
+    )
+    trend = np.array([1, 1, -1, -1, 1, 1, -1, -1], dtype=np.int64)
+
+    enabled = _run(runtime=runtime, trend=trend, collect_filter_diagnostics=True)
+    disabled = _run(runtime=runtime, trend=trend, collect_filter_diagnostics=False)
+
+    np.testing.assert_array_equal(disabled.positions, enabled.positions)
+    assert disabled.filter_diagnostics is None
+    assert disabled.filter_config_snapshot is runtime.filter_config_snapshot
+    assert enabled.filter_diagnostics is not None
+
+
 def test_volume_condition_fail_blocks_start():
     result = _run(
         runtime=_runtime(
@@ -870,6 +909,37 @@ def test_dispatcher_routes_standalone_volume_filter():
     assert result.filter_diagnostics is not None
     assert result.filter_diagnostics["trade_filter_state"][0] == "ACTIVE_LONG"
     assert result.positions[1] == 1
+
+
+def test_dispatcher_volume_only_collect_filter_diagnostics_false():
+    open_, high, low, close = _ohlc()
+    runtime = _runtime(n=len(close), direction=DIR_LONG)
+    kwargs = dict(
+        atr_period=5,
+        multiplier=1.8,
+        trade_mode="both",
+        commission=0.001,
+        early_exit_enabled=False,
+        early_exit_max_drawdown=0.5,
+        early_exit_check_bars=0,
+        trade_filter_config=_TradeFilter(),
+        volume_runtime=runtime,
+    )
+
+    enabled = run_backtest_fast(open_, high, low, close, **kwargs)
+    disabled = run_backtest_fast(
+        open_,
+        high,
+        low,
+        close,
+        **kwargs,
+        collect_filter_diagnostics=False,
+    )
+
+    np.testing.assert_array_equal(disabled.positions, enabled.positions)
+    assert disabled.filter_diagnostics is None
+    assert disabled.filter_config_snapshot is runtime.filter_config_snapshot
+    assert enabled.filter_diagnostics is not None
 
 
 def test_volume_only_filter_does_not_import_zigzag_filter_module():

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import hashlib
 import json
 import math
 import os
@@ -12,8 +13,10 @@ import pytest
 
 from supertrend_optimizer.core.zigzag_st_filter import (
     ZigZagGlobalStats,
+    apply,
     build_zigzag_global_stats,
 )
+from supertrend_optimizer.core.calculator import calculate_supertrend
 from supertrend_optimizer.engine.run import run_single_backtest
 from supertrend_optimizer.utils.enums import ExecutionModel
 from wf_grid.wf.step_executor import _compute_filter_diagnostics_summary
@@ -221,6 +224,69 @@ def _run_case(case_id: str) -> dict:
     }
 
 
+def _diagnostics_fingerprint_for_case(case_id: str) -> tuple[str, dict[str, str], dict[str, tuple[int, ...]]]:
+    cfg = _case_config(case_id)
+    open_, high, low, close, index = _ohlc_for_case(case_id)
+    stats = _stats_for_case(close, cfg)
+    result = run_single_backtest(
+        open_prices=open_,
+        high=high,
+        low=low,
+        close=close,
+        index=index,
+        atr_period=5,
+        multiplier=1.6,
+        trade_mode="revers",
+        commission=0.0005,
+        warmup_period=0,
+        periods_per_year=252.0,
+        min_trades_required=0,
+        extract_trades_flag=True,
+        execution_model=ExecutionModel.OPEN_TO_OPEN,
+        trade_filter_config=cfg,
+        zigzag_global_stats=stats,
+    )
+    diagnostics = result.filter_diagnostics
+    assert diagnostics is not None
+
+    digest = hashlib.sha256()
+    digest.update(str(len(diagnostics)).encode("utf-8"))
+    dtypes: dict[str, str] = {}
+    shapes: dict[str, tuple[int, ...]] = {}
+    for key in sorted(diagnostics):
+        arr = np.asarray(diagnostics[key])
+        dtypes[key] = str(arr.dtype)
+        shapes[key] = tuple(arr.shape)
+        digest.update(key.encode("utf-8"))
+        digest.update(dtypes[key].encode("utf-8"))
+        digest.update(str(shapes[key]).encode("utf-8"))
+        if arr.dtype == object or arr.dtype.kind in {"O", "U", "S"}:
+            payload = "\x1e".join(map(str, arr.tolist())).encode("utf-8")
+        else:
+            payload = np.ascontiguousarray(arr).view(np.uint8).tobytes()
+        digest.update(payload)
+    return digest.hexdigest(), dtypes, shapes
+
+
+def _run_apply_case(case_id: str, *, collect_filter_diagnostics: bool = True):
+    cfg = _case_config(case_id)
+    open_, high, low, close, index = _ohlc_for_case(case_id)
+    stats = _stats_for_case(close, cfg)
+    trend, _ = calculate_supertrend(high, low, close, atr_period=5, multiplier=1.6)
+    return apply(
+        trend=trend,
+        trade_mode="revers",
+        trade_filter_config=cfg,
+        zigzag_global_stats=stats,
+        close=close,
+        high=high,
+        low=low,
+        open_prices=open_,
+        index=index,
+        collect_filter_diagnostics=collect_filter_diagnostics,
+    )
+
+
 def _float_to_json(value: float) -> str:
     if math.isnan(value):
         return "nan"
@@ -288,6 +354,71 @@ def test_zigzag_apply_characterization_matches_golden_snapshot(case_id):
     )
     assert actual["filter_diagnostics_summary"] == expected["filter_diagnostics_summary"]
     assert actual["trades"] == expected["trades"]
+
+
+def test_zigzag_apply_diagnostics_keyset_dtypes_and_values_stable():
+    digest, dtypes, shapes = _diagnostics_fingerprint_for_case("f8_time_filter_reset")
+
+    assert len(dtypes) == 46
+    assert set(dtypes) == {
+        "b_component_ok",
+        "candidate_age_bars",
+        "candidate_component_ok",
+        "candidate_duration_gate_enabled",
+        "candidate_duration_gate_passed",
+        "candidate_duration_max_bars",
+        "candidate_height_pct",
+        "candidate_leg_direction",
+        "candidate_threshold_ok",
+        "candidate_trigger_threshold",
+        "confirmed_legs_at_bar_start",
+        "confirmed_legs_since_start",
+        "confirmed_median_ok",
+        "daily_reset_enabled",
+        "daily_reset_event",
+        "exit_b_immediate_off_config",
+        "exit_b_immediate_off_triggered",
+        "exit_off_mode",
+        "exit_off_zz_leg_count",
+        "filter_allowed_entry",
+        "filter_block_reason",
+        "freeze_confirmed_legs",
+        "global_median",
+        "global_stats_available",
+        "held_pos_at_bar_start",
+        "immediate_allowed",
+        "immediate_candidate_entry_block_reason",
+        "immediate_candidate_entry_used",
+        "local_median_N",
+        "local_median_available",
+        "local_window",
+        "median_stop_triggered",
+        "st_flip_dir",
+        "state_at_bar_start",
+        "stopping_started_at_index",
+        "time_filter_enabled",
+        "time_filter_in_window",
+        "time_filter_reset_event",
+        "trade_filter_enabled",
+        "trade_filter_state",
+        "trade_filter_state_code",
+        "trade_filter_trigger_source",
+        "zigzag_mode",
+        "zigzag_reversal_threshold",
+        "zz_leg_stop_triggered",
+        "zz_legs_since_lifecycle_start",
+    }
+    assert all(shape == (72,) for shape in shapes.values())
+    assert digest == "3934356f91e70621f688f0a2c5963425f061d87f65a357394360de6e4d50398d"
+
+
+def test_zigzag_apply_collect_filter_diagnostics_false_returns_none_and_same_positions():
+    enabled = _run_apply_case("f8_time_filter_reset", collect_filter_diagnostics=True)
+    disabled = _run_apply_case("f8_time_filter_reset", collect_filter_diagnostics=False)
+
+    assert enabled.filter_diagnostics is not None
+    assert disabled.filter_diagnostics is None
+    np.testing.assert_array_equal(enabled.positions, disabled.positions)
 
 
 def test_try_lifecycle_start_from_off_helper_exists_and_is_callable():

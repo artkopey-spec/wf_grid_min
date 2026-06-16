@@ -45,7 +45,7 @@ _STATE_NAMES = {
 @dataclass(frozen=True)
 class VolumeOnlyFilterResult:
     positions: np.ndarray
-    filter_diagnostics: dict
+    filter_diagnostics: Optional[dict]
     filter_config_snapshot: dict
 
 
@@ -61,6 +61,7 @@ def apply(
     index: Optional[pd.Index] = None,
     daily_reset_event: Optional[np.ndarray] = None,
     time_filter_events: Optional[tuple[np.ndarray, np.ndarray]] = None,
+    collect_filter_diagnostics: bool = True,
 ) -> VolumeOnlyFilterResult:
     if execution_model != ExecutionModel.OPEN_TO_OPEN:
         raise ValueError(
@@ -119,19 +120,44 @@ def apply(
     time_filter_cfg = getattr(trade_filter_config, "time_filter", None)
     time_filter_enabled = bool(getattr(time_filter_cfg, "enabled", False))
 
-    volume_block_reason_labels = materialize_volume_block_reason(
-        volume_block_reason_codes
+    diag_enabled = bool(collect_filter_diagnostics)
+    volume_block_reason_labels = (
+        materialize_volume_block_reason(volume_block_reason_codes)
+        if diag_enabled
+        else None
     )
-    volume_regime_labels = materialize_volume_regime(volume_regime_codes)
-    volume_direction_labels = materialize_volume_initial_direction(
-        volume_direction_codes
+    volume_regime_labels = (
+        materialize_volume_regime(volume_regime_codes)
+        if diag_enabled
+        else None
+    )
+    volume_direction_labels = (
+        materialize_volume_initial_direction(volume_direction_codes)
+        if diag_enabled
+        else None
     )
 
     positions = np.zeros(n, dtype=np.int8)
-    state_arr = np.full(n, _STATE_NAMES[VolumeOnlyState.OFF], dtype=object)
-    block_reason_arr = np.full(n, "none", dtype=object)
-    cycle_initial_direction_arr = np.full(n, "unknown", dtype=object)
-    cycle_direction_gate_passed_arr = np.zeros(n, dtype=np.int8)
+    state_arr = (
+        np.full(n, _STATE_NAMES[VolumeOnlyState.OFF], dtype=object)
+        if diag_enabled
+        else None
+    )
+    block_reason_arr = (
+        np.full(n, "none", dtype=object)
+        if diag_enabled
+        else None
+    )
+    cycle_initial_direction_arr = (
+        np.full(n, "unknown", dtype=object)
+        if diag_enabled
+        else None
+    )
+    cycle_direction_gate_passed_arr = (
+        np.zeros(n, dtype=np.int8)
+        if diag_enabled
+        else None
+    )
 
     state = VolumeOnlyState.OFF
     volume_cfg = getattr(trade_filter_config, "volume", None)
@@ -164,27 +190,32 @@ def apply(
         if daily_reset_event[t]:
             state = VolumeOnlyState.OFF
             cycle_initial_direction = 0
-            block_reason_arr[t] = "daily_reset"
+            if diag_enabled:
+                block_reason_arr[t] = "daily_reset"
         elif time_filter_reset_event[t]:
             state = VolumeOnlyState.OFF
             cycle_initial_direction = 0
-            block_reason_arr[t] = "time_filter_reset"
+            if diag_enabled:
+                block_reason_arr[t] = "time_filter_reset"
         elif (
             active_age_bars >= exit_freeze_bars
             and _volume_reversal(mode, median_relative_volume[t], exit_threshold, state)
         ):
             state = VolumeOnlyState.OFF
             cycle_initial_direction = 0
-            block_reason_arr[t] = "volume_reversal"
+            if diag_enabled:
+                block_reason_arr[t] = "volume_reversal"
         else:
             prev_trend = int(trend_arr[t - 1]) if t > 0 else 0
             flip_dir = detect_st_flip(prev_trend, int(trend_arr[t]))
             if state != VolumeOnlyState.OFF:
                 if cycle_direction_gate:
                     if _is_suppressed_state(state):
-                        block_reason_arr[t] = "volume_cycle_direction_mismatch"
+                        if diag_enabled:
+                            block_reason_arr[t] = "volume_cycle_direction_mismatch"
                     elif flip_dir != 0 and flip_dir != _state_cycle_direction(state):
-                        block_reason_arr[t] = "volume_cycle_direction_mismatch"
+                        if diag_enabled:
+                            block_reason_arr[t] = "volume_cycle_direction_mismatch"
                     elif flip_dir != 0:
                         state = _state_from_direction(_state_cycle_direction(state))
                 elif flip_dir != 0 and not _trade_mode_allows_direction(
@@ -192,7 +223,8 @@ def apply(
                 ):
                     state = VolumeOnlyState.OFF
                     cycle_initial_direction = 0
-                    block_reason_arr[t] = "trade_mode_forced_exit"
+                    if diag_enabled:
+                        block_reason_arr[t] = "trade_mode_forced_exit"
                 elif (
                     flip_dir != 0
                     and _state_position(state) != flip_dir
@@ -205,42 +237,56 @@ def apply(
                 direction = int(volume_direction_codes[t])
                 global_t = t + int(volume_runtime.absolute_offset)
                 if not bool(time_filter_in_window[t]):
-                    block_reason_arr[t] = "time_filter_out_of_window"
+                    if diag_enabled:
+                        block_reason_arr[t] = "time_filter_out_of_window"
                 elif direction == 0 and global_t < lookback:
-                    block_reason_arr[t] = "volume_direction_warmup"
+                    if diag_enabled:
+                        block_reason_arr[t] = "volume_direction_warmup"
                 elif direction == 0:
-                    block_reason_arr[t] = "volume_unknown_direction"
+                    if diag_enabled:
+                        block_reason_arr[t] = "volume_unknown_direction"
                 elif (
                     not cycle_direction_gate
                     and not _trade_mode_allows_direction(direction, trade_mode)
                 ):
-                    block_reason_arr[t] = "volume_trade_mode_disallowed_direction"
+                    if diag_enabled:
+                        block_reason_arr[t] = "volume_trade_mode_disallowed_direction"
                 elif not bool(volume_allowed[t]):
-                    block_reason_arr[t] = volume_block_reason_labels[t]
+                    if diag_enabled:
+                        block_reason_arr[t] = volume_block_reason_labels[t]
                 else:
                     if cycle_direction_gate and not _trade_mode_allows_direction(
                         direction, trade_mode
                     ):
                         state = _suppressed_state_from_direction(direction)
                         cycle_initial_direction = direction
-                        block_reason_arr[t] = "volume_cycle_direction_mismatch"
+                        if diag_enabled:
+                            block_reason_arr[t] = "volume_cycle_direction_mismatch"
                     else:
                         state = _state_from_direction(direction)
                         cycle_initial_direction = direction
 
-        state_arr[t] = _STATE_NAMES[state]
-        cycle_initial_direction_arr[t] = _direction_label(
-            cycle_initial_direction if _is_cycle_state(state) else 0
-        )
-        cycle_direction_gate_passed_arr[t] = np.int8(
-            1 if _is_tradable_state(state) else 0
-        )
+        if diag_enabled:
+            state_arr[t] = _STATE_NAMES[state]
+            cycle_initial_direction_arr[t] = _direction_label(
+                cycle_initial_direction if _is_cycle_state(state) else 0
+            )
+            cycle_direction_gate_passed_arr[t] = np.int8(
+                1 if _is_tradable_state(state) else 0
+            )
         if t + 1 < n:
             positions[t + 1] = np.int8(_state_position(state))
         if _is_cycle_state(state):
             active_age_bars += 1
         else:
             active_age_bars = 0
+
+    if not diag_enabled:
+        return VolumeOnlyFilterResult(
+            positions=positions,
+            filter_diagnostics=None,
+            filter_config_snapshot=volume_runtime.filter_config_snapshot,
+        )
 
     diagnostics = {
         "trade_filter_state": state_arr,

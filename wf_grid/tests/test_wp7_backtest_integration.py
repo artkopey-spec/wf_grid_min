@@ -624,6 +624,41 @@ class TestBacktestResultFilterDiagnosticsNoneCompat:
         )
         assert result.filter_diagnostics is None
 
+    def test_run_single_backtest_collect_filter_diagnostics_false_contract(self):
+        """ТЗ lite-speedup §13.5: engine-level flag propagation.
+
+        ``run_single_backtest(..., collect_filter_diagnostics=False)`` must
+        suppress per-bar diagnostics while preserving trading outputs.
+        """
+        n = 60
+        close = _make_prices(n, seed=21)
+        o, h, l, c = _ohlc(close)
+        idx = _make_index(n)
+        kwargs = dict(
+            index=idx,
+            atr_period=5,
+            multiplier=2.0,
+            trade_mode="revers",
+            commission=0.001,
+            trade_filter_config=_TradeFilterCfgDouble(),
+            zigzag_global_stats=_make_global_stats(),
+        )
+
+        result_true = run_single_backtest(
+            o, h, l, c, **kwargs, collect_filter_diagnostics=True
+        )
+        result_false = run_single_backtest(
+            o, h, l, c, **kwargs, collect_filter_diagnostics=False
+        )
+
+        assert result_true.filter_diagnostics is not None
+        assert result_false.filter_diagnostics is None
+        np.testing.assert_array_equal(result_false.positions, result_true.positions)
+        assert result_false.metrics["num_trades"] == result_true.metrics["num_trades"]
+        true_trades = 0 if result_true.trades_df is None else len(result_true.trades_df)
+        false_trades = 0 if result_false.trades_df is None else len(result_false.trades_df)
+        assert false_trades == true_trades
+
 
 # ===========================================================================
 # H. attach_trade_filter_diagnostics — trade-level diagnostics.

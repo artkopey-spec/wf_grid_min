@@ -190,6 +190,23 @@ def test_mode_d_counters_trigger_bar_fresh_candidate_starts_at_zero():
     assert int(diag["wakeup_regime_active"][1]) == 1
 
 
+def test_mode_d_collect_filter_diagnostics_false_returns_none_and_same_positions():
+    kwargs = dict(
+        trend=np.zeros(6, dtype=np.int64),
+        trade_mode="both",
+        trade_filter_config=_cfg(no_fresh_enabled=True),
+        zigzag_global_stats=_stats(no_fresh_threshold=0.10),
+        per_bar=_per_bar(t=1, age=2),
+    )
+
+    enabled = apply(**kwargs, collect_filter_diagnostics=True)
+    disabled = apply(**kwargs, collect_filter_diagnostics=False)
+
+    assert enabled.filter_diagnostics is not None
+    assert disabled.filter_diagnostics is None
+    np.testing.assert_array_equal(enabled.positions, disabled.positions)
+
+
 def test_mode_d_counters_trigger_bar_not_fresh_starts_at_one_then_increments():
     result = apply(
         trend=np.zeros(6, dtype=np.int64),

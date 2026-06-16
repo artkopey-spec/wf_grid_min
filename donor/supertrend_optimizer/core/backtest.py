@@ -324,6 +324,8 @@ def run_backtest_fast(
     global_offset: int = 0,
     index: Any = None,                        # NEW: trailing optional for daily_reset
     volume: Any = None,
+    *,
+    collect_filter_diagnostics: bool = True,
 ) -> RawBacktestArtifacts:
     """Run fast backtest without DataFrame overhead.
 
@@ -438,6 +440,7 @@ def run_backtest_fast(
             index=index,                      # NEW: propogate for daily_reset
             volume_runtime=volume_runtime if volume_enabled else None,
             volume=volume,
+            collect_filter_diagnostics=collect_filter_diagnostics,
         )
         positions = filter_result.positions
         filter_diagnostics = filter_result.filter_diagnostics
@@ -454,6 +457,7 @@ def run_backtest_fast(
             volume_runtime=volume_runtime,
             execution_model=execution_model,
             index=index,
+            collect_filter_diagnostics=collect_filter_diagnostics,
         )
         positions = filter_result.positions
         filter_diagnostics = filter_result.filter_diagnostics

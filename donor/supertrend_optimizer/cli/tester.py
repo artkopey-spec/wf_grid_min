@@ -8,7 +8,7 @@ Usage:
 import argparse
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional
 
 import pandas as pd
 import yaml
@@ -145,6 +145,15 @@ def _merge_export_config(loaded_config: Dict[str, Any], config: Dict[str, Any]) 
             config["export"][key] = _validate_strict_bool(
                 export_raw[key], f"export.{key}"
             )
+
+
+def _resolve_collect_filter_diagnostics(export_config: Mapping[str, Any]) -> bool:
+    return bool(
+        export_config.get("diagnostics")
+        or export_config.get("signals")
+        or export_config.get("cycle")
+        or export_config.get("trades")
+    )
 
 
 def parse_args(args=None) -> argparse.Namespace:
@@ -644,6 +653,9 @@ def run_backtest_with_df(
 
     # Merge CLI and config
     params = merge_cli_and_config(args, config)
+    collect_filter_diagnostics = _resolve_collect_filter_diagnostics(
+        params["export"]
+    )
 
     df = validate_volume_filter_data(df, params.get("trade_filter"))
 
@@ -728,6 +740,10 @@ def run_backtest_with_df(
     print(f"  min_trades_required: {params['min_trades_required']}")
     print(f"  Execution model: {execution_model.value}")
     print(f"  Segmentation mode: {seg_mode}")
+    print(
+        f"  Filter diagnostics collection: {collect_filter_diagnostics} "
+        f"({seg_mode})"
+    )
     if seg_mode == "equal_blocks":
         print(f"  n_parts: {n_parts}")
 
@@ -810,6 +826,7 @@ def run_backtest_with_df(
             zigzag_global_stats=zigzag_global_stats,
             volume_runtime=full_volume_runtime,
             include_period_splits=params["period"],
+            collect_filter_diagnostics=collect_filter_diagnostics,
         )
 
         print(f"\nBacktest completed:")

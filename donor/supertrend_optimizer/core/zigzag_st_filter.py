@@ -2057,7 +2057,6 @@ def _allocate_apply_arrays(
         _lw_val = 0
 
     return {
-        "filtered_positions": np.zeros(n, dtype=np.int8),
         "state_arr": np.full(
             n, _FSM_STATE_NAMES[int(ZigZagFSMState.OFF)], dtype=object
         ),
@@ -2158,6 +2157,7 @@ def _allocate_apply_arrays(
 def _finalize_apply_result(
     *,
     n: int,
+    positions: np.ndarray,
     arrays: Dict[str, np.ndarray],
     cand_height: np.ndarray,
     local_median_N: np.ndarray,
@@ -2322,7 +2322,7 @@ def _finalize_apply_result(
         )
 
     return ZigZagSTFilterResult(
-        positions=arrays["filtered_positions"],
+        positions=positions,
         filter_diagnostics=filter_diagnostics_out,
         internal_legs=None,
         filter_config_snapshot=(
@@ -2358,6 +2358,7 @@ def apply(
     volume: "Optional[np.ndarray]" = None,
     high: "Optional[np.ndarray]" = None,
     low: "Optional[np.ndarray]" = None,
+    collect_filter_diagnostics: bool = True,
 ) -> "ZigZagSTFilterResult":
     """Run the ZigZag ST FSM and build ``filtered_positions``.
 
@@ -2592,54 +2593,28 @@ def apply(
         )
 
     volume_condition_allowed_runtime = None
-    volume_condition_block_reason_runtime = None
-    volume_regime_runtime = None
-    volume_initial_direction_runtime = None
-    volume_median_relative_runtime = None
     volume_condition_block_reason_labels = None
-    volume_regime_labels = None
-    volume_initial_direction_labels = None
     if volume_runtime is not None:
-        from supertrend_optimizer.core.volume_metrics import (
-            materialize_volume_block_reason,
-            materialize_volume_initial_direction,
-            materialize_volume_regime,
-        )
-
         volume_condition_allowed_runtime = np.asarray(
             volume_runtime.volume_condition_allowed, dtype=bool
         )
-        volume_condition_block_reason_runtime = np.asarray(
-            volume_runtime.volume_condition_block_reason
+        if (
+            volume_condition_allowed_runtime.ndim != 1
+            or volume_condition_allowed_runtime.shape[0] != n
+        ):
+            raise ConfigError(
+                "apply() volume_runtime.volume_condition_allowed must be 1-D "
+                f"with length n={n}; got shape={volume_condition_allowed_runtime.shape}"
+            )
+    volume_arrays = (
+        _materialize_apply_volume_runtime(volume_runtime, n=n)
+        if collect_filter_diagnostics
+        else None
+    )
+    if volume_arrays is not None:
+        volume_condition_block_reason_labels = (
+            volume_arrays.condition_block_reason_labels
         )
-        volume_regime_runtime = np.asarray(volume_runtime.volume_regime)
-        volume_initial_direction_runtime = np.asarray(
-            volume_runtime.volume_initial_direction
-        )
-        volume_median_relative_runtime = np.asarray(
-            volume_runtime.median_relative_volume, dtype=np.float64
-        )
-        _volume_arrays = {
-            "volume_condition_allowed": volume_condition_allowed_runtime,
-            "volume_condition_block_reason": volume_condition_block_reason_runtime,
-            "volume_regime": volume_regime_runtime,
-            "volume_initial_direction": volume_initial_direction_runtime,
-            "median_relative_volume": volume_median_relative_runtime,
-        }
-        for _name, _arr in _volume_arrays.items():
-            if _arr.ndim != 1 or _arr.shape[0] != n:
-                raise ConfigError(
-                    f"apply() volume_runtime.{_name} must be 1-D with length "
-                    f"n={n}; got shape={_arr.shape}"
-                )
-        volume_condition_block_reason_labels = materialize_volume_block_reason(
-            volume_condition_block_reason_runtime
-        )
-        volume_regime_labels = materialize_volume_regime(volume_regime_runtime)
-        volume_initial_direction_labels = materialize_volume_initial_direction(
-            volume_initial_direction_runtime
-        )
-    volume_arrays = _materialize_apply_volume_runtime(volume_runtime, n=n)
 
     a_enabled, b_enabled = _resolve_trigger_toggles(trade_filter_config)
     freeze_confirmed_legs = _resolve_freeze_confirmed_legs(trade_filter_config)
@@ -2708,55 +2683,6 @@ def apply(
     local_median_available = per_bar.local_median_available
 
     # ------------------------------------------------------------------
-    # 3) Output arrays — existing + §13 full keyset (WP9).
-    # ------------------------------------------------------------------
-    filtered_positions = np.zeros(n, dtype=np.int8)
-    state_arr = np.full(n, _FSM_STATE_NAMES[int(ZigZagFSMState.OFF)], dtype=object)
-    state_code_arr = np.full(n, int(ZigZagFSMState.OFF), dtype=np.int64)
-    trigger_source_arr = np.full(n, _TRIGGER_SOURCE_NONE, dtype=object)
-    confirmed_legs_since_start_arr = np.full(n, -1, dtype=np.int64)
-    st_flip_dir_arr = np.zeros(n, dtype=np.int8)
-
-    # §13 constant arrays (scalars broadcast to per-bar)
-    _rev_thr = float(zigzag_global_stats.reversal_threshold)
-    _ctt_val = float(candidate_trigger_threshold)
-    _gm_val = float(global_median)
-    _fcl_val = int(freeze_confirmed_legs)
-    try:
-        _zcfg = _extract_zigzag_field(trade_filter_config, "zigzag")
-        _lw_val = int(_extract_zigzag_field(_zcfg, "local_window") or 0)
-    except Exception:
-        _lw_val = 0
-
-    trade_filter_enabled_arr = np.ones(n, dtype=np.int8)
-    reversal_threshold_arr = np.full(n, _rev_thr, dtype=np.float64)
-    ctt_diag_arr = np.full(n, _ctt_val, dtype=np.float64)
-    local_window_arr = np.full(n, _lw_val, dtype=np.int64)
-    global_median_arr = np.full(n, _gm_val, dtype=np.float64)
-    global_stats_available_arr = np.ones(n, dtype=np.int8)
-    freeze_confirmed_legs_arr = np.full(n, _fcl_val, dtype=np.int64)
-
-    # §13 per-bar arrays computed in the FSM loop
-    median_stop_triggered_arr = np.zeros(n, dtype=np.int8)
-    stopping_started_at_arr = np.full(n, -1, dtype=np.int64)
-    filter_allowed_entry_arr = np.zeros(n, dtype=np.int8)
-    filter_block_reason_arr = np.full(n, "none", dtype=object)
-
-    exit_off_mode_arr = np.full(n, exit_off_mode_echo, dtype=object)
-    exit_off_zz_leg_count_arr = np.full(
-        n, np.int64(exit_off_zz_leg_echo), dtype=np.int64
-    )
-    zz_legs_since_lifecycle_start_arr = np.full(n, -1, dtype=np.int64)
-    zz_leg_stop_triggered_arr = np.zeros(n, dtype=np.int8)
-
-    # Plan v3 §4.2: exit_b_immediate_off diagnostics — ALWAYS allocated
-    # (filled with zeros when exit_b_immediate_off_flag is False).
-    exit_b_immediate_off_triggered_arr = np.zeros(n, dtype=np.int8)
-    exit_b_immediate_off_config_arr = np.full(
-        n, np.int8(1 if exit_b_immediate_off_flag else 0), dtype=np.int8
-    )
-
-    # ------------------------------------------------------------------
     # WP-V3-4: Runtime primitives & snapshots (ТЗ v3 §7, §10.2, §10.3).
     # Resolve effective ZigZag mode and duration gate from materialised
     # ``zigzag_global_stats`` (set by WP-V3-2 loader / build_global_stats).
@@ -2781,25 +2707,6 @@ def apply(
             "Mode B runtime decisions (ТЗ v3 §8.2).",
             gate_max_bars,
         )
-
-    # Per-bar v3 primitive arrays (§10.2 + §10.3).  All length n, int8.
-    candidate_threshold_ok_arr = np.zeros(n, dtype=np.int8)
-    candidate_component_ok_arr = np.zeros(n, dtype=np.int8)
-    confirmed_median_ok_arr = np.zeros(n, dtype=np.int8)
-    b_component_ok_arr = np.zeros(n, dtype=np.int8)
-    immediate_allowed_arr = np.zeros(n, dtype=np.int8)
-    candidate_duration_gate_passed_arr = np.zeros(n, dtype=np.int8)
-
-    # WP-V3-4 P7 / ТЗ v3 §7, §9: snapshot arrays (immutable values captured
-    # at the START of every bar step, before any FSM transition — including
-    # the daily-reset wipe — can mutate them).  Naming follows the canonical
-    # field names from ТЗ v3 §7: state_at_bar_start / held_pos_at_bar_start
-    # / confirmed_legs_at_bar_start.
-    state_at_bar_start_arr = np.full(
-        n, int(ZigZagFSMState.OFF), dtype=np.int64,
-    )
-    held_pos_at_bar_start_arr = np.zeros(n, dtype=np.int8)
-    confirmed_legs_at_bar_start_arr = np.full(n, -1, dtype=np.int64)
 
     # Per-bar v3 candidate arrays (sourced from WP-V3-3 ``ZigZagPerBar``).
     # Backward-compat: legacy call sites may pass ``ZigZagPerBar`` without
@@ -2894,119 +2801,91 @@ def apply(
         if position_freeze_enabled else 0
     )
 
-    # WP-V3-7: §10.2 additional diagnostic arrays (enabled filter path only).
-    # Disabled-filter path never calls apply(), so these arrays never appear
-    # in the disabled baseline — satisfying the "no new arrays for disabled
-    # path" requirement.
-    zigzag_mode_arr = np.full(n, resolved_mode, dtype=object)
-    # int8: 1 = gate enabled, 0 = gate disabled.
-    candidate_duration_gate_enabled_arr = np.full(
-        n, np.int8(1 if gate_enabled else 0), dtype=np.int8
+    filtered_positions = np.zeros(n, dtype=np.int8)
+    _apply_arrays = (
+        _allocate_apply_arrays(
+            n=n,
+            zigzag_global_stats=zigzag_global_stats,
+            candidate_trigger_threshold=candidate_trigger_threshold,
+            global_median=global_median,
+            freeze_confirmed_legs=freeze_confirmed_legs,
+            trade_filter_config=trade_filter_config,
+            exit_off_mode_echo=exit_off_mode_echo,
+            exit_off_zz_leg_echo=exit_off_zz_leg_echo,
+            exit_b_immediate_off_flag=exit_b_immediate_off_flag,
+            resolved_mode=resolved_mode,
+            gate_enabled=gate_enabled,
+            gate_max_bars=gate_max_bars,
+            wakeup_lock_cycle_direction=wakeup_lock_cycle_direction,
+        )
+        if collect_filter_diagnostics
+        else None
     )
-    # int64: -1 when gate disabled (§5 representation boundary), else max_bars.
-    # ``gate_max_bars`` is already -1 when gate is disabled (resolved above).
-    candidate_duration_max_bars_arr = np.full(n, gate_max_bars, dtype=np.int64)
-    immediate_used_arr = np.zeros(n, dtype=np.int8)
-    # Default "mode_not_c" is overwritten per-bar inside the loop.
-    immediate_block_reason_arr = np.full(n, "mode_not_c", dtype=object)
-    _apply_arrays = _allocate_apply_arrays(
-        n=n,
-        zigzag_global_stats=zigzag_global_stats,
-        candidate_trigger_threshold=candidate_trigger_threshold,
-        global_median=global_median,
-        freeze_confirmed_legs=freeze_confirmed_legs,
-        trade_filter_config=trade_filter_config,
-        exit_off_mode_echo=exit_off_mode_echo,
-        exit_off_zz_leg_echo=exit_off_zz_leg_echo,
-        exit_b_immediate_off_flag=exit_b_immediate_off_flag,
-        resolved_mode=resolved_mode,
-        gate_enabled=gate_enabled,
-        gate_max_bars=gate_max_bars,
-        wakeup_lock_cycle_direction=wakeup_lock_cycle_direction,
-    )
-    filtered_positions = _apply_arrays["filtered_positions"]
-    state_arr = _apply_arrays["state_arr"]
-    state_code_arr = _apply_arrays["state_code_arr"]
-    trigger_source_arr = _apply_arrays["trigger_source_arr"]
-    confirmed_legs_since_start_arr = _apply_arrays[
-        "confirmed_legs_since_start_arr"
-    ]
-    st_flip_dir_arr = _apply_arrays["st_flip_dir_arr"]
-    trade_filter_enabled_arr = _apply_arrays["trade_filter_enabled_arr"]
-    reversal_threshold_arr = _apply_arrays["reversal_threshold_arr"]
-    ctt_diag_arr = _apply_arrays["ctt_diag_arr"]
-    local_window_arr = _apply_arrays["local_window_arr"]
-    global_median_arr = _apply_arrays["global_median_arr"]
-    global_stats_available_arr = _apply_arrays["global_stats_available_arr"]
-    freeze_confirmed_legs_arr = _apply_arrays["freeze_confirmed_legs_arr"]
-    median_stop_triggered_arr = _apply_arrays["median_stop_triggered_arr"]
-    stopping_started_at_arr = _apply_arrays["stopping_started_at_arr"]
-    filter_allowed_entry_arr = _apply_arrays["filter_allowed_entry_arr"]
-    filter_block_reason_arr = _apply_arrays["filter_block_reason_arr"]
-    exit_off_mode_arr = _apply_arrays["exit_off_mode_arr"]
-    exit_off_zz_leg_count_arr = _apply_arrays["exit_off_zz_leg_count_arr"]
-    zz_legs_since_lifecycle_start_arr = _apply_arrays[
-        "zz_legs_since_lifecycle_start_arr"
-    ]
-    zz_leg_stop_triggered_arr = _apply_arrays["zz_leg_stop_triggered_arr"]
-    exit_b_immediate_off_triggered_arr = _apply_arrays[
-        "exit_b_immediate_off_triggered_arr"
-    ]
-    exit_b_immediate_off_config_arr = _apply_arrays[
-        "exit_b_immediate_off_config_arr"
-    ]
-    candidate_threshold_ok_arr = _apply_arrays["candidate_threshold_ok_arr"]
-    candidate_component_ok_arr = _apply_arrays["candidate_component_ok_arr"]
-    confirmed_median_ok_arr = _apply_arrays["confirmed_median_ok_arr"]
-    b_component_ok_arr = _apply_arrays["b_component_ok_arr"]
-    immediate_allowed_arr = _apply_arrays["immediate_allowed_arr"]
-    candidate_duration_gate_passed_arr = _apply_arrays[
-        "candidate_duration_gate_passed_arr"
-    ]
-    state_at_bar_start_arr = _apply_arrays["state_at_bar_start_arr"]
-    held_pos_at_bar_start_arr = _apply_arrays["held_pos_at_bar_start_arr"]
-    confirmed_legs_at_bar_start_arr = _apply_arrays[
-        "confirmed_legs_at_bar_start_arr"
-    ]
-    zigzag_mode_arr = _apply_arrays["zigzag_mode_arr"]
-    candidate_duration_gate_enabled_arr = _apply_arrays[
-        "candidate_duration_gate_enabled_arr"
-    ]
-    candidate_duration_max_bars_arr = _apply_arrays[
-        "candidate_duration_max_bars_arr"
-    ]
-    immediate_used_arr = _apply_arrays["immediate_used_arr"]
-    immediate_block_reason_arr = _apply_arrays["immediate_block_reason_arr"]
-    wakeup_regime_active_arr = _apply_arrays["wakeup_regime_active_arr"]
-    wakeup_cycle_age_bars_arr = _apply_arrays["wakeup_cycle_age_bars_arr"]
-    wakeup_bars_since_fresh_candidate_arr = _apply_arrays[
-        "wakeup_bars_since_fresh_candidate_arr"
-    ]
-    wakeup_exit_ttl_triggered_arr = _apply_arrays[
-        "wakeup_exit_ttl_triggered_arr"
-    ]
-    wakeup_exit_no_fresh_candidate_triggered_arr = _apply_arrays[
-        "wakeup_exit_no_fresh_candidate_triggered_arr"
-    ]
-    wakeup_exit_close_triggered_arr = _apply_arrays[
-        "wakeup_exit_close_triggered_arr"
-    ]
-    wakeup_exit_action_mode_arr = _apply_arrays["wakeup_exit_action_mode_arr"]
-    wakeup_exit_reason_arr = _apply_arrays["wakeup_exit_reason_arr"]
-    wakeup_position_action_arr = _apply_arrays["wakeup_position_action_arr"]
-    wakeup_active_direction_arr = _apply_arrays["wakeup_active_direction_arr"]
-    position_freeze_active_arr = _apply_arrays["position_freeze_active_arr"]
-    position_freeze_bars_left_arr = _apply_arrays[
-        "position_freeze_bars_left_arr"
-    ]
-    position_freeze_ignored_opposite_st_flip_arr = _apply_arrays[
-        "position_freeze_ignored_opposite_st_flip_arr"
-    ]
-    position_freeze_release_action_arr = _apply_arrays[
-        "position_freeze_release_action_arr"
-    ]
-    if mode_d_enabled:
-        wakeup_exit_action_mode_arr[:] = wakeup_exit_action_mode
+    diag_enabled = _apply_arrays is not None
+    if diag_enabled:
+        state_arr = _apply_arrays["state_arr"]
+        state_code_arr = _apply_arrays["state_code_arr"]
+        trigger_source_arr = _apply_arrays["trigger_source_arr"]
+        confirmed_legs_since_start_arr = _apply_arrays[
+            "confirmed_legs_since_start_arr"
+        ]
+        st_flip_dir_arr = _apply_arrays["st_flip_dir_arr"]
+        median_stop_triggered_arr = _apply_arrays["median_stop_triggered_arr"]
+        stopping_started_at_arr = _apply_arrays["stopping_started_at_arr"]
+        filter_allowed_entry_arr = _apply_arrays["filter_allowed_entry_arr"]
+        filter_block_reason_arr = _apply_arrays["filter_block_reason_arr"]
+        zz_legs_since_lifecycle_start_arr = _apply_arrays[
+            "zz_legs_since_lifecycle_start_arr"
+        ]
+        zz_leg_stop_triggered_arr = _apply_arrays["zz_leg_stop_triggered_arr"]
+        exit_b_immediate_off_triggered_arr = _apply_arrays[
+            "exit_b_immediate_off_triggered_arr"
+        ]
+        candidate_threshold_ok_arr = _apply_arrays["candidate_threshold_ok_arr"]
+        candidate_component_ok_arr = _apply_arrays["candidate_component_ok_arr"]
+        confirmed_median_ok_arr = _apply_arrays["confirmed_median_ok_arr"]
+        b_component_ok_arr = _apply_arrays["b_component_ok_arr"]
+        immediate_allowed_arr = _apply_arrays["immediate_allowed_arr"]
+        candidate_duration_gate_passed_arr = _apply_arrays[
+            "candidate_duration_gate_passed_arr"
+        ]
+        state_at_bar_start_arr = _apply_arrays["state_at_bar_start_arr"]
+        held_pos_at_bar_start_arr = _apply_arrays["held_pos_at_bar_start_arr"]
+        confirmed_legs_at_bar_start_arr = _apply_arrays[
+            "confirmed_legs_at_bar_start_arr"
+        ]
+        immediate_used_arr = _apply_arrays["immediate_used_arr"]
+        immediate_block_reason_arr = _apply_arrays["immediate_block_reason_arr"]
+        wakeup_regime_active_arr = _apply_arrays["wakeup_regime_active_arr"]
+        wakeup_cycle_age_bars_arr = _apply_arrays["wakeup_cycle_age_bars_arr"]
+        wakeup_bars_since_fresh_candidate_arr = _apply_arrays[
+            "wakeup_bars_since_fresh_candidate_arr"
+        ]
+        wakeup_exit_ttl_triggered_arr = _apply_arrays[
+            "wakeup_exit_ttl_triggered_arr"
+        ]
+        wakeup_exit_no_fresh_candidate_triggered_arr = _apply_arrays[
+            "wakeup_exit_no_fresh_candidate_triggered_arr"
+        ]
+        wakeup_exit_close_triggered_arr = _apply_arrays[
+            "wakeup_exit_close_triggered_arr"
+        ]
+        wakeup_exit_action_mode_arr = _apply_arrays["wakeup_exit_action_mode_arr"]
+        wakeup_exit_reason_arr = _apply_arrays["wakeup_exit_reason_arr"]
+        wakeup_position_action_arr = _apply_arrays["wakeup_position_action_arr"]
+        wakeup_active_direction_arr = _apply_arrays["wakeup_active_direction_arr"]
+        position_freeze_active_arr = _apply_arrays["position_freeze_active_arr"]
+        position_freeze_bars_left_arr = _apply_arrays[
+            "position_freeze_bars_left_arr"
+        ]
+        position_freeze_ignored_opposite_st_flip_arr = _apply_arrays[
+            "position_freeze_ignored_opposite_st_flip_arr"
+        ]
+        position_freeze_release_action_arr = _apply_arrays[
+            "position_freeze_release_action_arr"
+        ]
+        if mode_d_enabled:
+            wakeup_exit_action_mode_arr[:] = wakeup_exit_action_mode
 
     state = ZigZagFSMState.OFF
     confirmed_legs_since_start = -1   # -1 = lifecycle never started
@@ -3033,6 +2912,8 @@ def apply(
         wakeup_position_action_this_bar = "none"
         wakeup_internal_st_flip_this_bar = False
         wakeup_active_direction_for_diag = 0
+        trigger_source_this_bar = _TRIGGER_SOURCE_NONE
+        wakeup_started_this_bar = False
         # ----- §9 step 0: Capture immutable bar-start snapshots ----------
         # WP-V3-4 P7 / ТЗ v3 §9 step 0: snapshots are captured BEFORE the
         # daily-reset wipe (§9 step 1) so that on a reset bar the snapshot
@@ -3043,9 +2924,10 @@ def apply(
         state_at_bar_start = state
         held_pos_at_bar_start = held_pos
         confirmed_legs_at_bar_start = confirmed_legs_since_start
-        state_at_bar_start_arr[t] = int(state_at_bar_start)
-        held_pos_at_bar_start_arr[t] = np.int8(held_pos_at_bar_start)
-        confirmed_legs_at_bar_start_arr[t] = confirmed_legs_at_bar_start
+        if diag_enabled:
+            state_at_bar_start_arr[t] = int(state_at_bar_start)
+            held_pos_at_bar_start_arr[t] = np.int8(held_pos_at_bar_start)
+            confirmed_legs_at_bar_start_arr[t] = confirmed_legs_at_bar_start
 
         # ----- §9 step 1: combined-reset wipe (after snapshots) ----------
         # combined_reset_event covers both daily_reset and time_filter_reset
@@ -3073,7 +2955,8 @@ def apply(
         prev_trend = int(trend_arr[t - 1]) if t > 0 else 0
         curr_trend = int(trend_arr[t])
         flip_dir = detect_st_flip(prev_trend, curr_trend)
-        st_flip_dir_arr[t] = flip_dir
+        if diag_enabled:
+            st_flip_dir_arr[t] = flip_dir
 
         c_h = float(cand_height[t]) if not np.isnan(cand_height[t]) else float("nan")
 
@@ -3146,14 +3029,15 @@ def apply(
         else:
             cand_duration_gate_passed = duration_ok
 
-        candidate_threshold_ok_arr[t] = np.int8(1 if candidate_threshold_ok else 0)
-        candidate_component_ok_arr[t] = np.int8(1 if candidate_component_ok else 0)
-        confirmed_median_ok_arr[t] = np.int8(1 if confirmed_median_ok else 0)
-        b_component_ok_arr[t] = np.int8(1 if b_component_ok else 0)
-        immediate_allowed_arr[t] = np.int8(1 if immediate_allowed else 0)
-        candidate_duration_gate_passed_arr[t] = np.int8(
-            1 if cand_duration_gate_passed else 0
-        )
+        if diag_enabled:
+            candidate_threshold_ok_arr[t] = np.int8(1 if candidate_threshold_ok else 0)
+            candidate_component_ok_arr[t] = np.int8(1 if candidate_component_ok else 0)
+            confirmed_median_ok_arr[t] = np.int8(1 if confirmed_median_ok else 0)
+            b_component_ok_arr[t] = np.int8(1 if b_component_ok else 0)
+            immediate_allowed_arr[t] = np.int8(1 if immediate_allowed else 0)
+            candidate_duration_gate_passed_arr[t] = np.int8(
+                1 if cand_duration_gate_passed else 0
+            )
 
         wakeup_entry_all_ok = False
         if mode_d_enabled:
@@ -3172,14 +3056,15 @@ def apply(
                 t=t,
             )
             wakeup_entry_all_ok = wakeup_entry.all_ok
-            _record_wakeup_entry_diagnostics(
-                arrays=_apply_arrays,
-                t=t,
-                evaluation=wakeup_entry,
-                candidate_height=c_h,
-                candidate_height_threshold=wakeup_entry_candidate_height_threshold,
-                candidate_direction=cand_dir_t,
-            )
+            if diag_enabled:
+                _record_wakeup_entry_diagnostics(
+                    arrays=_apply_arrays,
+                    t=t,
+                    evaluation=wakeup_entry,
+                    candidate_height=c_h,
+                    candidate_height_threshold=wakeup_entry_candidate_height_threshold,
+                    candidate_direction=cand_dir_t,
+                )
 
         # ------------------------------------------------------------------
         # WP-V3-5: Unified mode dispatcher (§8 Mode Semantics + §9 step 2).
@@ -3201,7 +3086,8 @@ def apply(
                     held_pos = cand_dir_t
                     confirmed_legs_since_start = -1
                     zz_legs_since_lifecycle_start = -1
-                    trigger_source_arr[t] = _TRIGGER_SOURCE_WAKEUP
+                    trigger_source_this_bar = _TRIGGER_SOURCE_WAKEUP
+                    wakeup_started_this_bar = True
             else:
                 volume_allowed = (
                     volume_condition_allowed_runtime is None
@@ -3242,12 +3128,13 @@ def apply(
                     zz_legs_since_lifecycle_start = (
                         lifecycle_start.zz_legs_since_lifecycle_start
                     )
-                    trigger_source_arr[t] = lifecycle_start.trigger_source
+                    trigger_source_this_bar = lifecycle_start.trigger_source
                     immediate_used_this_bar = lifecycle_start.immediate_used_this_bar
+        if diag_enabled:
+            trigger_source_arr[t] = trigger_source_this_bar
 
         if mode_d_enabled:
             wakeup_state_active = state == ZigZagFSMState.ST_ACTIVE_FREEZE
-            wakeup_started_this_bar = trigger_source_arr[t] == _TRIGGER_SOURCE_WAKEUP
             if wakeup_started_this_bar:
                 if wakeup_lock_cycle_direction:
                     cycle_direction = cand_dir_t
@@ -3286,13 +3173,13 @@ def apply(
                     wakeup_exit_c_fired,
                 ) = _wakeup_runtime_off()
 
-            if wakeup_state_active:
+            if diag_enabled and wakeup_state_active:
                 wakeup_regime_active_arr[t] = np.int8(1)
                 wakeup_cycle_age_bars_arr[t] = int(wakeup_cycle_age)
                 wakeup_bars_since_fresh_candidate_arr[t] = int(
                     wakeup_bars_since_fresh
                 )
-                wakeup_active_direction_for_diag = wakeup_active_direction
+            wakeup_active_direction_for_diag = wakeup_active_direction
 
             if (
                 wakeup_state_active
@@ -3305,14 +3192,16 @@ def apply(
                     _is_component_enabled(wakeup_ttl_cfg)
                     and wakeup_cycle_age >= int(getattr(wakeup_ttl_cfg, "bars"))
                 ):
-                    wakeup_exit_ttl_triggered_arr[t] = np.int8(1)
+                    if diag_enabled:
+                        wakeup_exit_ttl_triggered_arr[t] = np.int8(1)
                     wakeup_exit_c_reason_this_bar = "ttl"
                 elif (
                     _is_component_enabled(wakeup_no_fresh_cfg)
                     and wakeup_bars_since_fresh
                     >= int(getattr(wakeup_no_fresh_cfg, "timeout_bars"))
                 ):
-                    wakeup_exit_no_fresh_candidate_triggered_arr[t] = np.int8(1)
+                    if diag_enabled:
+                        wakeup_exit_no_fresh_candidate_triggered_arr[t] = np.int8(1)
                     wakeup_exit_c_reason_this_bar = "no_fresh_candidate"
 
                 if wakeup_exit_c_reason_this_bar is not None:
@@ -3328,7 +3217,8 @@ def apply(
                     if wakeup_exit_action_mode == "block_new_entries":
                         state = ZigZagFSMState.ST_STOPPING
                     elif wakeup_exit_action_mode == "close_position":
-                        wakeup_exit_close_triggered_arr[t] = np.int8(1)
+                        if diag_enabled:
+                            wakeup_exit_close_triggered_arr[t] = np.int8(1)
                         state = ZigZagFSMState.OFF
                         held_pos = 0
                         cycle_direction = 0
@@ -3366,7 +3256,8 @@ def apply(
                         "position_freeze_ignored_opposite_st_flip"
                     )
                     pos_freeze_pending = True
-                    position_freeze_ignored_opposite_st_flip_arr[t] = np.int8(1)
+                    if diag_enabled:
+                        position_freeze_ignored_opposite_st_flip_arr[t] = np.int8(1)
                 else:
                     effective_trade_mode = _effective_wakeup_trade_mode(
                         raw_trade_mode=trade_mode,
@@ -3417,7 +3308,8 @@ def apply(
                 st_now = curr_trend
                 if st_now == held_pos:
                     pos_freeze_pending = False
-                    position_freeze_release_action_arr[t] = "noop_st_realigned"
+                    if diag_enabled:
+                        position_freeze_release_action_arr[t] = "noop_st_realigned"
                 else:
                     effective_trade_mode = _effective_wakeup_trade_mode(
                         raw_trade_mode=trade_mode,
@@ -3426,9 +3318,10 @@ def apply(
                     )
                     if effective_trade_mode is None:
                         pos_freeze_pending = False
-                        position_freeze_release_action_arr[t] = (
-                            "noop_invalid_lock_state"
-                        )
+                        if diag_enabled:
+                            position_freeze_release_action_arr[t] = (
+                                "noop_invalid_lock_state"
+                            )
                     else:
                         effective_direction = (
                             cycle_direction
@@ -3449,18 +3342,21 @@ def apply(
                             wakeup_active_direction = cycle_direction
                         pos_freeze_pending = False
                         if release_action == "none":
-                            position_freeze_release_action_arr[t] = (
-                                "noop_st_realigned"
-                            )
+                            if diag_enabled:
+                                position_freeze_release_action_arr[t] = (
+                                    "noop_st_realigned"
+                                )
                         else:
-                            position_freeze_release_action_arr[t] = (
-                                "applied_" + release_action
-                            )
+                            if diag_enabled:
+                                position_freeze_release_action_arr[t] = (
+                                    "applied_" + release_action
+                                )
                             wakeup_position_action_this_bar = release_action
                         wakeup_active_direction_for_diag = wakeup_active_direction
 
             if (
-                position_freeze_enabled
+                diag_enabled
+                and position_freeze_enabled
                 and state_at_bar_start == ZigZagFSMState.ST_ACTIVE_FREEZE
                 and state == ZigZagFSMState.ST_ACTIVE_FREEZE
                 and held_pos != 0
@@ -3471,9 +3367,10 @@ def apply(
                     int(pos_freeze_until) - t + 1, 0
                 )
 
-            wakeup_exit_reason_arr[t] = wakeup_exit_reason_this_bar
-            wakeup_position_action_arr[t] = wakeup_position_action_this_bar
-            wakeup_active_direction_arr[t] = np.int8(wakeup_active_direction_for_diag)
+            if diag_enabled:
+                wakeup_exit_reason_arr[t] = wakeup_exit_reason_this_bar
+                wakeup_position_action_arr[t] = wakeup_position_action_this_bar
+                wakeup_active_direction_arr[t] = np.int8(wakeup_active_direction_for_diag)
 
         # WP-V3-7: §10.4 immediate_candidate_entry_block_reason priority.
         # Computed AFTER the dispatcher so ``immediate_used_this_bar`` is
@@ -3509,8 +3406,9 @@ def apply(
         else:
             # All checks passed → immediate entry succeeded.
             _imm_reason = _IMM_REASON_NONE
-        immediate_used_arr[t] = np.int8(1 if immediate_used_this_bar else 0)
-        immediate_block_reason_arr[t] = _imm_reason
+        if diag_enabled:
+            immediate_used_arr[t] = np.int8(1 if immediate_used_this_bar else 0)
+            immediate_block_reason_arr[t] = _imm_reason
 
         # ----- FSM transitions (canonical order, plan §5.2 / §5.5) -----
 
@@ -3579,7 +3477,8 @@ def apply(
                 if median_valid:
                     if float(local_median_N[t]) < global_median:
                         state = ZigZagFSMState.ST_STOPPING
-                        median_stop_triggered_arr[t] = np.int8(1)  # §13 (WP9)
+                        if diag_enabled:
+                            median_stop_triggered_arr[t] = np.int8(1)  # §13 (WP9)
                     # else stay in MONITORING
                 else:
                     state = ZigZagFSMState.ST_STOPPING  # fail-closed
@@ -3592,11 +3491,13 @@ def apply(
         ):
             # Plan v3 §4.3: zz_leg_stop_triggered fires in BOTH modes
             # (legacy and immediate-off) — invariant for backward compat.
-            zz_leg_stop_triggered_arr[t] = np.int8(1)
+            if diag_enabled:
+                zz_leg_stop_triggered_arr[t] = np.int8(1)
             if exit_b_immediate_off_flag:
                 # Immediate OFF: lifecycle terminates as OFF on bar t.
                 # OFF-invariants (same sentinel values as standard OFF init).
-                exit_b_immediate_off_triggered_arr[t] = np.int8(1)
+                if diag_enabled:
+                    exit_b_immediate_off_triggered_arr[t] = np.int8(1)
                 state = ZigZagFSMState.OFF
                 confirmed_legs_since_start = -1
                 zz_legs_since_lifecycle_start = -1
@@ -3629,7 +3530,7 @@ def apply(
 
         if mode_d_enabled:
             real_opened = (
-                trigger_source_arr[t] == _TRIGGER_SOURCE_WAKEUP
+                trigger_source_this_bar == _TRIGGER_SOURCE_WAKEUP
                 and held_pos != 0
                 and state == ZigZagFSMState.ST_ACTIVE_FREEZE
             )
@@ -3716,7 +3617,8 @@ def apply(
 
             # §13 WP9: filter_allowed_entry
             if next_pos != 0 and (cur_pos == 0 or next_pos != cur_pos):
-                filter_allowed_entry_arr[t] = np.int8(1)
+                if diag_enabled:
+                    filter_allowed_entry_arr[t] = np.int8(1)
 
         # §13 WP9: filter_block_reason — emitted only on a concrete
         # decision event that the filter actually blocked.  Priority order
@@ -3751,22 +3653,24 @@ def apply(
         # 5: trade_mode_disallowed_flip
 
         # Priority 0: daily_reset (highest).
-        if daily_reset_event[t]:
+        if diag_enabled and daily_reset_event[t]:
             filter_block_reason_arr[t] = "daily_reset"
 
         # Priority 1: time_filter_reset (only when daily_reset == 0).
-        elif time_filter_reset_event[t]:
+        elif diag_enabled and time_filter_reset_event[t]:
             filter_block_reason_arr[t] = "time_filter_reset"
 
         # Priority 2: local_median_unavailable.
         elif (
+            diag_enabled
+            and
             state_at_bar_start == ZigZagFSMState.ST_ACTIVE_MONITORING
             and confirmed
             and not median_valid
         ):
             filter_block_reason_arr[t] = "local_median_unavailable"
 
-        elif volume_blocked_lifecycle_start:
+        elif diag_enabled and volume_blocked_lifecycle_start:
             zigzag_reason = "none"
             if flip_dir != 0:
                 if state == ZigZagFSMState.ST_STOPPING:
@@ -3782,7 +3686,7 @@ def apply(
 
         # Priority 3-5: flip-based reasons (only when not already set
         # above and a flip event occurred on this bar).
-        elif flip_dir != 0:
+        elif diag_enabled and flip_dir != 0:
             if state == ZigZagFSMState.ST_STOPPING:
                 filter_block_reason_arr[t] = "stopping_mode_no_new_entries"
             elif state == ZigZagFSMState.OFF:
@@ -3791,99 +3695,37 @@ def apply(
                 filter_block_reason_arr[t] = "trade_mode_disallowed_flip"
 
         # ----- Persist diagnostics for this bar -------------------------
-        state_code_arr[t] = int(state)
-        state_arr[t] = _FSM_STATE_NAMES[int(state)]
-        confirmed_legs_since_start_arr[t] = confirmed_legs_since_start
-        zz_legs_since_lifecycle_start_arr[t] = zz_legs_since_lifecycle_start
+        if diag_enabled:
+            state_code_arr[t] = int(state)
+            state_arr[t] = _FSM_STATE_NAMES[int(state)]
+            confirmed_legs_since_start_arr[t] = confirmed_legs_since_start
+            zz_legs_since_lifecycle_start_arr[t] = zz_legs_since_lifecycle_start
 
         # §13 WP9: stopping_started_at_index
-        if state == ZigZagFSMState.ST_STOPPING:
-            if _stopping_start < 0:
-                _stopping_start = t
-            stopping_started_at_arr[t] = _stopping_start
-        else:
-            if state_at_bar_start == ZigZagFSMState.ST_STOPPING:
-                _stopping_start = -1  # reset after leaving STOPPING
-            stopping_started_at_arr[t] = -1
+        if diag_enabled:
+            if state == ZigZagFSMState.ST_STOPPING:
+                if _stopping_start < 0:
+                    _stopping_start = t
+                stopping_started_at_arr[t] = _stopping_start
+            else:
+                if state_at_bar_start == ZigZagFSMState.ST_STOPPING:
+                    _stopping_start = -1  # reset after leaving STOPPING
+                stopping_started_at_arr[t] = -1
 
-    filter_diagnostics_out: Dict[str, np.ndarray] = {
-        # --- existing keys (WP5–WP7) ---
-        "trade_filter_state": state_arr,
-        "trade_filter_state_code": state_code_arr,
-        "trade_filter_trigger_source": trigger_source_arr,
-        "confirmed_legs_since_start": confirmed_legs_since_start_arr,
-        "st_flip_dir": st_flip_dir_arr,
-        # --- §13 full keyset additions (WP9) ---
-        "trade_filter_enabled": trade_filter_enabled_arr,
-        "zigzag_reversal_threshold": reversal_threshold_arr,
-        "candidate_height_pct": np.asarray(cand_height, dtype=np.float64),
-        "candidate_trigger_threshold": ctt_diag_arr,
-        "local_median_N": np.asarray(local_median_N, dtype=np.float64),
-        "local_median_available": np.asarray(local_median_available, dtype=np.int8),
-        "local_window": local_window_arr,
-        "global_median": global_median_arr,
-        "global_stats_available": global_stats_available_arr,
-        "freeze_confirmed_legs": freeze_confirmed_legs_arr,
-        "median_stop_triggered": median_stop_triggered_arr,
-        "stopping_started_at_index": stopping_started_at_arr,
-        "filter_allowed_entry": filter_allowed_entry_arr,
-        "filter_block_reason": filter_block_reason_arr,
-        "exit_off_mode": exit_off_mode_arr,
-        "exit_off_zz_leg_count": exit_off_zz_leg_count_arr,
-        "zz_legs_since_lifecycle_start": zz_legs_since_lifecycle_start_arr,
-        "zz_leg_stop_triggered": zz_leg_stop_triggered_arr,
-        # Plan v3 §4.7: always-present (zeros when flag is False).
-        "exit_b_immediate_off_triggered": exit_b_immediate_off_triggered_arr,
-        "exit_b_immediate_off_config": exit_b_immediate_off_config_arr,
-        "daily_reset_enabled": np.full(n, int(daily_reset_enabled), dtype=np.int8),
-        "daily_reset_event": np.asarray(daily_reset_event, dtype=np.int8),
-        # --- time_filter diagnostics (docs/time_filter_plan_v1_final.txt §4.8) ---
-        # Always-present when trade_filter.enabled=true.
-        # When time_filter.enabled=false: enabled=0, in_window=all-ones, reset=all-zeros.
-        "time_filter_enabled": np.full(n, np.int8(1 if _tfl_enabled else 0), dtype=np.int8),
-        "time_filter_in_window": np.asarray(time_filter_in_window, dtype=np.int8),
-        "time_filter_reset_event": np.asarray(time_filter_reset_event, dtype=np.int8),
-        # --- v3 WP-V3-4: runtime primitives + bar-start snapshots ---
-        # ТЗ v3 §10.2 / §10.3.  Existing key ``candidate_height_pct`` is
-        # already exported above (WP9); the threshold-derived primitive is
-        # added here.
-        "candidate_threshold_ok": candidate_threshold_ok_arr,
-        "candidate_component_ok": candidate_component_ok_arr,
-        "confirmed_median_ok": confirmed_median_ok_arr,
-        "b_component_ok": b_component_ok_arr,
-        "immediate_allowed": immediate_allowed_arr,
-        "candidate_duration_gate_passed": candidate_duration_gate_passed_arr,
-        # WP-V3-4 P7 / ТЗ v3 §7, §9: per-bar immutable snapshots captured
-        # at bar start (BEFORE daily-reset and any FSM transition).
-        # Canonical names per ТЗ v3 §7; consumed by WP-V3-5 mode dispatcher
-        # and WP-V3-6 FSM ordering hardening.
-        "state_at_bar_start": state_at_bar_start_arr,
-        "held_pos_at_bar_start": held_pos_at_bar_start_arr,
-        "confirmed_legs_at_bar_start": confirmed_legs_at_bar_start_arr,
-        # --- v3 WP-V3-7: additional §10.2 immediate diagnostics ---
-        # candidate_height_pct already exported above (WP9 key).
-        # candidate_age_bars / candidate_leg_direction echoed from per_bar.
-        "zigzag_mode": zigzag_mode_arr,
-        "candidate_age_bars": cand_age_bars,
-        "candidate_leg_direction": cand_leg_dir,
-        "candidate_duration_gate_enabled": candidate_duration_gate_enabled_arr,
-        "candidate_duration_max_bars": candidate_duration_max_bars_arr,
-        "immediate_candidate_entry_used": immediate_used_arr,
-        "immediate_candidate_entry_block_reason": immediate_block_reason_arr,
-    }
-    if volume_runtime is not None:
-        filter_diagnostics_out.update(
-            {
-                "volume_regime": volume_regime_labels,
-                "volume_condition_allowed": volume_condition_allowed_runtime,
-                "volume_condition_block_reason": volume_condition_block_reason_labels,
-                "volume_initial_direction": volume_initial_direction_labels,
-                "median_relative_volume": volume_median_relative_runtime,
-            }
+    if not diag_enabled:
+        return ZigZagSTFilterResult(
+            positions=filtered_positions,
+            filter_diagnostics=None,
+            internal_legs=None,
+            filter_config_snapshot=(
+                volume_runtime.filter_config_snapshot
+                if volume_runtime is not None else None
+            ),
         )
 
     return _finalize_apply_result(
         n=n,
+        positions=filtered_positions,
         arrays=_apply_arrays,
         cand_height=cand_height,
         local_median_N=local_median_N,

@@ -691,6 +691,8 @@ def run_period(
     zigzag_global_stats: Any = None,
     volume_runtime: Optional[VolumeRuntime] = None,
     global_offset: int = 0,
+    *,
+    collect_filter_diagnostics: bool = True,
 ) -> PeriodResult:
     """
     Run backtest on a single period (DataFrame slice).
@@ -783,6 +785,7 @@ def run_period(
         volume_runtime=period_volume_runtime,
         global_offset=global_offset if filter_enabled else 0,
         volume=volume,
+        collect_filter_diagnostics=collect_filter_diagnostics,
     )
 
     # Validate warmup vs data length
@@ -827,6 +830,8 @@ def run_all_periods(
     zigzag_global_stats: Any = None,
     volume_runtime: Optional[VolumeRuntime] = None,
     include_period_splits: bool = True,
+    *,
+    collect_filter_diagnostics: bool = True,
 ) -> List[PeriodResult]:
     """
     Run backtest on all periods (100%, 75%, 50%, 33%, 25%) by default.
@@ -920,6 +925,7 @@ def run_all_periods(
             zigzag_global_stats=zigzag_global_stats,
             volume_runtime=period_volume_runtime,
             global_offset=period_global_offset,
+            collect_filter_diagnostics=collect_filter_diagnostics,
         )
 
         # Set period label
@@ -938,7 +944,9 @@ def run_all_periods_from_csv(
     commission: float,
     warmup_period: int = 0,
     periods_per_year: float = 252.0,
-    execution_model: ExecutionModel = ExecutionModel.OPEN_TO_OPEN
+    execution_model: ExecutionModel = ExecutionModel.OPEN_TO_OPEN,
+    *,
+    collect_filter_diagnostics: bool = True,
 ) -> List[PeriodResult]:
     """
     Run backtest on all periods from CSV file.
@@ -971,7 +979,8 @@ def run_all_periods_from_csv(
         commission=commission,
         warmup_period=warmup_period,
         periods_per_year=periods_per_year,
-        execution_model=execution_model
+        execution_model=execution_model,
+        collect_filter_diagnostics=collect_filter_diagnostics,
     )
 
 

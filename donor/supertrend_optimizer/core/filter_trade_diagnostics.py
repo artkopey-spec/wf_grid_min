@@ -139,6 +139,7 @@ def _wakeup_exit_reason_at(arr: Any, idx: int) -> str | None:
     return {
         "ttl": "wakeup_exit_ttl",
         "no_fresh_candidate": "wakeup_exit_no_fresh_candidate",
+        "cycle_trade_limit": "wakeup_exit_cycle_trade_limit",
         "reset": "wakeup_exit_reset",
         "opposite_st_flip": "wakeup_exit_opposite_st_flip",
     }.get(str(arr[idx]))
@@ -150,6 +151,7 @@ def _wakeup_position_action_at(arr: Any, idx: int) -> str | None:
     return {
         "reverse_on_st_flip": "wakeup_reverse_on_st_flip",
         "flat_on_disallowed_st_flip": "wakeup_flat_on_disallowed_st_flip",
+        "exit_cycle_trade_limit": "wakeup_exit_cycle_trade_limit",
     }.get(str(arr[idx]))
 
 

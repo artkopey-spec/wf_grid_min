@@ -1270,7 +1270,7 @@ class TestAllRepoConfigsLoad:
                     continue
                 # Skip local tester-config workspaces. These files use the
                 # tester CLI DSL, not the walk-forward grid config schema.
-                if any(part.startswith("config tester") for part in p.parts):
+                if any("config tester" in part for part in p.parts):
                     continue
                 # Skip tester CLI configs (different DSL/schema).
                 # These files are validated by supertrend_optimizer.cli.tester.load_tester_config.

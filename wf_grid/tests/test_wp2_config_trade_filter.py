@@ -1105,6 +1105,7 @@ class TestWakeupWhitelistPhase0Schema:
             "trade_filter.wakeup_regime.exit",
             "trade_filter.wakeup_regime.exit.ttl",
             "trade_filter.wakeup_regime.exit.no_fresh_candidate",
+            "trade_filter.wakeup_regime.exit.max_trades_per_cycle",
             "trade_filter.wakeup_regime.exit.action",
             "trade_filter.wakeup_regime.position_freeze",
         ]
@@ -1144,6 +1145,9 @@ trade_filter:
         quantile: 0.60
         max_age_bars: 15
         timeout_bars: 20
+      max_trades_per_cycle:
+        enabled: true
+        max_trades: 5
       action:
         mode: block_new_entries
     position_freeze:
@@ -1337,6 +1341,123 @@ class TestWakeupPhase0Validation:
         assert errors == []
         assert ekeys == []
 
+    def test_wakeup_max_trades_absent_defaults_disabled(self):
+        tf = _build_tf(_mode_d_raw())
+
+        cfg = tf.wakeup_regime.exit.max_trades_per_cycle
+        assert cfg.enabled is False
+        assert cfg.max_trades is None
+
+    def test_tester_accepts_wakeup_max_trades_per_cycle(self):
+        raw = _mode_d_raw()
+        raw["wakeup_regime"]["exit"]["max_trades_per_cycle"] = {
+            "enabled": True,
+            "max_trades": 5,
+        }
+
+        errors, ekeys = _run_phase0_raw(raw, "tester")
+
+        assert errors == []
+        assert ekeys == []
+
+    def test_tester_accepts_wakeup_max_trades_as_only_exit_condition(self):
+        raw = _mode_d_raw()
+        raw["wakeup_regime"]["exit"]["ttl"]["enabled"] = False
+        raw["wakeup_regime"]["exit"]["no_fresh_candidate"]["enabled"] = False
+        raw["wakeup_regime"]["exit"]["max_trades_per_cycle"] = {
+            "enabled": True,
+            "max_trades": 5,
+        }
+
+        errors, ekeys = _run_phase0_raw(raw, "tester")
+
+        assert errors == []
+        assert ekeys == []
+
+    def test_wakeup_max_trades_enabled_requires_max_trades(self):
+        raw = _mode_d_raw()
+        raw["wakeup_regime"]["exit"]["max_trades_per_cycle"] = {"enabled": True}
+
+        errors, _ = _run_phase0_raw(raw, "tester")
+
+        assert any(
+            "exit.max_trades_per_cycle.max_trades is required" in err
+            for err in errors
+        ), errors
+
+    @pytest.mark.parametrize("value", [0, 2.5, "5", True, False])
+    def test_wakeup_max_trades_rejects_invalid_values_when_enabled(self, value):
+        raw = _mode_d_raw()
+        raw["wakeup_regime"]["exit"]["max_trades_per_cycle"] = {
+            "enabled": True,
+            "max_trades": value,
+        }
+
+        errors, _ = _run_phase0_raw(raw, "tester")
+
+        assert any(
+            "exit.max_trades_per_cycle.max_trades must be int >= 1" in err
+            for err in errors
+        ), errors
+
+    def test_wakeup_max_trades_rejects_none_when_enabled(self):
+        raw = _mode_d_raw()
+        raw["wakeup_regime"]["exit"]["max_trades_per_cycle"] = {
+            "enabled": True,
+            "max_trades": None,
+        }
+
+        errors, _ = _run_phase0_raw(raw, "tester")
+
+        assert any(
+            "exit.max_trades_per_cycle.max_trades is required" in err
+            for err in errors
+        ), errors
+
+    @pytest.mark.parametrize("value", ["true", 1, None])
+    def test_wakeup_max_trades_enabled_rejects_non_bool_values(self, value):
+        raw = _mode_d_raw()
+        raw["wakeup_regime"]["exit"]["max_trades_per_cycle"] = {
+            "enabled": value,
+            "max_trades": 5,
+        }
+
+        errors, _ = _run_phase0_raw(raw, "tester")
+
+        assert any(
+            "trade_filter.wakeup_regime.exit.max_trades_per_cycle.enabled must be bool"
+            in err
+            for err in errors
+        ), errors
+
+    def test_wakeup_max_trades_unknown_key_rejected(self):
+        raw = {"trade_filter": _mode_d_raw()}
+        raw["trade_filter"]["wakeup_regime"]["exit"]["max_trades_per_cycle"] = {
+            "enabled": True,
+            "max_trades": 5,
+            "surprise": True,
+        }
+
+        errors = _collect_unknown(raw["trade_filter"])
+
+        assert (
+            "unknown config key: "
+            "'trade_filter.wakeup_regime.exit.max_trades_per_cycle.surprise'"
+        ) in errors
+
+    def test_wakeup_disabled_with_enabled_max_trades_passes_validation(self):
+        raw = _mode_d_raw()
+        raw["wakeup_regime"]["enabled"] = False
+        raw["wakeup_regime"]["exit"]["max_trades_per_cycle"] = {
+            "enabled": True,
+            "max_trades": 5,
+        }
+
+        errors, ekeys = _run_phase0_raw(raw, "tester")
+
+        assert not any("max_trades_per_cycle" in err for err in errors), errors
+        _superset_assert(ekeys, {"mode_d_requires_wakeup_enabled"})
+
     def test_tester_rejects_mode_d_without_raw_exit_c(self):
         raw = _mode_d_raw()
         raw["lifecycle"].pop("exit_off_mode")
@@ -1492,6 +1613,9 @@ trade_filter:
       ttl:
         enabled: true
         bars: 45
+      max_trades_per_cycle:
+        enabled: true
+        max_trades: 5
       action:
         mode: block_new_entries
 """

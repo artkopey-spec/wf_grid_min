@@ -306,6 +306,12 @@ class TradeFilterWakeupNoFreshCandidateExitConfig:
 
 
 @dataclass
+class TradeFilterWakeupMaxTradesPerCycleConfig:
+    enabled: object = False
+    max_trades: object = None
+
+
+@dataclass
 class TradeFilterWakeupExitActionConfig:
     mode: object = None
 
@@ -317,6 +323,9 @@ class TradeFilterWakeupExitConfig:
     )
     no_fresh_candidate: TradeFilterWakeupNoFreshCandidateExitConfig = field(
         default_factory=TradeFilterWakeupNoFreshCandidateExitConfig
+    )
+    max_trades_per_cycle: TradeFilterWakeupMaxTradesPerCycleConfig = field(
+        default_factory=TradeFilterWakeupMaxTradesPerCycleConfig
     )
     action: TradeFilterWakeupExitActionConfig = field(
         default_factory=TradeFilterWakeupExitActionConfig
@@ -555,13 +564,16 @@ TRADE_FILTER_ALLOWED_KEYS: dict[str, frozenset[str]] = {
         "enabled", "short_window", "baseline_window", "min_ratio",
     }),
     "trade_filter.wakeup_regime.exit": frozenset({
-        "ttl", "no_fresh_candidate", "action",
+        "ttl", "no_fresh_candidate", "max_trades_per_cycle", "action",
     }),
     "trade_filter.wakeup_regime.exit.ttl": frozenset({
         "enabled", "bars",
     }),
     "trade_filter.wakeup_regime.exit.no_fresh_candidate": frozenset({
         "enabled", "quantile", "max_age_bars", "timeout_bars",
+    }),
+    "trade_filter.wakeup_regime.exit.max_trades_per_cycle": frozenset({
+        "enabled", "max_trades",
     }),
     "trade_filter.wakeup_regime.exit.action": frozenset({
         "mode",
@@ -745,6 +757,7 @@ def build_trade_filter_config_from_raw(tf_raw: dict) -> TradeFilterConfig:
         exit_raw: dict = wakeup_raw.get("exit") or {}
         ttl_raw: dict = exit_raw.get("ttl") or {}
         no_fresh_raw: dict = exit_raw.get("no_fresh_candidate") or {}
+        max_trades_raw: dict = exit_raw.get("max_trades_per_cycle") or {}
         action_raw: dict = exit_raw.get("action") or {}
         position_freeze_raw = wakeup_raw.get("position_freeze") or {}
         position_freeze_raw_is_mapping = isinstance(position_freeze_raw, dict)
@@ -786,6 +799,10 @@ def build_trade_filter_config_from_raw(tf_raw: dict) -> TradeFilterConfig:
                     quantile=no_fresh_raw.get("quantile", None),
                     max_age_bars=no_fresh_raw.get("max_age_bars", None),
                     timeout_bars=no_fresh_raw.get("timeout_bars", None),
+                ),
+                max_trades_per_cycle=TradeFilterWakeupMaxTradesPerCycleConfig(
+                    enabled=max_trades_raw.get("enabled", False),
+                    max_trades=max_trades_raw.get("max_trades", None),
                 ),
                 action=TradeFilterWakeupExitActionConfig(
                     mode=action_raw.get("mode", None),
@@ -1935,6 +1952,7 @@ def _validate_wakeup_regime_block(
     wakeup_exit = wakeup.exit
     ttl_path = exit_key + ("ttl",)
     nf_path = exit_key + ("no_fresh_candidate",)
+    mt_path = exit_key + ("max_trades_per_cycle",)
     action_path = exit_key + ("action",)
 
     ttl_enabled = _validate_wakeup_component_enabled(
@@ -1942,6 +1960,9 @@ def _validate_wakeup_regime_block(
     )
     nf_enabled = _validate_wakeup_component_enabled(
         wakeup_exit.no_fresh_candidate, nf_path, raw_user_keys, errors
+    )
+    max_trades_enabled = _validate_wakeup_component_enabled(
+        wakeup_exit.max_trades_per_cycle, mt_path, raw_user_keys, errors
     )
 
     _validate_required_int_ge_one(
@@ -1972,8 +1993,15 @@ def _validate_wakeup_regime_block(
         errors,
         required=nf_enabled,
     )
+    _validate_required_int_ge_one(
+        wakeup_exit.max_trades_per_cycle.max_trades,
+        mt_path + ("max_trades",) in raw_user_keys,
+        "trade_filter.wakeup_regime.exit.max_trades_per_cycle.max_trades",
+        errors,
+        required=max_trades_enabled,
+    )
 
-    if wakeup_enabled and not any((ttl_enabled, nf_enabled)):
+    if wakeup_enabled and not any((ttl_enabled, nf_enabled, max_trades_enabled)):
         errors.append(
             "trade_filter.wakeup_regime requires at least one enabled exit condition"
         )
@@ -2601,6 +2629,7 @@ __all__ = [
     "TradeFilterWakeupExitConfig",
     "TradeFilterWakeupTtlExitConfig",
     "TradeFilterWakeupNoFreshCandidateExitConfig",
+    "TradeFilterWakeupMaxTradesPerCycleConfig",
     "TradeFilterWakeupExitActionConfig",
     "TradeFilterWakeupPositionFreezeConfig",
     "validate_trade_filter",

@@ -107,7 +107,8 @@ class TestOpenToOpenIndexing:
 
     def test_exit_signal_bar_formula_for_stopping_exits(self) -> None:
         """filter_stopping_opposite_flip trades: exit decision bar must have
-        trade_filter_state in {ST_STOPPING} — ST_STOPPING must be present at exit_signal_idx."""
+        state_at_bar_start in {ST_STOPPING}. trade_filter_state may already be
+        OFF after the same-bar close is applied."""
         df = _make_synthetic_ohlc()
         tf_cfg = _make_enabled_cfg()
         r = _run(df, tf_cfg=tf_cfg)
@@ -121,8 +122,9 @@ class TestOpenToOpenIndexing:
 
         fd = r.filter_diagnostics
         state_arr = fd.get("trade_filter_state") if fd else None
-        if state_arr is None:
-            pytest.skip("No trade_filter_state")
+        state_at_start_arr = fd.get("state_at_bar_start") if fd else None
+        if state_arr is None or state_at_start_arr is None:
+            pytest.skip("No trade_filter_state/state_at_bar_start")
 
         n = len(state_arr)
         stopping_trades = trades[trades["exit_reason"] == "filter_stopping_opposite_flip"]
@@ -136,10 +138,13 @@ class TestOpenToOpenIndexing:
             signal_bar = max(int(xi) - 1, 0)
             if signal_bar >= n:
                 continue  # edge of array
-            s = str(state_arr[signal_bar])
-            assert s == "ST_STOPPING", (
+            state_at_start = _state_name(state_at_start_arr[signal_bar])
+            state_after = str(state_arr[signal_bar])
+            assert state_at_start == "ST_STOPPING", (
                 f"filter_stopping_opposite_flip trade exit_index={xi}: "
-                f"state at signal_bar={signal_bar} is {s!r}, expected ST_STOPPING. "
+                f"state_at_bar_start at signal_bar={signal_bar} is "
+                f"{state_at_start!r}, expected ST_STOPPING "
+                f"(trade_filter_state after bar is {state_after!r}). "
                 "OPEN_TO_OPEN exit indexing formula violated."
             )
 
@@ -180,3 +185,16 @@ class TestOpenToOpenIndexing:
         assert invalid.empty, (
             f"OPEN_TO_OPEN trades with entry_index < 1: {invalid[['trade_id','entry_index']]}"
         )
+
+
+def _state_name(value) -> str:
+    if isinstance(value, str):
+        return value
+    return {
+        0: "OFF",
+        1: "WAIT_FIRST_ST_FLIP",
+        2: "ST_ACTIVE_FREEZE",
+        3: "ST_ACTIVE_MONITORING",
+        4: "ST_STOPPING",
+        5: "ST_COUNTING_ZZ_LEGS",
+    }.get(int(value), "UNKNOWN")

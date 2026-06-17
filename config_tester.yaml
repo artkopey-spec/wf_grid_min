@@ -1,34 +1,34 @@
-# Tester config for modeD_0575_long_q070_vol30_ttl055.
+# Full diagnostics config for representative 20.06 run:
+# 2032_modeD_slow_lite_long_asw005_alw0700_amr30_vsw007_vbw0800_vmr28_ttl090_hold01
 #
 # Run example:
-#   python -m supertrend_optimizer.cli.tester --csv data.csv --config config_tester.yaml --out result.xlsx
+#   python -m supertrend_optimizer.cli.tester --csv data.csv --config config_tester.yaml --out result_2032_full_diagnostics.xlsx
 
 supertrend:
   atr_period: 20
   multiplier: 1.0
 
 trade_mode: long
-commission: 0.0
+period: false
+
+commission: 0.0000
 
 warmup_period: 0
 warmup_period_auto: true
-min_trades_required: 3
 
 periods_per_year: 252
 annualization_basis: trading
-market: null
 execution_model: open_to_open
+min_trades_required: 3
 
-period: true
+early_exit:
+  enabled: false
+  max_drawdown: 0.50
+  check_bars: 50
 
 segmentation:
   mode: legacy
   n_parts: 7
-
-early_exit:
-  enabled: false
-  max_drawdown: 0.5
-  check_bars: 50
 
 export:
   diagnostics: true
@@ -41,10 +41,6 @@ export:
 trade_filter:
   enabled: true
   type: zigzag_st_mode
-
-  diagnostics:
-    export_state_columns: true
-    export_trigger_columns: true
 
   zigzag:
     enabled: true
@@ -90,39 +86,38 @@ trade_filter:
   wakeup_regime:
     enabled: true
     lock_cycle_direction: false
-
     entry:
       candidate_height:
         enabled: false
-        quantile: 0.75
+        quantile: 0.65
       candidate_age:
         enabled: false
         max_bars: 10
       atr_expansion:
         enabled: true
-        short_window: 30
-        long_window: 400
-        min_ratio: 1.6
+        short_window: 5
+        long_window: 700
+        min_ratio: 3.0
       volume_expansion:
-        enabled: false
-        short_window: 10
-        baseline_window: 1000
-        min_ratio: 2.0
+        enabled: true
+        short_window: 7
+        baseline_window: 800
+        min_ratio: 2.8
 
     exit:
       ttl:
         enabled: true
-        bars: 5
+        bars: 90
       no_fresh_candidate:
-        enabled: true
-        quantile: 0.55
-        max_age_bars: 10
+        enabled: false
+        quantile: 0.60
+        max_age_bars: 15
         timeout_bars: 20
       action:
         mode: close_position
 
     position_freeze:
-      enabled: false
-      min_hold_bars: 3
+      enabled: true
+      min_hold_bars: 1
       apply_to: internal_opposite_st_flip
       release_action: apply_if_still_opposite

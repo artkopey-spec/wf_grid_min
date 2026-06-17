@@ -491,6 +491,28 @@ def test_trades_mapping_uses_entry_signal_idx_and_skips_nan(monkeypatch):
     assert result.iloc[0]["Сделок в цикле"] == 2
 
 
+def test_wakeup_cycle_trade_count_matches_cycle_sheet_trade_count(monkeypatch):
+    excel_tester = _excel_tester_module()
+    _patch_no_legs(monkeypatch, excel_tester)
+    diag = _diagnostics(
+        ["OFF", "ST_ACTIVE_FREEZE", "ST_ACTIVE_FREEZE", "ST_STOPPING", "OFF"],
+        trigger_sources=["none", "wakeup_regime", "none", "none", "none"],
+        candidate_dirs=[0, 1, 0, 0, 0],
+    )
+    diag["wakeup_cycle_trade_count"] = np.array([-1, 1, 2, 2, -1], dtype=np.int64)
+    trades = pd.DataFrame({"entry_index": [2, 3, 5, np.nan]})
+
+    result = excel_tester._build_cycle_sheet_df(diag, _df(5), trades)
+
+    row = result.iloc[0]
+    start = int(row["Start bar index"])
+    end = int(row["End bar index"])
+    count_segment = diag["wakeup_cycle_trade_count"][start:end + 1]
+    active_max_count = int(np.max(count_segment[count_segment >= 0]))
+    trades_in_cycle_col = _expected_cycle_columns()[20]
+    assert active_max_count == row[trades_in_cycle_col]
+
+
 def test_positive_trades_percent_scale_and_non_finite_guard(monkeypatch):
     excel_tester = _excel_tester_module()
     _patch_no_legs(monkeypatch, excel_tester)

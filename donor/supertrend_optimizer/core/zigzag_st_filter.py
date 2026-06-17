@@ -1290,18 +1290,36 @@ def _resolve_mode_d_wakeup_entry(
     )
 
 
+class _WakeupExitConfigParts(NamedTuple):
+    ttl: object
+    no_fresh_candidate: object
+    max_trades_per_cycle: object
+    action: object
+
+
 def _resolve_mode_d_wakeup_exit(
     trade_filter_config: Any,
-) -> tuple[object, object, object]:
+) -> _WakeupExitConfigParts:
     wakeup = getattr(trade_filter_config, "wakeup_regime", None)
     exit_cfg = getattr(wakeup, "exit", None) if wakeup is not None else None
     if exit_cfg is None:
         raise ConfigError("apply() Mode D requires trade_filter.wakeup_regime.exit")
-    return (
-        getattr(exit_cfg, "ttl", None),
-        getattr(exit_cfg, "no_fresh_candidate", None),
-        getattr(exit_cfg, "action", None),
+    return _WakeupExitConfigParts(
+        ttl=getattr(exit_cfg, "ttl", None),
+        no_fresh_candidate=getattr(exit_cfg, "no_fresh_candidate", None),
+        max_trades_per_cycle=getattr(exit_cfg, "max_trades_per_cycle", None),
+        action=getattr(exit_cfg, "action", None),
     )
+
+
+def _wakeup_exit_action_for_reason(reason: str) -> str:
+    if reason == "ttl":
+        return "exit_ttl"
+    if reason == "no_fresh_candidate":
+        return "exit_no_fresh_candidate"
+    if reason == "cycle_trade_limit":
+        return "exit_cycle_trade_limit"
+    raise AssertionError(reason)
 
 
 def _wakeup_entry_component_ok(
@@ -2049,6 +2067,7 @@ def _allocate_apply_arrays(
     gate_enabled: bool,
     gate_max_bars: int,
     wakeup_lock_cycle_direction: bool,
+    wakeup_cycle_trade_limit_max_trades: int,
 ) -> Dict[str, np.ndarray]:
     try:
         _zcfg = _extract_zigzag_field(trade_filter_config, "zigzag")
@@ -2131,8 +2150,12 @@ def _allocate_apply_arrays(
         "wakeup_entry_volume_ratio_arr": np.full(n, np.nan, dtype=np.float64),
         "wakeup_cycle_age_bars_arr": np.full(n, -1, dtype=np.int64),
         "wakeup_bars_since_fresh_candidate_arr": np.full(n, -1, dtype=np.int64),
+        "wakeup_cycle_trade_count_arr": np.full(n, -1, dtype=np.int64),
         "wakeup_exit_ttl_triggered_arr": np.zeros(n, dtype=np.int8),
         "wakeup_exit_no_fresh_candidate_triggered_arr": np.zeros(n, dtype=np.int8),
+        "wakeup_exit_cycle_trade_limit_triggered_arr": np.zeros(
+            n, dtype=np.int8
+        ),
         "wakeup_exit_close_triggered_arr": np.zeros(n, dtype=np.int8),
         "wakeup_exit_action_mode_arr": np.full(n, "none", dtype=object),
         "wakeup_exit_reason_arr": np.full(n, "none", dtype=object),
@@ -2142,6 +2165,9 @@ def _allocate_apply_arrays(
             n,
             np.int8(1 if wakeup_lock_cycle_direction else 0),
             dtype=np.int8,
+        ),
+        "wakeup_cycle_trade_limit_config_arr": np.full(
+            n, int(wakeup_cycle_trade_limit_max_trades), dtype=np.int64
         ),
         "position_freeze_active_arr": np.zeros(n, dtype=np.int8),
         "position_freeze_bars_left_arr": np.zeros(n, dtype=np.int64),
@@ -2292,11 +2318,17 @@ def _finalize_apply_result(
                 "wakeup_bars_since_fresh_candidate": arrays[
                     "wakeup_bars_since_fresh_candidate_arr"
                 ],
+                "wakeup_cycle_trade_count": arrays[
+                    "wakeup_cycle_trade_count_arr"
+                ],
                 "wakeup_exit_ttl_triggered": arrays[
                     "wakeup_exit_ttl_triggered_arr"
                 ],
                 "wakeup_exit_no_fresh_candidate_triggered": arrays[
                     "wakeup_exit_no_fresh_candidate_triggered_arr"
+                ],
+                "wakeup_exit_cycle_trade_limit_triggered": arrays[
+                    "wakeup_exit_cycle_trade_limit_triggered_arr"
                 ],
                 "wakeup_exit_close_triggered": arrays[
                     "wakeup_exit_close_triggered_arr"
@@ -2307,6 +2339,9 @@ def _finalize_apply_result(
                 "wakeup_active_direction": arrays["wakeup_active_direction_arr"],
                 "wakeup_lock_cycle_direction_config": arrays[
                     "wakeup_lock_cycle_direction_config_arr"
+                ],
+                "wakeup_cycle_trade_limit_config": arrays[
+                    "wakeup_cycle_trade_limit_config_arr"
                 ],
                 "position_freeze_active": arrays["position_freeze_active_arr"],
                 "position_freeze_bars_left": arrays[
@@ -2727,6 +2762,7 @@ def apply(
     wakeup_volume_cfg = None
     wakeup_ttl_cfg = None
     wakeup_no_fresh_cfg = None
+    wakeup_max_trades_per_cycle_cfg = None
     wakeup_action_cfg = None
     wakeup_atr_ratio = None
     wakeup_volume_ratio = None
@@ -2743,6 +2779,7 @@ def apply(
         (
             wakeup_ttl_cfg,
             wakeup_no_fresh_cfg,
+            wakeup_max_trades_per_cycle_cfg,
             wakeup_action_cfg,
         ) = _resolve_mode_d_wakeup_exit(trade_filter_config)
         wakeup_entry_candidate_height_threshold = getattr(
@@ -2800,6 +2837,18 @@ def apply(
         int(getattr(position_freeze_cfg, "min_hold_bars", 0) or 0)
         if position_freeze_enabled else 0
     )
+    wakeup_cycle_trade_limit_enabled = (
+        mode_d_enabled
+        and wakeup_regime_cfg is not None
+        and getattr(wakeup_regime_cfg, "enabled", False) is True
+        and wakeup_max_trades_per_cycle_cfg is not None
+        and getattr(wakeup_max_trades_per_cycle_cfg, "enabled", False) is True
+    )
+    wakeup_cycle_trade_limit_max_trades = (
+        int(getattr(wakeup_max_trades_per_cycle_cfg, "max_trades"))
+        if wakeup_cycle_trade_limit_enabled
+        else 0
+    )
 
     filtered_positions = np.zeros(n, dtype=np.int8)
     _apply_arrays = (
@@ -2817,6 +2866,9 @@ def apply(
             gate_enabled=gate_enabled,
             gate_max_bars=gate_max_bars,
             wakeup_lock_cycle_direction=wakeup_lock_cycle_direction,
+            wakeup_cycle_trade_limit_max_trades=(
+                wakeup_cycle_trade_limit_max_trades
+            ),
         )
         if collect_filter_diagnostics
         else None
@@ -2861,11 +2913,17 @@ def apply(
         wakeup_bars_since_fresh_candidate_arr = _apply_arrays[
             "wakeup_bars_since_fresh_candidate_arr"
         ]
+        wakeup_cycle_trade_count_arr = _apply_arrays[
+            "wakeup_cycle_trade_count_arr"
+        ]
         wakeup_exit_ttl_triggered_arr = _apply_arrays[
             "wakeup_exit_ttl_triggered_arr"
         ]
         wakeup_exit_no_fresh_candidate_triggered_arr = _apply_arrays[
             "wakeup_exit_no_fresh_candidate_triggered_arr"
+        ]
+        wakeup_exit_cycle_trade_limit_triggered_arr = _apply_arrays[
+            "wakeup_exit_cycle_trade_limit_triggered_arr"
         ]
         wakeup_exit_close_triggered_arr = _apply_arrays[
             "wakeup_exit_close_triggered_arr"
@@ -2899,6 +2957,7 @@ def apply(
         wakeup_exit_c_fired,
     ) = _wakeup_runtime_off()
     cycle_direction = 0
+    cycle_trade_count = 0
     pos_freeze_until = -1
     pos_freeze_pending = False
 
@@ -2942,6 +3001,7 @@ def apply(
             held_pos = 0
             _stopping_start = -1
             cycle_direction = 0
+            cycle_trade_count = 0
             (
                 wakeup_cycle_age,
                 wakeup_bars_since_fresh,
@@ -3088,6 +3148,7 @@ def apply(
                     zz_legs_since_lifecycle_start = -1
                     trigger_source_this_bar = _TRIGGER_SOURCE_WAKEUP
                     wakeup_started_this_bar = True
+                    cycle_trade_count = 1
             else:
                 volume_allowed = (
                     volume_condition_allowed_runtime is None
@@ -3203,17 +3264,23 @@ def apply(
                     if diag_enabled:
                         wakeup_exit_no_fresh_candidate_triggered_arr[t] = np.int8(1)
                     wakeup_exit_c_reason_this_bar = "no_fresh_candidate"
+                elif (
+                    wakeup_cycle_trade_limit_enabled
+                    and cycle_trade_count >= wakeup_cycle_trade_limit_max_trades
+                ):
+                    if diag_enabled:
+                        wakeup_exit_cycle_trade_limit_triggered_arr[t] = np.int8(1)
+                    wakeup_exit_c_reason_this_bar = "cycle_trade_limit"
 
                 if wakeup_exit_c_reason_this_bar is not None:
                     wakeup_exit_reason_this_bar = wakeup_exit_c_reason_this_bar
                     wakeup_exit_c_fired = True
                     wakeup_exit_c_triggered_this_bar = True
-                    if wakeup_exit_c_reason_this_bar == "ttl":
-                        wakeup_position_action_this_bar = "exit_ttl"
-                    elif wakeup_exit_c_reason_this_bar == "no_fresh_candidate":
-                        wakeup_position_action_this_bar = (
-                            "exit_no_fresh_candidate"
+                    wakeup_position_action_this_bar = (
+                        _wakeup_exit_action_for_reason(
+                            wakeup_exit_c_reason_this_bar
                         )
+                    )
                     if wakeup_exit_action_mode == "block_new_entries":
                         state = ZigZagFSMState.ST_STOPPING
                     elif wakeup_exit_action_mode == "close_position":
@@ -3222,6 +3289,7 @@ def apply(
                         state = ZigZagFSMState.OFF
                         held_pos = 0
                         cycle_direction = 0
+                        cycle_trade_count = 0
                         pos_freeze_until = -1
                         pos_freeze_pending = False
                         (
@@ -3353,6 +3421,24 @@ def apply(
                                 )
                             wakeup_position_action_this_bar = release_action
                         wakeup_active_direction_for_diag = wakeup_active_direction
+
+            if (
+                not wakeup_started_this_bar
+                and state_at_bar_start == ZigZagFSMState.ST_ACTIVE_FREEZE
+                and state == ZigZagFSMState.ST_ACTIVE_FREEZE
+                and wakeup_position_action_this_bar
+                in {
+                    "restore_allowed_position_on_st_flip",
+                    "reverse_on_st_flip",
+                }
+            ):
+                cycle_trade_count += 1
+
+            if diag_enabled and state in (
+                ZigZagFSMState.ST_ACTIVE_FREEZE,
+                ZigZagFSMState.ST_STOPPING,
+            ):
+                wakeup_cycle_trade_count_arr[t] = int(cycle_trade_count)
 
             if (
                 diag_enabled
@@ -3496,12 +3582,16 @@ def apply(
             if exit_b_immediate_off_flag:
                 # Immediate OFF: lifecycle terminates as OFF on bar t.
                 # OFF-invariants (same sentinel values as standard OFF init).
+                # Mode D starts directly in ST_ACTIVE_FREEZE and never uses
+                # ST_COUNTING_ZZ_LEGS; this OFF reset is for the shared FSM
+                # invariant, not a reachable wakeup-cycle path.
                 if diag_enabled:
                     exit_b_immediate_off_triggered_arr[t] = np.int8(1)
                 state = ZigZagFSMState.OFF
                 confirmed_legs_since_start = -1
                 zz_legs_since_lifecycle_start = -1
                 held_pos = 0
+                cycle_trade_count = 0
                 # just_reached_exit_b_threshold stays False — only used by
                 # legacy ST_STOPPING path (§4.3 — guard against same-bar close).
             else:
@@ -3579,6 +3669,7 @@ def apply(
                 zz_legs_since_lifecycle_start = -1
                 held_pos = 0
                 cycle_direction = 0
+                cycle_trade_count = 0
 
         if t + 1 < n:
             if state in (ZigZagFSMState.OFF, ZigZagFSMState.WAIT_FIRST_ST_FLIP):
@@ -3610,6 +3701,7 @@ def apply(
                     zz_legs_since_lifecycle_start = -1
                     held_pos = 0
                     cycle_direction = 0
+                    cycle_trade_count = 0
                 else:
                     next_pos = np.int8(cur_pos)
 

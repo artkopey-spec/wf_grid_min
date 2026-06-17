@@ -115,11 +115,13 @@ EXPECTED_TRADES_DISABLED_COLS: List[str] = [
     "SuperTrend Color",
 ]
 
-# Trades: enabled — canonical 13 + 3 filter cols at end
+# Trades: enabled — canonical 13 + filter trade diagnostics at end
 EXPECTED_TRADES_ENABLED_COLS: List[str] = EXPECTED_TRADES_DISABLED_COLS + [
     "Entry Filter State",
     "Entry Trigger Source",
-    "Exit Reason",
+    "Wakeup Cycle Exit Reason",
+    "Wakeup Position Action",
+    "Trade Close Reason",
 ]
 
 # ---------------------------------------------------------------------------
@@ -371,7 +373,13 @@ class TestDisabledLegacyGolden:
             if not sheet_name.startswith("Trades_"):
                 continue
             headers = _sheet_headers(wb, sheet_name)
-            for col in ("Entry Filter State", "Entry Trigger Source", "Exit Reason"):
+            for col in (
+                "Entry Filter State",
+                "Entry Trigger Source",
+                "Wakeup Cycle Exit Reason",
+                "Wakeup Position Action",
+                "Trade Close Reason",
+            ):
                 assert col not in headers, (
                     f"Filter trade col {col!r} must not appear in disabled {sheet_name}"
                 )
@@ -651,7 +659,13 @@ class TestEqualBlocksDisabledGolden:
             if not sheet_name.startswith("Trades_"):
                 continue
             headers = _sheet_headers(wb, sheet_name)
-            for col in ("Entry Filter State", "Entry Trigger Source", "Exit Reason"):
+            for col in (
+                "Entry Filter State",
+                "Entry Trigger Source",
+                "Wakeup Cycle Exit Reason",
+                "Wakeup Position Action",
+                "Trade Close Reason",
+            ):
                 assert col not in headers, (
                     f"equal_blocks {sheet_name!r} must not have filter col {col!r}"
                 )

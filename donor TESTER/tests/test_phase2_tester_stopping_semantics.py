@@ -116,20 +116,26 @@ class TestSTStoppingSemantics:
         # Trades with exit_reason = filter_stopping_opposite_flip must exist
         # if ST_STOPPING occurred during any trade
         stopping_exits = trades[trades["exit_reason"] == "filter_stopping_opposite_flip"]
-        state_arr = fd["trade_filter_state"]
-        stopping_bars = set(np.where(state_arr == "ST_STOPPING")[0].tolist())
+        state_at_start = fd.get("state_at_bar_start")
+        if state_at_start is None:
+            pytest.skip("No state_at_bar_start")
+        stopping_decision_bars = {
+            i for i, value in enumerate(state_at_start)
+            if _state_name(value) == "ST_STOPPING"
+        }
 
-        if stopping_bars and len(stopping_exits) > 0:
-            # Each stopping_exit trade: its exit decision bar must have been in ST_STOPPING
+        if stopping_decision_bars and len(stopping_exits) > 0:
+            # Each stopping_exit trade: its exit decision bar must have started in ST_STOPPING.
+            # trade_filter_state can already be OFF after the same-bar close is applied.
             for _, row in stopping_exits.iterrows():
                 xi = row.get("exit_index")
                 if xi is None or (isinstance(xi, float) and np.isnan(xi)):
                     continue
                 exit_signal_bar = max(int(xi) - 1, 0)
-                assert exit_signal_bar in stopping_bars, (
+                assert exit_signal_bar in stopping_decision_bars, (
                     f"Trade with exit_reason=filter_stopping_opposite_flip "
-                    f"has exit_signal_bar={exit_signal_bar} but that bar is not "
-                    f"in ST_STOPPING state. Stopping exit semantics violated."
+                    f"has exit_signal_bar={exit_signal_bar} but that bar did not "
+                    f"start in ST_STOPPING state. Stopping exit semantics violated."
                 )
 
     def test_filter_state_sequence_valid(self) -> None:
@@ -171,3 +177,16 @@ class TestSTStoppingSemantics:
         assert actual == expected, (
             f"bars_in_state.ST_STOPPING={actual} != state array count={expected}"
         )
+
+
+def _state_name(value) -> str:
+    if isinstance(value, str):
+        return value
+    return {
+        0: "OFF",
+        1: "WAIT_FIRST_ST_FLIP",
+        2: "ST_ACTIVE_FREEZE",
+        3: "ST_ACTIVE_MONITORING",
+        4: "ST_STOPPING",
+        5: "ST_COUNTING_ZZ_LEGS",
+    }.get(int(value), "UNKNOWN")

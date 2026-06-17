@@ -64,9 +64,12 @@ def test_repo_config_tester_yaml_loads_active_mode_d_wakeup_volume_profile():
 
     wakeup_volume = tf_cfg.wakeup_regime.entry.volume_expansion
     assert wakeup_volume.enabled is True
-    assert wakeup_volume.short_window == 10
-    assert wakeup_volume.baseline_window == 100
-    assert wakeup_volume.min_ratio == 1.3
+    assert isinstance(wakeup_volume.short_window, int)
+    assert isinstance(wakeup_volume.baseline_window, int)
+    assert wakeup_volume.short_window >= 1
+    assert wakeup_volume.baseline_window >= wakeup_volume.short_window
+    assert isinstance(wakeup_volume.min_ratio, (int, float))
+    assert wakeup_volume.min_ratio > 0
 
 
 def _df(n: int = 80) -> pd.DataFrame:

@@ -1,11 +1,12 @@
 schema_version: 1
-# General WF Grid profile: trade_filter + time_filter + volume (mean) +
-# baseline_session активны. Для production-safe дефолта репозитория см. config.yaml (WP11).
-# Запуск: python run.py --config config_general.yaml (или ваш эквивалент флага конфига).
+# General WF Grid profile: time_filter активен, volume отключён (в data.csv нет volume).
+# Адаптировано под текущий data.csv: 717 баров, 1m, 3 торговых дня (2026-06-12/15/16),
+# сессия ~16:30–22:59 MSK (+03:00).
+# Запуск: python run.py --config config.yaml
 
 data:
   file_path: "data.csv"
-  periods_per_year: 252
+  periods_per_year: "auto"
   annualization_basis: "trading"
 
 optimization:
@@ -26,11 +27,11 @@ validation:
   warmup_period: 0
   warmup_period_auto: true
   walk_forward:
-    train_size: "90d"
-    test_size: "30d"
-    step_size: "30d"
+    train_size: "600bars"
+    test_size: "117bars"
+    step_size: "117bars"
     scheme: "rolling"
-    anchor: "start"
+    anchor: "end"
     min_train_bars: 50
     min_test_bars: 15
 
@@ -111,8 +112,8 @@ trade_filter:
   #   export_trigger_columns: true
 
   time_filter:
-    enabled: true
-    window: "09:00-19:00"
+    enabled: false
+    window: "16:30-23:00"
 
   volume:
     enabled: false

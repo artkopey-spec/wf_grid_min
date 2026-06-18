@@ -452,6 +452,49 @@ def test_run_health_ohlcv_nan_warn_warmup_info_and_cycle_coverage_statuses():
     assert skip_health.loc[skip_health["Check"] == "Cycle map coverage"].iloc[0]["Status"] == "SKIP"
 
 
+def test_run_health_cycle_coverage_accepts_outside_cycle_as_proven_status():
+    ctx = _diagnostics_context()
+    cycle_map = ctx.cycle_map.copy()
+    cycle_map.loc[0, "mapping_status"] = "outside_cycle"
+    ctx = DiagnosticsV2Context(
+        period_results=ctx.period_results,
+        pr_100=ctx.pr_100,
+        df=ctx.df,
+        trades_100=ctx.trades_100,
+        signals_df=ctx.signals_df,
+        fd_100=ctx.fd_100,
+        filter_diagnostics_summary=ctx.filter_diagnostics_summary,
+        run_metadata=ctx.run_metadata,
+        trade_filter_config=ctx.trade_filter_config,
+        config_yaml_snapshot=ctx.config_yaml_snapshot,
+        cycle_map=cycle_map,
+        thresholds=ctx.thresholds,
+    )
+
+    sheets = build_enabled_v2_sheets(
+        ctx,
+        resolve_diagnostics_v2_flags(
+            {
+                "index": False,
+                "reproducibility": False,
+                "dashboard": False,
+                "trade_analytics": False,
+                "equity_drawdown": False,
+                "filter_funnel": False,
+                "filter_attribution": False,
+                "cycle_summary": False,
+                "cost_sensitivity": False,
+                "remediation": False,
+                "filter_diagnostics_sampled": False,
+            }
+        ),
+    )
+
+    health = _sheet_by_name(sheets, "Run_Health").df
+    row = health.loc[health["Check"] == "Cycle map coverage"].iloc[0]
+    assert row["Status"] == "PASS"
+
+
 def test_a2_sheets_are_built_from_trades_cycle_map_and_cost_model():
     flags = resolve_diagnostics_v2_flags(
         {
@@ -479,6 +522,7 @@ def test_a2_sheets_are_built_from_trades_cycle_map_and_cost_model():
     assert "trades_mapped" in set(cycle["Metric"])
     cost = _sheet_by_name(sheets, "Cost_Sensitivity").df
     assert "gross_available" in set(cost["cost_model_status"])
+    assert "remaining additional bps" in " ".join(cost["notes"].astype(str))
 
 
 def test_trade_analytics_short_mfe_mae_formulas():
@@ -559,6 +603,9 @@ def test_a3_sheets_are_conservative_and_cache_based():
     assert "percent_from_previous" not in set(funnel.columns)
     missing_gate = funnel.loc[funnel["source_column"] == "volume_condition_allowed"].iloc[0]
     assert missing_gate["status"] == "SKIP"
+    wakeup_gate = funnel.loc[funnel["source_column"] == "wakeup_entry_all_ok"].iloc[0]
+    assert wakeup_gate["status"] == "SKIP"
+    assert "Mode D" in wakeup_gate["notes"]
 
     attribution = _sheet_by_name(sheets, "Filter_Attribution").df
     text = " ".join(str(value) for value in attribution.to_numpy().ravel())
@@ -588,6 +635,67 @@ def test_a3_sheets_are_conservative_and_cache_based():
         "Status",
     ]
     assert set(remediation["Confidence"]) == {"low"}
+
+
+def test_filter_funnel_volume_only_mode_skips_zigzag_and_wakeup_gates():
+    ctx = _diagnostics_context()
+    volume_ctx = DiagnosticsV2Context(
+        period_results=ctx.period_results,
+        pr_100=ctx.pr_100,
+        df=ctx.df,
+        trades_100=ctx.trades_100,
+        signals_df=ctx.signals_df,
+        fd_100={
+            **ctx.fd_100,
+            "volume_condition_allowed": np.asarray([1, 0, 1, 0], dtype=np.int8),
+        },
+        filter_diagnostics_summary=ctx.filter_diagnostics_summary,
+        run_metadata=ctx.run_metadata,
+        trade_filter_config=SimpleNamespace(
+            zigzag=SimpleNamespace(enabled=False),
+            volume=SimpleNamespace(enabled=True),
+        ),
+        config_yaml_snapshot=ctx.config_yaml_snapshot,
+        cycle_map=ctx.cycle_map,
+        thresholds=ctx.thresholds,
+    )
+    flags = resolve_diagnostics_v2_flags(
+        {
+            "index": False,
+            "reproducibility": False,
+            "dashboard": False,
+            "run_health": False,
+            "trade_analytics": False,
+            "equity_drawdown": False,
+            "filter_attribution": False,
+            "cycle_summary": False,
+            "cost_sensitivity": False,
+            "remediation": False,
+            "filter_diagnostics_sampled": False,
+        }
+    )
+
+    sheets = build_enabled_v2_sheets(volume_ctx, flags)
+
+    funnel = _sheet_by_name(sheets, "Filter_Funnel").df
+    assert funnel.loc[funnel["source_column"] == "candidate_threshold_ok"].iloc[0]["status"] == "SKIP"
+    assert funnel.loc[funnel["source_column"] == "wakeup_entry_all_ok"].iloc[0]["status"] == "SKIP"
+    assert funnel.loc[funnel["source_column"] == "volume_condition_allowed"].iloc[0]["status"] == "INFO"
+
+
+def test_representative_builders_do_not_mutate_context_frames():
+    ctx = _diagnostics_context()
+    original_df = ctx.df.copy(deep=True)
+    original_trades = ctx.trades_100.copy(deep=True)
+    original_signals = ctx.signals_df.copy(deep=True)
+    original_cycle_map = ctx.cycle_map.copy(deep=True)
+
+    build_enabled_v2_sheets(ctx, resolve_diagnostics_v2_flags({}))
+
+    pd.testing.assert_frame_equal(ctx.df, original_df)
+    pd.testing.assert_frame_equal(ctx.trades_100, original_trades)
+    pd.testing.assert_frame_equal(ctx.signals_df, original_signals)
+    pd.testing.assert_frame_equal(ctx.cycle_map, original_cycle_map)
 
 
 def test_filter_attribution_skips_ambiguous_blocked_universe():

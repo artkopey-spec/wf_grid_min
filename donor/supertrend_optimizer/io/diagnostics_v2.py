@@ -203,6 +203,15 @@ def _cycle_mode_from_config(trade_filter_config: Any, explicit_mode: str | None)
     return "zigzag"
 
 
+def _diagnostics_mode(ctx: DiagnosticsV2Context) -> str:
+    mode = _cycle_mode_from_config(ctx.trade_filter_config, None)
+    if mode == "volume_only":
+        return mode
+    zigzag = getattr(ctx.trade_filter_config, "zigzag", None)
+    zigzag_mode = str(getattr(zigzag, "mode", "") or "").upper()
+    return "zigzag_d" if zigzag_mode == "D" else "zigzag"
+
+
 def derive_trade_cycle_map(
     fd_100: Mapping[str, Any] | None,
     trades_100: pd.DataFrame,
@@ -572,8 +581,17 @@ def _build_run_health_sheet(ctx: DiagnosticsV2Context) -> DiagnosticsV2Sheet:
     if len(ctx.cycle_map) == 0:
         add("Cycle map coverage", "SKIP", "cycle_map empty")
     else:
-        mapped = int((ctx.cycle_map["mapping_status"] == "mapped").sum())
-        add("Cycle map coverage", "PASS" if mapped == len(ctx.cycle_map) else "WARN", mapped, len(ctx.cycle_map))
+        status_series = ctx.cycle_map["mapping_status"].astype(str)
+        mapped = int((status_series == "mapped").sum())
+        valid_or_proven_outside = status_series.isin({"mapped", "outside_cycle"})
+        bad = int((~valid_or_proven_outside).sum())
+        add(
+            "Cycle map coverage",
+            "PASS" if bad == 0 else "WARN",
+            f"mapped={mapped}; outside_cycle={int((status_series == 'outside_cycle').sum())}; bad={bad}",
+            len(ctx.cycle_map),
+            "outside_cycle is a valid mapping outcome; WARN only for missing/invalid/source statuses",
+        )
 
     add(
         "Warmup facts",
@@ -1016,7 +1034,11 @@ def _build_cost_sensitivity_sheet(ctx: DiagnosticsV2Context) -> DiagnosticsV2She
                 "per_trade_sharpe": sharpe,
                 "breakeven_bps_per_side": max(avg, 0.0) * 100.0 / 2.0 if np.isfinite(avg) else np.nan,
                 "cost_model_status": model_status,
-                "notes": notes,
+                "notes": (
+                    notes
+                    + "; breakeven_bps_per_side is remaining additional bps per side "
+                    "until mean trade reaches zero"
+                ),
             }
         )
     if "tick_size" not in ctx.run_metadata:
@@ -1061,6 +1083,7 @@ def _non_empty_text_mask(values: np.ndarray) -> np.ndarray:
 
 
 def _build_filter_funnel_sheet(ctx: DiagnosticsV2Context) -> DiagnosticsV2Sheet:
+    mode = _diagnostics_mode(ctx)
     gate_specs = [
         ("filter_allowed_entry", "filter_allowed_entry"),
         ("candidate_threshold_ok", "candidate_threshold_ok"),
@@ -1076,6 +1099,48 @@ def _build_filter_funnel_sheet(ctx: DiagnosticsV2Context) -> DiagnosticsV2Sheet:
     ]
     rows: list[dict[str, Any]] = []
     for gate, source_column in gate_specs:
+        if source_column.startswith("wakeup_") and mode != "zigzag_d":
+            rows.append(
+                {
+                    "gate": gate,
+                    "source_column": source_column,
+                    "passed_count": np.nan,
+                    "failed_count": np.nan,
+                    "denominator": 0,
+                    "pass_pct_of_denominator": np.nan,
+                    "status": "SKIP",
+                    "notes": f"{source_column} is only expected for zigzag Mode D",
+                }
+            )
+            continue
+        if source_column in {"volume_condition_allowed", "cycle_direction_gate_passed"} and mode != "volume_only":
+            rows.append(
+                {
+                    "gate": gate,
+                    "source_column": source_column,
+                    "passed_count": np.nan,
+                    "failed_count": np.nan,
+                    "denominator": 0,
+                    "pass_pct_of_denominator": np.nan,
+                    "status": "SKIP",
+                    "notes": f"{source_column} is only expected for volume-only mode",
+                }
+            )
+            continue
+        if source_column in {"candidate_threshold_ok", "confirmed_median_ok", "immediate_allowed"} and mode == "volume_only":
+            rows.append(
+                {
+                    "gate": gate,
+                    "source_column": source_column,
+                    "passed_count": np.nan,
+                    "failed_count": np.nan,
+                    "denominator": 0,
+                    "pass_pct_of_denominator": np.nan,
+                    "status": "SKIP",
+                    "notes": f"{source_column} is not a volume-only gate",
+                }
+            )
+            continue
         arr = _fd_array(ctx, source_column)
         if arr is None:
             rows.append(
@@ -1164,6 +1229,7 @@ def _block_reason(value: Any) -> str:
 
 
 def _build_filter_attribution_sheet(ctx: DiagnosticsV2Context) -> DiagnosticsV2Sheet:
+    mode = _diagnostics_mode(ctx)
     columns = [
         "Universe",
         "Reason",
@@ -1223,6 +1289,34 @@ def _build_filter_attribution_sheet(ctx: DiagnosticsV2Context) -> DiagnosticsV2S
                 flip_numeric = pd.to_numeric(pd.Series(st_flip_arr), errors="coerce").fillna(0).to_numpy()
                 for idx in np.flatnonzero((flip_numeric != 0) & reason_mask):
                     event_groups.setdefault(("blocked_fd_attempts", _block_reason(reason_arr[idx])), []).append(int(idx))
+            if mode == "zigzag_d":
+                for key in (
+                    "wakeup_entry_candidate_height_ok",
+                    "wakeup_entry_candidate_age_ok",
+                    "wakeup_entry_candidate_direction_ok",
+                    "wakeup_entry_trade_mode_ok",
+                    "wakeup_entry_atr_ok",
+                    "wakeup_entry_volume_ok",
+                ):
+                    component_arr = _fd_array(ctx, key)
+                    if component_arr is None:
+                        continue
+                    numeric = pd.to_numeric(pd.Series(component_arr), errors="coerce")
+                    for idx in numeric[numeric == 0].index:
+                        event_groups.setdefault(("wakeup_component_failures", key), []).append(int(idx))
+            else:
+                rows.append(
+                    {
+                        "Universe": "wakeup_component_failures",
+                        "Reason": "unsupported_mode",
+                        "Horizon": "",
+                        "Events": 0,
+                        "Mean forward return pct": np.nan,
+                        "Median forward return pct": np.nan,
+                        "Status": "SKIP",
+                        "Notes": "wakeup component attribution is only expected for zigzag Mode D",
+                    }
+                )
 
     if "close" not in ctx.df.columns:
         rows.append(

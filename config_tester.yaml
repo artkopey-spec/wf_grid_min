@@ -88,8 +88,8 @@ trade_filter:
     lock_cycle_direction: false
     entry:
       candidate_height:
-        enabled: false
-        quantile: 0.65
+        enabled: true
+        quantile: 0.4
       candidate_age:
         enabled: false
         max_bars: 10
@@ -97,12 +97,12 @@ trade_filter:
         enabled: true
         short_window: 5
         long_window: 700
-        min_ratio: 3.0
+        min_ratio: 2.0
       volume_expansion:
         enabled: true
         short_window: 7
         baseline_window: 800
-        min_ratio: 2.8
+        min_ratio: 2.0
 
     exit:
       ttl:
@@ -113,6 +113,9 @@ trade_filter:
         quantile: 0.60
         max_age_bars: 15
         timeout_bars: 20
+      max_trades_per_cycle:
+        enabled: true
+        max_trades: 6
       action:
         mode: close_position
 

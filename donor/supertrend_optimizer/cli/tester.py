@@ -8,7 +8,7 @@ Usage:
 import argparse
 import sys
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Optional
 
 import pandas as pd
 import yaml
@@ -22,6 +22,10 @@ from supertrend_optimizer.data.timeframe import (
     validate_market_vs_timeframe,
 )
 from supertrend_optimizer.io.excel_tester import export_tester_results, export_equal_blocks_results
+from supertrend_optimizer.io.diagnostics_v2 import (
+    resolve_collect_filter_diagnostics,
+    resolve_diagnostics_v2_flags,
+)
 from supertrend_optimizer.testing.runner import run_all_periods, run_equal_blocks
 from supertrend_optimizer.testing.signal_events import build_signal_events
 from supertrend_optimizer.utils.config import load_config
@@ -90,6 +94,7 @@ _EXPORT_BOOL_KEYS = frozenset({
     "false_start",
     "cycle",
     "trades",
+    "diagnostics_v2",
 })
 
 
@@ -145,15 +150,15 @@ def _merge_export_config(loaded_config: Dict[str, Any], config: Dict[str, Any]) 
             config["export"][key] = _validate_strict_bool(
                 export_raw[key], f"export.{key}"
             )
+    if "diagnostics_v2_flags" in export_raw:
+        flags_raw = export_raw["diagnostics_v2_flags"]
+        resolve_diagnostics_v2_flags(flags_raw)
+        config["export"]["diagnostics_v2_flags"] = dict(flags_raw)
 
 
-def _resolve_collect_filter_diagnostics(export_config: Mapping[str, Any]) -> bool:
-    return bool(
-        export_config.get("diagnostics")
-        or export_config.get("signals")
-        or export_config.get("cycle")
-        or export_config.get("trades")
-    )
+def _resolve_collect_filter_diagnostics(export_config: Dict[str, Any]) -> bool:
+    """Backward-compatible wrapper for older tests/callers."""
+    return resolve_collect_filter_diagnostics(export_config)
 
 
 def parse_args(args=None) -> argparse.Namespace:
@@ -359,6 +364,8 @@ def load_tester_config(
             "cycle": True,
             "trades": True,
             "false_start_max_bars": DEFAULT_FALSE_START_MAX_BARS,
+            "diagnostics_v2": False,
+            "diagnostics_v2_flags": {},
         },
         # Phase 2 (WP-T2): trade_filter is None when the YAML block is absent
         # (Appendix A v1.1 §11.1 baseline — filter disabled, baseline preserved).
@@ -523,6 +530,7 @@ def load_tester_config(
     print(
         f"  export.false_start_max_bars: {config['export']['false_start_max_bars']}"
     )
+    print(f"  export.diagnostics_v2: {config['export']['diagnostics_v2']}")
     if config["trade_filter"] is not None:
         tf_status = "enabled" if config["trade_filter"].enabled else "disabled"
         tf_type = config["trade_filter"].type or "<unset>"
@@ -653,7 +661,9 @@ def run_backtest_with_df(
 
     # Merge CLI and config
     params = merge_cli_and_config(args, config)
-    collect_filter_diagnostics = _resolve_collect_filter_diagnostics(
+    params["export"].setdefault("diagnostics_v2", False)
+    params["export"].setdefault("diagnostics_v2_flags", {})
+    collect_filter_diagnostics = resolve_collect_filter_diagnostics(
         params["export"]
     )
 
@@ -865,6 +875,8 @@ def run_backtest_with_df(
             export_false_start=params["export"]["false_start"],
             export_cycle=params["export"]["cycle"],
             export_trades=params["export"]["trades"],
+            export_diagnostics_v2=params["export"]["diagnostics_v2"],
+            diagnostics_v2_flags=params["export"]["diagnostics_v2_flags"],
             add_timestamp=add_export_timestamp,
         )
 

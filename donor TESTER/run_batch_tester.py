@@ -87,6 +87,9 @@ from supertrend_optimizer.io.excel_tester import (  # noqa: E402
     export_tester_results,
     export_equal_blocks_results,
 )
+from supertrend_optimizer.io.diagnostics_v2 import (  # noqa: E402
+    resolve_collect_filter_diagnostics,
+)
 from supertrend_optimizer.core.volume_metrics import (  # noqa: E402
     _warn_if_volume_baseline_window_large,
     build_volume_global_metrics,
@@ -288,7 +291,13 @@ def main() -> None:
 
         params = copy.deepcopy(base_params)
         params["segmentation"]["mode"] = seg_mode
+        params["export"].setdefault("diagnostics_v2", False)
+        params["export"].setdefault("diagnostics_v2_flags", {})
         n_parts = params["segmentation"]["n_parts"]
+        collect_filter_diagnostics = resolve_collect_filter_diagnostics(
+            params["export"],
+            preserve_legacy_batch_default=True,
+        )
 
         try:
             if seg_mode == "equal_blocks":
@@ -345,6 +354,7 @@ def main() -> None:
                     zigzag_global_stats=zigzag_global_stats,
                     volume_runtime=full_volume_runtime,
                     include_period_splits=params["period"],
+                    collect_filter_diagnostics=collect_filter_diagnostics,
                 )
                 for r in results:
                     print(
@@ -385,6 +395,8 @@ def main() -> None:
                     export_false_start=params["export"]["false_start"],
                     export_cycle=params["export"]["cycle"],
                     export_trades=params["export"]["trades"],
+                    export_diagnostics_v2=params["export"]["diagnostics_v2"],
+                    diagnostics_v2_flags=params["export"]["diagnostics_v2_flags"],
                 )
 
         except (ConfigError, DataValidationError) as e:

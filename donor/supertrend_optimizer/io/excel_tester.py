@@ -2196,6 +2196,47 @@ def _write_tester_config_sheet(
         ws.auto_filter.ref = f"A1:{get_column_letter(n_cols)}1"
 
 
+def _write_diagnostics_v2_sheet(
+    writer: pd.ExcelWriter,
+    sheet_name: str,
+    df: pd.DataFrame,
+) -> None:
+    """Write one diagnostics v2 payload without touching legacy formatting."""
+    from openpyxl.utils import get_column_letter
+
+    max_excel_rows = 1_048_576
+    if len(df) + 1 > max_excel_rows:
+        raise ValueError(
+            f"{sheet_name} has {len(df)} data rows and exceeds Excel's row limit"
+        )
+
+    out = df.copy(deep=False)
+    for col in out.columns:
+        series = out[col]
+        if isinstance(series.dtype, pd.DatetimeTZDtype):
+            out[col] = series.dt.tz_localize(None)
+        elif series.dtype == "object":
+            out[col] = series.map(_excel_safe_datetime_value)
+
+    safe_sheet_name = sheet_name[:31]
+    out.to_excel(writer, sheet_name=safe_sheet_name, index=False)
+
+    ws = writer.sheets[safe_sheet_name]
+    n_cols = len(out.columns)
+    if n_cols == 0:
+        return
+
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:{get_column_letter(n_cols)}{max(len(out) + 1, 1)}"
+    for col_idx, col_name in enumerate(out.columns, start=1):
+        values = out[col_name].head(200).tolist()
+        max_width = max([len(str(col_name)), *(len(str(value)) for value in values)])
+        ws.column_dimensions[get_column_letter(col_idx)].width = min(
+            max(max_width + 2, 8),
+            60,
+        )
+
+
 def export_tester_results(
     period_results: List[PeriodResult],
     output_path: str,
@@ -2214,6 +2255,8 @@ def export_tester_results(
     export_false_start: bool = True,
     export_cycle: bool = True,
     export_trades: bool = True,
+    export_diagnostics_v2: bool = False,
+    diagnostics_v2_flags: Optional[Mapping[str, bool]] = None,
     add_timestamp: bool = True,
 ) -> str:
     """
@@ -2283,6 +2326,31 @@ def export_tester_results(
         and trade_filter_config.diagnostics is not None
         and trade_filter_config.diagnostics.export_trigger_columns
     )
+    pr_100 = next((pr for pr in period_results if pr.period_label == "100%"), None)
+    diagnostics_v2_gate = (
+        filter_enabled
+        and export_diagnostics
+        and export_diagnostics_v2
+        and pr_100 is not None
+    )
+    diagnostics_v2_payloads = []
+    if diagnostics_v2_gate:
+        from supertrend_optimizer.io import diagnostics_v2
+
+        v2_flags = diagnostics_v2.resolve_diagnostics_v2_flags(diagnostics_v2_flags)
+        v2_ctx = diagnostics_v2.build_diagnostics_v2_context(
+            period_results,
+            pr_100=pr_100,
+            df=df,
+            signals_df=signals_df,
+            run_metadata=run_metadata_payload,
+            trade_filter_config=trade_filter_config,
+            config_yaml_snapshot=config_yaml_snapshot,
+        )
+        diagnostics_v2_payloads = diagnostics_v2.build_enabled_v2_sheets(
+            v2_ctx,
+            v2_flags,
+        )
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         # ── Tester_Config (always first) ──
@@ -2359,7 +2427,6 @@ def export_tester_results(
             _write_signals_sheet(writer, "Signals", signals_df)
 
         # ── False start sheet ──
-        pr_100 = next((pr for pr in period_results if pr.period_label == "100%"), None)
         trades_100_raw = pr_100.trades_df if pr_100 is not None else None
         if export_false_start:
             signals_for_false_start = signals_df if export_signals else None
@@ -2413,6 +2480,9 @@ def export_tester_results(
             elif export_cycle and volume_enabled and not zigzag_enabled and fd_100 is not None:
                 vol_cycle_df = _build_volume_cycle_sheet_df(fd_100, df, trades_100_raw)
                 _write_cycle_sheet(writer, vol_cycle_df)
+
+        for payload in diagnostics_v2_payloads:
+            _write_diagnostics_v2_sheet(writer, payload.name, payload.df)
 
     return output_path
 

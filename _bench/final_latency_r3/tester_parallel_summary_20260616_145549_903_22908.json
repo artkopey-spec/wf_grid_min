@@ -1,0 +1,14 @@
+[
+  {
+    "config_index": 1,
+    "config_path": "C:\\3.1_wf_grid\\config tester\\modeD_atr_freeze_001_long_sw030_lw0400_mr16_ttl005_hold02.yaml",
+    "status": "ok",
+    "exit_code": 0,
+    "started_at": "2026-06-16T14:55:52",
+    "finished_at": "2026-06-16T14:55:55",
+    "duration_sec": 3.543,
+    "output_path": "C:\\3.1_wf_grid\\_bench\\final_latency_r3\\0001_modeD_atr_freeze_001_long_sw030_lw0400_mr16_ttl005_hold02_20260616_145549_903_22908.xlsx",
+    "log_path": "C:\\3.1_wf_grid\\_bench\\final_latency_r3\\0001_modeD_atr_freeze_001_long_sw030_lw0400_mr16_ttl005_hold02_20260616_145549_903_22908.log",
+    "error_message": ""
+  }
+]

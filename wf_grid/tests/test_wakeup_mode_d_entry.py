@@ -36,6 +36,45 @@ from supertrend_optimizer.utils.enums import ExecutionModel
 from supertrend_optimizer.utils.exceptions import ConfigError
 
 
+MODE_D_WAKEUP_EXPECTED_KEYS = frozenset({
+    "wakeup_regime_active",
+    "wakeup_entry_all_ok",
+    "wakeup_entry_candidate_height_ok",
+    "wakeup_entry_candidate_age_ok",
+    "wakeup_entry_candidate_direction_ok",
+    "wakeup_entry_trade_mode_ok",
+    "wakeup_entry_atr_ok",
+    "wakeup_entry_volume_ok",
+    "wakeup_entry_candidate_height_value",
+    "wakeup_entry_candidate_height_threshold",
+    "wakeup_entry_candidate_age_bars",
+    "wakeup_entry_candidate_leg_direction",
+    "wakeup_entry_atr_ratio",
+    "wakeup_entry_volume_ratio",
+    "wakeup_cycle_age_bars",
+    "wakeup_bars_since_fresh_candidate",
+    "wakeup_cycle_trade_count",
+    "wakeup_exit_ttl_triggered",
+    "wakeup_exit_no_fresh_candidate_triggered",
+    "wakeup_exit_local_median_stop_triggered",
+    "wakeup_exit_cycle_trade_limit_triggered",
+    "wakeup_exit_close_triggered",
+    "wakeup_exit_action_mode",
+    "wakeup_exit_reason",
+    "wakeup_position_action",
+    "wakeup_active_direction",
+    "wakeup_lock_cycle_direction_config",
+    "wakeup_cycle_trade_limit_config",
+})
+
+MODE_D_POSITION_FREEZE_EXPECTED_KEYS = frozenset({
+    "position_freeze_active",
+    "position_freeze_bars_left",
+    "position_freeze_ignored_opposite_st_flip",
+    "position_freeze_release_action",
+})
+
+
 def _cfg(
     *,
     height_enabled: bool = True,
@@ -46,6 +85,7 @@ def _cfg(
     ttl_bars: int = 10,
     no_fresh_enabled: bool = False,
     no_fresh_timeout_bars: int = 3,
+    local_median_stop_enabled: bool = False,
     max_trades_enabled: bool = False,
     max_trades: int | None = None,
     action_mode: str = "block_new_entries",
@@ -95,6 +135,9 @@ def _cfg(
                 max_trades_per_cycle=SimpleNamespace(
                     enabled=max_trades_enabled,
                     max_trades=max_trades,
+                ),
+                local_median_stop=SimpleNamespace(
+                    enabled=local_median_stop_enabled,
                 ),
                 action=SimpleNamespace(mode=action_mode),
             ),
@@ -175,6 +218,21 @@ def _per_bar(
     )
 
 
+def _per_bar_with_lms(
+    *,
+    lms_bar: int = 2,
+    local_median: float = 0.01,
+    available: bool = True,
+    confirmed: bool = True,
+    n: int = 6,
+) -> ZigZagPerBar:
+    per_bar = _per_bar(t=1, n=n)
+    per_bar.confirm_event[lms_bar] = np.int8(1 if confirmed else 0)
+    per_bar.local_median_N[lms_bar] = local_median
+    per_bar.local_median_available[lms_bar] = available
+    return per_bar
+
+
 def _valid_ohlc(n: int = 6) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     close = np.arange(10.0, 10.0 + n, dtype=np.float64)
     high = close + 1.0
@@ -212,6 +270,244 @@ def test_mode_d_collect_filter_diagnostics_false_returns_none_and_same_positions
     assert enabled.filter_diagnostics is not None
     assert disabled.filter_diagnostics is None
     np.testing.assert_array_equal(enabled.positions, disabled.positions)
+
+
+@pytest.mark.parametrize(
+    ("action_mode", "expected_next_pos"),
+    [
+        ("block_new_entries", 1),
+        ("close_position", 0),
+    ],
+)
+def test_mode_d_local_median_stop_fires_on_confirmed_leg_bar(
+    action_mode,
+    expected_next_pos,
+):
+    result = apply(
+        trend=np.zeros(6, dtype=np.int64),
+        trade_mode="both",
+        trade_filter_config=_cfg(
+            ttl_enabled=False,
+            local_median_stop_enabled=True,
+            action_mode=action_mode,
+        ),
+        zigzag_global_stats=_stats(),
+        per_bar=_per_bar_with_lms(lms_bar=2),
+    )
+
+    diag = result.filter_diagnostics
+    assert int(diag["wakeup_exit_local_median_stop_triggered"][2]) == 1
+    assert diag["wakeup_exit_reason"][2] == "local_median_stop"
+    assert diag["wakeup_position_action"][2] == "exit_local_median_stop"
+    assert int(result.positions[3]) == expected_next_pos
+    if action_mode == "block_new_entries":
+        assert diag["trade_filter_state"][2] == "ST_STOPPING"
+    else:
+        assert int(diag["wakeup_exit_close_triggered"][2]) == 1
+
+
+@pytest.mark.parametrize(
+    ("per_bar", "expected_reason"),
+    [
+        (_per_bar_with_lms(local_median=np.nan), "none"),
+        (_per_bar_with_lms(available=False), "none"),
+        (_per_bar_with_lms(confirmed=False), "none"),
+        (_per_bar_with_lms(lms_bar=1), "none"),
+    ],
+)
+def test_mode_d_local_median_stop_fail_open_cases(per_bar, expected_reason):
+    result = apply(
+        trend=np.zeros(6, dtype=np.int64),
+        trade_mode="both",
+        trade_filter_config=_cfg(
+            ttl_enabled=False,
+            local_median_stop_enabled=True,
+        ),
+        zigzag_global_stats=_stats(),
+        per_bar=per_bar,
+    )
+
+    diag = result.filter_diagnostics
+    assert int(np.sum(diag["wakeup_exit_local_median_stop_triggered"])) == 0
+    assert diag["wakeup_exit_reason"][2] == expected_reason
+
+
+def test_mode_d_local_median_stop_does_not_fire_on_reset_bar():
+    result = apply(
+        trend=np.zeros(6, dtype=np.int64),
+        trade_mode="both",
+        trade_filter_config=_cfg(
+            ttl_enabled=False,
+            local_median_stop_enabled=True,
+        ),
+        zigzag_global_stats=_stats(),
+        per_bar=_per_bar_with_lms(lms_bar=2),
+        daily_reset_event=np.array([False, False, True, False, False, False]),
+    )
+
+    diag = result.filter_diagnostics
+    assert int(diag["wakeup_exit_local_median_stop_triggered"][2]) == 0
+    assert diag["wakeup_exit_reason"][2] == "reset"
+
+
+def test_mode_d_local_median_stop_does_not_fire_on_equal_global_median():
+    result = apply(
+        trend=np.zeros(6, dtype=np.int64),
+        trade_mode="both",
+        trade_filter_config=_cfg(
+            ttl_enabled=False,
+            local_median_stop_enabled=True,
+        ),
+        zigzag_global_stats=_stats(),
+        per_bar=_per_bar_with_lms(lms_bar=2, local_median=0.05),
+    )
+
+    diag = result.filter_diagnostics
+    assert int(diag["wakeup_exit_local_median_stop_triggered"][2]) == 0
+    assert diag["wakeup_exit_reason"][2] == "none"
+
+
+def test_mode_d_local_median_stop_priority_between_no_fresh_and_cycle_limit():
+    ttl_result = apply(
+        trend=np.zeros(6, dtype=np.int64),
+        trade_mode="both",
+        trade_filter_config=_cfg(
+            ttl_bars=1,
+            local_median_stop_enabled=True,
+        ),
+        zigzag_global_stats=_stats(),
+        per_bar=_per_bar_with_lms(lms_bar=2),
+    )
+    assert ttl_result.filter_diagnostics["wakeup_exit_reason"][2] == "ttl"
+    assert int(
+        ttl_result.filter_diagnostics[
+            "wakeup_exit_local_median_stop_triggered"
+        ][2]
+    ) == 0
+
+    no_fresh_result = apply(
+        trend=np.zeros(6, dtype=np.int64),
+        trade_mode="both",
+        trade_filter_config=_cfg(
+            ttl_enabled=False,
+            no_fresh_enabled=True,
+            no_fresh_timeout_bars=2,
+            local_median_stop_enabled=True,
+        ),
+        zigzag_global_stats=_stats(no_fresh_threshold=0.20),
+        per_bar=_per_bar_with_lms(lms_bar=2),
+    )
+    assert (
+        no_fresh_result.filter_diagnostics["wakeup_exit_reason"][2]
+        == "no_fresh_candidate"
+    )
+    assert int(
+        no_fresh_result.filter_diagnostics[
+            "wakeup_exit_local_median_stop_triggered"
+        ][2]
+    ) == 0
+
+    no_fresh_not_satisfied_result = apply(
+        trend=np.zeros(6, dtype=np.int64),
+        trade_mode="both",
+        trade_filter_config=_cfg(
+            ttl_enabled=False,
+            no_fresh_enabled=True,
+            no_fresh_timeout_bars=5,
+            local_median_stop_enabled=True,
+        ),
+        zigzag_global_stats=_stats(no_fresh_threshold=0.20),
+        per_bar=_per_bar_with_lms(lms_bar=2),
+    )
+    assert (
+        no_fresh_not_satisfied_result.filter_diagnostics[
+            "wakeup_bars_since_fresh_candidate"
+        ][2]
+        == 2
+    )
+    assert no_fresh_not_satisfied_result.filter_diagnostics["wakeup_exit_reason"][
+        2
+    ] == "local_median_stop"
+    assert int(
+        no_fresh_not_satisfied_result.filter_diagnostics[
+            "wakeup_exit_local_median_stop_triggered"
+        ][2]
+    ) == 1
+    assert int(
+        no_fresh_not_satisfied_result.filter_diagnostics[
+            "wakeup_exit_no_fresh_candidate_triggered"
+        ][2]
+    ) == 0
+
+    cycle_result = apply(
+        trend=np.zeros(6, dtype=np.int64),
+        trade_mode="both",
+        trade_filter_config=_cfg(
+            ttl_enabled=False,
+            local_median_stop_enabled=True,
+            max_trades_enabled=True,
+            max_trades=1,
+        ),
+        zigzag_global_stats=_stats(),
+        per_bar=_per_bar_with_lms(lms_bar=2),
+    )
+    assert cycle_result.filter_diagnostics["wakeup_exit_reason"][2] == (
+        "local_median_stop"
+    )
+    assert int(
+        cycle_result.filter_diagnostics[
+            "wakeup_exit_cycle_trade_limit_triggered"
+        ][2]
+    ) == 0
+
+
+def test_mode_d_local_median_stop_suppresses_same_bar_internal_st_flip():
+    result = apply(
+        trend=np.array([1, 1, -1, -1, -1, -1], dtype=np.int64),
+        trade_mode="both",
+        trade_filter_config=_cfg(
+            ttl_enabled=False,
+            local_median_stop_enabled=True,
+        ),
+        zigzag_global_stats=_stats(),
+        per_bar=_per_bar_with_lms(lms_bar=2),
+    )
+
+    diag = result.filter_diagnostics
+    assert diag["wakeup_exit_reason"][2] == "local_median_stop"
+    assert diag["wakeup_position_action"][2] == "exit_local_median_stop"
+
+
+def test_mode_d_local_median_stop_lite_matches_diagnostics_and_skips_arrays(
+    monkeypatch,
+):
+    kwargs = dict(
+        trend=np.zeros(6, dtype=np.int64),
+        trade_mode="both",
+        trade_filter_config=_cfg(
+            ttl_enabled=False,
+            local_median_stop_enabled=True,
+            action_mode="close_position",
+        ),
+        zigzag_global_stats=_stats(),
+        per_bar=_per_bar_with_lms(lms_bar=2),
+    )
+    diagnostic = apply(**kwargs, collect_filter_diagnostics=True)
+
+    def fail_allocate(*args, **kwargs):
+        raise AssertionError("_allocate_apply_arrays called in lite mode")
+
+    monkeypatch.setattr(
+        zigzag_st_filter_module,
+        "_allocate_apply_arrays",
+        fail_allocate,
+    )
+
+    lite = apply(**kwargs, collect_filter_diagnostics=False)
+
+    assert diagnostic.filter_diagnostics is not None
+    assert lite.filter_diagnostics is None
+    np.testing.assert_array_equal(diagnostic.positions, lite.positions)
 
 
 @pytest.mark.parametrize("max_trades", [1, 3])
@@ -1135,6 +1431,7 @@ def test_mode_d_wakeup_diagnostics_keyset_lengths_and_dtypes():
         "wakeup_cycle_trade_count": np.int64,
         "wakeup_exit_ttl_triggered": np.int8,
         "wakeup_exit_no_fresh_candidate_triggered": np.int8,
+        "wakeup_exit_local_median_stop_triggered": np.int8,
         "wakeup_exit_cycle_trade_limit_triggered": np.int8,
         "wakeup_exit_close_triggered": np.int8,
         "wakeup_exit_action_mode": object,
@@ -1156,7 +1453,14 @@ def test_mode_d_wakeup_diagnostics_keyset_lengths_and_dtypes():
 
     assert set(diag["wakeup_exit_action_mode"]) == {"block_new_entries"}
     assert set(diag["wakeup_exit_reason"]).issubset(
-        {"none", "ttl", "no_fresh_candidate", "cycle_trade_limit", "reset"}
+        {
+            "none",
+            "ttl",
+            "no_fresh_candidate",
+            "local_median_stop",
+            "cycle_trade_limit",
+            "reset",
+        }
     )
     assert set(diag["wakeup_position_action"]).issubset(
         {
@@ -1167,6 +1471,7 @@ def test_mode_d_wakeup_diagnostics_keyset_lengths_and_dtypes():
             "position_freeze_ignored_opposite_st_flip",
             "exit_ttl",
             "exit_no_fresh_candidate",
+            "exit_local_median_stop",
             "exit_cycle_trade_limit",
             "exit_reset",
         }
@@ -1230,43 +1535,22 @@ def test_mode_d_wakeup_diagnostics_keyset_includes_only_expected_wakeup_keys():
         zigzag_global_stats=_stats(),
         per_bar=_per_bar(t=1),
     )
+    non_d_result = apply(
+        trend=np.zeros(6, dtype=np.int64),
+        trade_mode="both",
+        trade_filter_config=_cfg(lock_cycle_direction=True),
+        zigzag_global_stats=_stats_for_mode("A"),
+        per_bar=_per_bar(t=1),
+    )
 
     wakeup_keys = {key for key in result.filter_diagnostics if key.startswith("wakeup_")}
-    assert wakeup_keys == {
-        "wakeup_regime_active",
-        "wakeup_entry_all_ok",
-        "wakeup_entry_candidate_height_ok",
-        "wakeup_entry_candidate_age_ok",
-        "wakeup_entry_candidate_direction_ok",
-        "wakeup_entry_trade_mode_ok",
-        "wakeup_entry_atr_ok",
-        "wakeup_entry_volume_ok",
-        "wakeup_entry_candidate_height_value",
-        "wakeup_entry_candidate_height_threshold",
-        "wakeup_entry_candidate_age_bars",
-        "wakeup_entry_candidate_leg_direction",
-        "wakeup_entry_atr_ratio",
-        "wakeup_entry_volume_ratio",
-        "wakeup_cycle_age_bars",
-        "wakeup_bars_since_fresh_candidate",
-        "wakeup_cycle_trade_count",
-        "wakeup_exit_ttl_triggered",
-        "wakeup_exit_no_fresh_candidate_triggered",
-        "wakeup_exit_cycle_trade_limit_triggered",
-        "wakeup_exit_close_triggered",
-        "wakeup_exit_action_mode",
-        "wakeup_exit_reason",
-        "wakeup_position_action",
-        "wakeup_active_direction",
-        "wakeup_lock_cycle_direction_config",
-        "wakeup_cycle_trade_limit_config",
-    }
-    assert {
-        "position_freeze_active",
-        "position_freeze_bars_left",
-        "position_freeze_ignored_opposite_st_flip",
-        "position_freeze_release_action",
-    }.issubset(result.filter_diagnostics)
+    assert wakeup_keys == MODE_D_WAKEUP_EXPECTED_KEYS
+    assert MODE_D_POSITION_FREEZE_EXPECTED_KEYS.issubset(result.filter_diagnostics)
+    assert set(result.filter_diagnostics) == (
+        set(non_d_result.filter_diagnostics)
+        | MODE_D_WAKEUP_EXPECTED_KEYS
+        | MODE_D_POSITION_FREEZE_EXPECTED_KEYS
+    )
 
 
 def test_mode_d_trade_diagnostics_expose_cycle_reason_and_position_action():
@@ -1297,6 +1581,62 @@ def test_mode_d_trade_diagnostics_expose_cycle_reason_and_position_action():
     assert enriched["exit_reason"].iloc[0] == "wakeup_reverse_on_st_flip"
 
 
+def test_mode_d_trade_diagnostics_expose_local_median_stop_reason():
+    trades = pd.DataFrame(
+        {
+            "trade_id": [1],
+            "entry_index": [1],
+            "exit_index": [3],
+        }
+    )
+    diag = {
+        "trade_filter_state": np.array(
+            ["OFF", "ST_ACTIVE_FREEZE", "ST_ACTIVE_FREEZE", "OFF", "OFF"],
+            dtype=object,
+        ),
+        "trade_filter_trigger_source": np.array(["none"] * 5, dtype=object),
+        "wakeup_exit_reason": np.array(
+            ["none", "none", "local_median_stop", "none", "none"],
+            dtype=object,
+        ),
+        "wakeup_position_action": np.array(["none"] * 5, dtype=object),
+    }
+
+    enriched = attach_trade_filter_diagnostics(trades, diag)
+
+    assert enriched["wakeup_cycle_exit_reason"].iloc[0] == "local_median_stop"
+    assert enriched["exit_reason"].iloc[0] == "wakeup_exit_local_median_stop"
+
+
+def test_mode_d_trade_diagnostics_expose_local_median_stop_position_action():
+    trades = pd.DataFrame(
+        {
+            "trade_id": [1],
+            "entry_index": [1],
+            "exit_index": [3],
+        }
+    )
+    diag = {
+        "trade_filter_state": np.array(
+            ["OFF", "ST_ACTIVE_FREEZE", "ST_ACTIVE_FREEZE", "OFF", "OFF"],
+            dtype=object,
+        ),
+        "trade_filter_trigger_source": np.array(["none"] * 5, dtype=object),
+        "wakeup_exit_reason": np.array(["none"] * 5, dtype=object),
+        "wakeup_position_action": np.array(
+            ["none", "none", "exit_local_median_stop", "none", "none"],
+            dtype=object,
+        ),
+    }
+
+    enriched = attach_trade_filter_diagnostics(trades, diag)
+
+    assert enriched["wakeup_position_action"].iloc[0] == (
+        "exit_local_median_stop"
+    )
+    assert enriched["exit_reason"].iloc[0] == "wakeup_exit_local_median_stop"
+
+
 def test_non_mode_d_output_does_not_include_mode_d_wakeup_diagnostics():
     result = apply(
         trend=np.array([1, 1, -1, -1, 1, 1], dtype=np.int64),
@@ -1313,6 +1653,7 @@ def test_non_mode_d_output_does_not_include_mode_d_wakeup_diagnostics():
     assert "wakeup_lock_cycle_direction_config" not in diag
     assert "wakeup_cycle_trade_count" not in diag
     assert "wakeup_exit_cycle_trade_limit_triggered" not in diag
+    assert "wakeup_exit_local_median_stop_triggered" not in diag
     assert "wakeup_cycle_trade_limit_config" not in diag
     assert "wakeup_exit_reason" not in diag
 
@@ -1359,6 +1700,7 @@ def test_mode_d_tester_summary_is_wakeup_mode_aware():
     assert summary["wakeup_starts_count"] == 1
     assert summary["wakeup_entry_attempts_count"] == 1
     assert summary["wakeup_exit_ttl_count"] == 1
+    assert summary["wakeup_exit_local_median_stop_count"] == 0
     assert summary["wakeup_exit_close_count"] == 1
     assert summary["wakeup_reverse_on_st_flip_count"] == 0
     assert summary["wakeup_flat_on_disallowed_st_flip_count"] == 0
@@ -1478,6 +1820,49 @@ def test_mode_d_cycle_trade_limit_summary_builders_emit_no_new_counter():
     assert "wakeup_exit_cycle_trade_limit_count" not in set(period_df.columns)
 
 
+def test_mode_d_local_median_stop_summary_counts_reason_and_close_action():
+    cfg = _cfg(
+        ttl_enabled=False,
+        local_median_stop_enabled=True,
+        action_mode="close_position",
+    )
+    stats = _stats()
+    result = apply(
+        trend=np.zeros(5, dtype=np.int64),
+        trade_mode="both",
+        trade_filter_config=cfg,
+        zigzag_global_stats=stats,
+        per_bar=_per_bar_with_lms(lms_bar=2, n=5),
+    )
+    root_cfg = SimpleNamespace(
+        enabled=True,
+        zigzag=SimpleNamespace(
+            enabled=True,
+            reversal_threshold=0.01,
+            local_window=2,
+        ),
+        lifecycle=cfg.lifecycle,
+        wakeup_regime=cfg.wakeup_regime,
+    )
+    bt_result = SimpleNamespace(
+        filter_diagnostics=result.filter_diagnostics,
+        trend=np.zeros(5, dtype=np.int64),
+        trade_mode="both",
+        positions=result.positions,
+        trades_df=None,
+    )
+
+    summary = _build_filter_diagnostics_summary(
+        bt_result,
+        root_cfg,
+        stats,
+        global_offset=0,
+    )
+
+    assert summary["wakeup_exit_local_median_stop_count"] == 1
+    assert summary["wakeup_exit_close_count"] == 1
+
+
 def test_mode_d_tester_summary_counts_locked_both_position_actions():
     cfg = _cfg(ttl_bars=10, lock_cycle_direction=True)
     stats = _stats()
@@ -1586,6 +1971,7 @@ def test_mode_d_excel_display_names_and_filters_summary_rows():
         "wakeup_cycle_trade_count",
         "wakeup_exit_ttl_triggered",
         "wakeup_exit_no_fresh_candidate_triggered",
+        "wakeup_exit_local_median_stop_triggered",
         "wakeup_exit_cycle_trade_limit_triggered",
         "wakeup_exit_close_triggered",
         "wakeup_exit_action_mode",
@@ -1614,6 +2000,12 @@ def test_mode_d_excel_display_names_and_filters_summary_rows():
     )
     assert (
         FILTER_DIAGNOSTICS_100_DISPLAY_NAMES[
+            "wakeup_exit_local_median_stop_triggered"
+        ]
+        == "Wakeup Exit Local Median Stop Triggered"
+    )
+    assert (
+        FILTER_DIAGNOSTICS_100_DISPLAY_NAMES[
             "wakeup_exit_cycle_trade_limit_triggered"
         ]
         == "Wakeup Exit Cycle Trade Limit Triggered"
@@ -1635,6 +2027,7 @@ def test_mode_d_excel_display_names_and_filters_summary_rows():
         "wakeup_entry_attempts_count": 3,
         "wakeup_exit_ttl_count": 1,
         "wakeup_exit_no_fresh_candidate_count": 1,
+        "wakeup_exit_local_median_stop_count": 2,
         "wakeup_exit_close_count": 0,
         "wakeup_exit_reset_count": 1,
         "wakeup_exit_opposite_st_flip_count": 1,
@@ -1677,6 +2070,7 @@ def test_mode_d_excel_display_names_and_filters_summary_rows():
     assert row["Wakeup Entry Attempts"] == 3
     assert row["Wakeup Exit TTL"] == 1
     assert row["Wakeup Exit No Fresh Candidate"] == 1
+    assert row["Wakeup Exit Local Median Stop"] == 2
     assert row["Wakeup Exit Close"] == 0
     assert row["Wakeup Exit Reset"] == 1
     assert row["Wakeup Exit Opposite ST Flip"] == 1

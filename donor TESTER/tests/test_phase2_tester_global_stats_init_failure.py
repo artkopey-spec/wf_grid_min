@@ -57,6 +57,71 @@ def _make_enabled_cfg():
     )
 
 
+def _make_mode_d_lms_only_cfg():
+    from supertrend_optimizer.core.trade_filter_config import (
+        TradeFilterConfig, TradeFilterZigZagConfig, TradeFilterLifecycleConfig,
+        TradeFilterDiagnosticsConfig, TradeFilterWakeupRegimeConfig,
+        TradeFilterWakeupEntryConfig, TradeFilterWakeupCandidateHeightConfig,
+        TradeFilterWakeupCandidateAgeConfig, TradeFilterWakeupAtrExpansionConfig,
+        TradeFilterWakeupVolumeExpansionConfig, TradeFilterWakeupExitConfig,
+        TradeFilterWakeupTtlExitConfig,
+        TradeFilterWakeupNoFreshCandidateExitConfig,
+        TradeFilterWakeupMaxTradesPerCycleConfig,
+        TradeFilterWakeupLocalMedianStopExitConfig,
+        TradeFilterWakeupExitActionConfig,
+    )
+    return TradeFilterConfig(
+        enabled=True,
+        type="zigzag_st_mode",
+        zigzag=TradeFilterZigZagConfig(
+            enabled=True,
+            mode="D",
+            reversal_threshold=0.03,
+            local_window=5,
+            candidate_trigger_threshold=0.04,
+        ),
+        lifecycle=TradeFilterLifecycleConfig(
+            freeze_confirmed_legs=0,
+            stop_check="confirm_bar_only",
+            stopping_exit="opposite_st_flip",
+            exit_off_mode="exit C",
+        ),
+        diagnostics=TradeFilterDiagnosticsConfig(
+            export_state_columns=True,
+            export_trigger_columns=True,
+        ),
+        wakeup_regime=TradeFilterWakeupRegimeConfig(
+            enabled=True,
+            entry=TradeFilterWakeupEntryConfig(
+                candidate_height=TradeFilterWakeupCandidateHeightConfig(
+                    enabled=True,
+                    quantile=0.65,
+                ),
+                candidate_age=TradeFilterWakeupCandidateAgeConfig(enabled=False),
+                atr_expansion=TradeFilterWakeupAtrExpansionConfig(enabled=False),
+                volume_expansion=TradeFilterWakeupVolumeExpansionConfig(
+                    enabled=False,
+                ),
+            ),
+            exit=TradeFilterWakeupExitConfig(
+                ttl=TradeFilterWakeupTtlExitConfig(enabled=False),
+                no_fresh_candidate=TradeFilterWakeupNoFreshCandidateExitConfig(
+                    enabled=False,
+                ),
+                max_trades_per_cycle=TradeFilterWakeupMaxTradesPerCycleConfig(
+                    enabled=False,
+                ),
+                local_median_stop=TradeFilterWakeupLocalMedianStopExitConfig(
+                    enabled=True,
+                ),
+                action=TradeFilterWakeupExitActionConfig(
+                    mode="block_new_entries",
+                ),
+            ),
+        ),
+    )
+
+
 class TestGlobalStatsInitFailure:
     """Fail-fast gates for invalid filter init (#22, plan §12.3)."""
 
@@ -169,3 +234,23 @@ class TestGlobalStatsInitFailure:
             )
         # result must remain None — ConfigError raised before returning
         assert result is None
+
+    def test_mode_d_local_median_stop_only_has_no_no_fresh_threshold(self) -> None:
+        from supertrend_optimizer.core.zigzag_st_filter import build_zigzag_global_stats
+
+        close = np.array(
+            [
+                100.0, 110.0, 100.0, 111.0, 100.0,
+                112.0, 100.0, 113.0, 100.0, 114.0,
+                100.0, 115.0, 100.0, 116.0, 100.0,
+                117.0, 100.0, 118.0, 100.0, 119.0,
+                100.0, 120.0, 100.0, 121.0, 100.0,
+            ],
+            dtype=np.float64,
+        )
+        stats = build_zigzag_global_stats(close, _make_mode_d_lms_only_cfg())
+
+        assert np.isfinite(stats.global_median)
+        assert np.isfinite(stats.candidate_trigger_threshold)
+        assert stats.wakeup_entry_candidate_height_threshold is not None
+        assert stats.wakeup_no_fresh_candidate_height_threshold is None

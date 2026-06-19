@@ -1106,6 +1106,7 @@ class TestWakeupWhitelistPhase0Schema:
             "trade_filter.wakeup_regime.exit.ttl",
             "trade_filter.wakeup_regime.exit.no_fresh_candidate",
             "trade_filter.wakeup_regime.exit.max_trades_per_cycle",
+            "trade_filter.wakeup_regime.exit.local_median_stop",
             "trade_filter.wakeup_regime.exit.action",
             "trade_filter.wakeup_regime.position_freeze",
         ]
@@ -1348,6 +1349,12 @@ class TestWakeupPhase0Validation:
         assert cfg.enabled is False
         assert cfg.max_trades is None
 
+    def test_wakeup_local_median_stop_absent_defaults_disabled(self):
+        tf = _build_tf(_mode_d_raw())
+
+        cfg = tf.wakeup_regime.exit.local_median_stop
+        assert cfg.enabled is False
+
     def test_tester_accepts_wakeup_max_trades_per_cycle(self):
         raw = _mode_d_raw()
         raw["wakeup_regime"]["exit"]["max_trades_per_cycle"] = {
@@ -1359,6 +1366,59 @@ class TestWakeupPhase0Validation:
 
         assert errors == []
         assert ekeys == []
+
+    def test_tester_accepts_wakeup_local_median_stop_as_only_exit_condition(self):
+        raw = _mode_d_raw()
+        raw["wakeup_regime"]["exit"]["ttl"]["enabled"] = False
+        raw["wakeup_regime"]["exit"]["no_fresh_candidate"]["enabled"] = False
+        raw["wakeup_regime"]["exit"]["local_median_stop"] = {"enabled": True}
+
+        errors, ekeys = _run_phase0_raw(raw, "tester")
+
+        assert errors == []
+        assert ekeys == []
+
+    @pytest.mark.parametrize("value", ["yes", 1, None])
+    def test_wakeup_local_median_stop_enabled_rejects_non_bool_values(self, value):
+        raw = _mode_d_raw()
+        raw["wakeup_regime"]["exit"]["local_median_stop"] = {"enabled": value}
+
+        errors, _ = _run_phase0_raw(raw, "tester")
+
+        assert any(
+            "trade_filter.wakeup_regime.exit.local_median_stop.enabled must be bool"
+            in err
+            for err in errors
+        ), errors
+
+    def test_wakeup_local_median_stop_unknown_key_rejected(self):
+        raw = {"trade_filter": _mode_d_raw()}
+        raw["trade_filter"]["wakeup_regime"]["exit"]["local_median_stop"] = {
+            "enabled": True,
+            "surprise": True,
+        }
+
+        errors = _collect_unknown(raw["trade_filter"])
+
+        assert (
+            "unknown config key: "
+            "'trade_filter.wakeup_regime.exit.local_median_stop.surprise'"
+        ) in errors
+
+    @pytest.mark.parametrize("value", [True, []])
+    def test_wakeup_local_median_stop_malformed_shape_rejected_by_unknown_phase(
+        self,
+        value,
+    ):
+        raw = {"trade_filter": _mode_d_raw()}
+        raw["trade_filter"]["wakeup_regime"]["exit"]["local_median_stop"] = value
+
+        errors = _collect_unknown(raw["trade_filter"])
+
+        assert (
+            "trade_filter.wakeup_regime.exit.local_median_stop "
+            f"must be a YAML mapping, got {type(value).__name__!r}"
+        ) in errors
 
     def test_tester_accepts_wakeup_max_trades_as_only_exit_condition(self):
         raw = _mode_d_raw()
@@ -1515,6 +1575,26 @@ class TestWakeupPhase0Validation:
     def test_wf_grid_rejects_mode_d_exit_c_wakeup_with_lock_via_shared_gate(self):
         raw = _mode_d_raw()
         raw["wakeup_regime"]["lock_cycle_direction"] = True
+
+        _, ekeys = _run_phase0_raw(raw, "wf_grid")
+
+        _superset_assert(
+            ekeys,
+            {
+                "mode_d_unsupported_pipeline",
+                "exit_c_unsupported_pipeline",
+                "wakeup_regime_unsupported_pipeline",
+            },
+        )
+
+    def test_wf_grid_rejects_mode_d_exit_c_wakeup_with_local_median_stop(self):
+        raw = _mode_d_raw()
+        raw["wakeup_regime"]["exit"]["ttl"]["enabled"] = False
+        raw["wakeup_regime"]["exit"]["no_fresh_candidate"]["enabled"] = False
+        raw["wakeup_regime"]["exit"]["max_trades_per_cycle"] = {
+            "enabled": False,
+        }
+        raw["wakeup_regime"]["exit"]["local_median_stop"] = {"enabled": True}
 
         _, ekeys = _run_phase0_raw(raw, "wf_grid")
 

@@ -50,6 +50,7 @@ from wf_grid.config.schema import (
     TradeFilterWakeupEntryConfig,
     TradeFilterWakeupExitActionConfig,
     TradeFilterWakeupExitConfig,
+    TradeFilterWakeupLocalMedianStopExitConfig,
     TradeFilterWakeupNoFreshCandidateExitConfig,
     TradeFilterWakeupRegimeConfig,
     TradeFilterWakeupTtlExitConfig,
@@ -134,6 +135,8 @@ def _make_mode_d_filter_config(
     entry_quantile: float = 0.65,
     no_fresh_enabled: bool = True,
     no_fresh_quantile: float = 0.60,
+    ttl_enabled: bool = True,
+    local_median_stop_enabled: bool = False,
     local_window: int = 5,
 ) -> TradeFilterConfig:
     return TradeFilterConfig(
@@ -176,7 +179,7 @@ def _make_mode_d_filter_config(
             ),
             exit=TradeFilterWakeupExitConfig(
                 ttl=TradeFilterWakeupTtlExitConfig(
-                    enabled=True,
+                    enabled=ttl_enabled,
                     bars=45,
                 ),
                 no_fresh_candidate=TradeFilterWakeupNoFreshCandidateExitConfig(
@@ -184,6 +187,9 @@ def _make_mode_d_filter_config(
                     quantile=no_fresh_quantile,
                     max_age_bars=15,
                     timeout_bars=20,
+                ),
+                local_median_stop=TradeFilterWakeupLocalMedianStopExitConfig(
+                    enabled=local_median_stop_enabled,
                 ),
                 action=TradeFilterWakeupExitActionConfig(
                     mode="block_new_entries",
@@ -483,6 +489,20 @@ class TestWakeupGlobalStats:
         stats = build_zigzag_global_stats(MANY_LEG_SAWTOOTH.close, cfg)
 
         assert stats.wakeup_entry_candidate_height_threshold is None
+        assert stats.wakeup_no_fresh_candidate_height_threshold is None
+
+    def test_mode_d_local_median_stop_only_does_not_require_no_fresh_quantile(self):
+        cfg = _make_mode_d_filter_config(
+            ttl_enabled=False,
+            no_fresh_enabled=False,
+            local_median_stop_enabled=True,
+        )
+
+        stats = build_zigzag_global_stats(MANY_LEG_SAWTOOTH.close, cfg)
+
+        assert math.isfinite(stats.global_median)
+        assert math.isfinite(stats.candidate_trigger_threshold)
+        assert stats.wakeup_entry_candidate_height_threshold is not None
         assert stats.wakeup_no_fresh_candidate_height_threshold is None
 
     def test_wakeup_quantile_min_leg_guard_uses_max_local_window_and_ten(self):

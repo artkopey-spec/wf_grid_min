@@ -194,6 +194,7 @@ def test_retained_filter_diagnostics_export_passes_through_wakeup_keys(tmp_path)
                     "wakeup_active_direction": [1, -1],
                     "wakeup_lock_cycle_direction_config": [1, 1],
                     "wakeup_cycle_trade_count": [1, 2],
+                    "wakeup_exit_local_median_stop_triggered": [0, 1],
                     "wakeup_exit_cycle_trade_limit_triggered": [0, 1],
                     "wakeup_cycle_trade_limit_config": [2, 2],
                 },
@@ -208,12 +209,14 @@ def test_retained_filter_diagnostics_export_passes_through_wakeup_keys(tmp_path)
     assert "wakeup_active_direction" in df.columns
     assert "wakeup_lock_cycle_direction_config" in df.columns
     assert "wakeup_cycle_trade_count" in df.columns
+    assert "wakeup_exit_local_median_stop_triggered" in df.columns
     assert "wakeup_exit_cycle_trade_limit_triggered" in df.columns
     assert "wakeup_cycle_trade_limit_config" in df.columns
     assert df["wakeup_position_action"].tolist() == ["none", "reverse_on_st_flip"]
     assert df["wakeup_active_direction"].tolist() == [1, -1]
     assert df["wakeup_lock_cycle_direction_config"].tolist() == [1, 1]
     assert df["wakeup_cycle_trade_count"].tolist() == [1, 2]
+    assert df["wakeup_exit_local_median_stop_triggered"].tolist() == [0, 1]
     assert df["wakeup_exit_cycle_trade_limit_triggered"].tolist() == [0, 1]
     assert df["wakeup_cycle_trade_limit_config"].tolist() == [2, 2]
 

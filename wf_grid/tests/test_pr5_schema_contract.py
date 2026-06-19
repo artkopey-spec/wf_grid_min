@@ -195,6 +195,7 @@ _EXCEL_PER_BAR_HEADERS_SNAPSHOT: dict = {
     "wakeup_cycle_trade_count":                 "Wakeup Cycle Trade Count",
     "wakeup_exit_ttl_triggered":                "Wakeup Exit TTL Triggered",
     "wakeup_exit_no_fresh_candidate_triggered": "Wakeup Exit No Fresh Candidate Triggered",
+    "wakeup_exit_local_median_stop_triggered":  "Wakeup Exit Local Median Stop Triggered",
     "wakeup_exit_cycle_trade_limit_triggered":  "Wakeup Exit Cycle Trade Limit Triggered",
     "wakeup_exit_close_triggered":              "Wakeup Exit Close Triggered",
     "wakeup_exit_action_mode":                  "Wakeup Exit Action Mode",

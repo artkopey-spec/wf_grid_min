@@ -476,6 +476,9 @@ def _build_wakeup_summary_fields(
         "wakeup_exit_no_fresh_candidate_count": _sum_int8(
             "wakeup_exit_no_fresh_candidate_triggered"
         ),
+        "wakeup_exit_local_median_stop_count": _sum_int8(
+            "wakeup_exit_local_median_stop_triggered"
+        ),
         "wakeup_exit_close_count": _sum_int8("wakeup_exit_close_triggered"),
         "wakeup_exit_reset_count": int(np.sum(exit_reason == "reset")),
         "wakeup_exit_opposite_st_flip_count": int(

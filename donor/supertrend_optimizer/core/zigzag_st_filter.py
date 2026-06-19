@@ -1294,6 +1294,7 @@ class _WakeupExitConfigParts(NamedTuple):
     ttl: object
     no_fresh_candidate: object
     max_trades_per_cycle: object
+    local_median_stop: object
     action: object
 
 
@@ -1308,6 +1309,7 @@ def _resolve_mode_d_wakeup_exit(
         ttl=getattr(exit_cfg, "ttl", None),
         no_fresh_candidate=getattr(exit_cfg, "no_fresh_candidate", None),
         max_trades_per_cycle=getattr(exit_cfg, "max_trades_per_cycle", None),
+        local_median_stop=getattr(exit_cfg, "local_median_stop", None),
         action=getattr(exit_cfg, "action", None),
     )
 
@@ -1317,6 +1319,8 @@ def _wakeup_exit_action_for_reason(reason: str) -> str:
         return "exit_ttl"
     if reason == "no_fresh_candidate":
         return "exit_no_fresh_candidate"
+    if reason == "local_median_stop":
+        return "exit_local_median_stop"
     if reason == "cycle_trade_limit":
         return "exit_cycle_trade_limit"
     raise AssertionError(reason)
@@ -2153,6 +2157,9 @@ def _allocate_apply_arrays(
         "wakeup_cycle_trade_count_arr": np.full(n, -1, dtype=np.int64),
         "wakeup_exit_ttl_triggered_arr": np.zeros(n, dtype=np.int8),
         "wakeup_exit_no_fresh_candidate_triggered_arr": np.zeros(n, dtype=np.int8),
+        "wakeup_exit_local_median_stop_triggered_arr": np.zeros(
+            n, dtype=np.int8
+        ),
         "wakeup_exit_cycle_trade_limit_triggered_arr": np.zeros(
             n, dtype=np.int8
         ),
@@ -2326,6 +2333,9 @@ def _finalize_apply_result(
                 ],
                 "wakeup_exit_no_fresh_candidate_triggered": arrays[
                     "wakeup_exit_no_fresh_candidate_triggered_arr"
+                ],
+                "wakeup_exit_local_median_stop_triggered": arrays[
+                    "wakeup_exit_local_median_stop_triggered_arr"
                 ],
                 "wakeup_exit_cycle_trade_limit_triggered": arrays[
                     "wakeup_exit_cycle_trade_limit_triggered_arr"
@@ -2763,6 +2773,7 @@ def apply(
     wakeup_ttl_cfg = None
     wakeup_no_fresh_cfg = None
     wakeup_max_trades_per_cycle_cfg = None
+    wakeup_local_median_stop_cfg = None
     wakeup_action_cfg = None
     wakeup_atr_ratio = None
     wakeup_volume_ratio = None
@@ -2780,6 +2791,7 @@ def apply(
             wakeup_ttl_cfg,
             wakeup_no_fresh_cfg,
             wakeup_max_trades_per_cycle_cfg,
+            wakeup_local_median_stop_cfg,
             wakeup_action_cfg,
         ) = _resolve_mode_d_wakeup_exit(trade_filter_config)
         wakeup_entry_candidate_height_threshold = getattr(
@@ -2848,6 +2860,13 @@ def apply(
         int(getattr(wakeup_max_trades_per_cycle_cfg, "max_trades"))
         if wakeup_cycle_trade_limit_enabled
         else 0
+    )
+    wakeup_local_median_stop_enabled = (
+        mode_d_enabled
+        and wakeup_regime_cfg is not None
+        and getattr(wakeup_regime_cfg, "enabled", False) is True
+        and wakeup_local_median_stop_cfg is not None
+        and getattr(wakeup_local_median_stop_cfg, "enabled", False) is True
     )
 
     filtered_positions = np.zeros(n, dtype=np.int8)
@@ -2921,6 +2940,9 @@ def apply(
         ]
         wakeup_exit_no_fresh_candidate_triggered_arr = _apply_arrays[
             "wakeup_exit_no_fresh_candidate_triggered_arr"
+        ]
+        wakeup_exit_local_median_stop_triggered_arr = _apply_arrays[
+            "wakeup_exit_local_median_stop_triggered_arr"
         ]
         wakeup_exit_cycle_trade_limit_triggered_arr = _apply_arrays[
             "wakeup_exit_cycle_trade_limit_triggered_arr"
@@ -3264,6 +3286,17 @@ def apply(
                     if diag_enabled:
                         wakeup_exit_no_fresh_candidate_triggered_arr[t] = np.int8(1)
                     wakeup_exit_c_reason_this_bar = "no_fresh_candidate"
+                elif (
+                    wakeup_local_median_stop_enabled
+                    and confirmed
+                    and bool(local_median_available[t])
+                    and math.isfinite(float(local_median_N[t]))
+                    and math.isfinite(global_median)
+                    and float(local_median_N[t]) < global_median
+                ):
+                    if diag_enabled:
+                        wakeup_exit_local_median_stop_triggered_arr[t] = np.int8(1)
+                    wakeup_exit_c_reason_this_bar = "local_median_stop"
                 elif (
                     wakeup_cycle_trade_limit_enabled
                     and cycle_trade_count >= wakeup_cycle_trade_limit_max_trades

@@ -275,6 +275,7 @@ _ALLOWED_KEYS: dict[str, set[str]] = {
         "ttl",
         "no_fresh_candidate",
         "max_trades_per_cycle",
+        "local_median_stop",
         "action",
     },
     "trade_filter.wakeup_regime.exit.ttl": {
@@ -290,6 +291,9 @@ _ALLOWED_KEYS: dict[str, set[str]] = {
     "trade_filter.wakeup_regime.exit.max_trades_per_cycle": {
         "enabled",
         "max_trades",
+    },
+    "trade_filter.wakeup_regime.exit.local_median_stop": {
+        "enabled",
     },
     "trade_filter.wakeup_regime.exit.action": {
         "mode",

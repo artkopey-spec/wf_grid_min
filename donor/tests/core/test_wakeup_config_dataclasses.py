@@ -1,5 +1,6 @@
 from supertrend_optimizer.core import trade_filter_config as tfc
 from supertrend_optimizer.core.trade_filter_config import (
+    TradeFilterWakeupLocalMedianStopExitConfig,
     TradeFilterWakeupPositionFreezeConfig,
     TradeFilterWakeupRegimeConfig,
     collect_raw_user_keys,
@@ -39,6 +40,7 @@ def _raw_with_wakeup_regime():
                     "max_age_bars": 15,
                     "timeout_bars": 20,
                 },
+                "local_median_stop": {"enabled": True},
                 "action": {"mode": "block_new_entries"},
             },
             "position_freeze": {
@@ -63,6 +65,11 @@ def test_build_trade_filter_config_materializes_wakeup_regime_raw_values():
     assert wakeup.entry.volume_expansion.baseline_window == 60
     assert wakeup.exit.ttl.bars == 45
     assert wakeup.exit.no_fresh_candidate.timeout_bars == 20
+    assert isinstance(
+        wakeup.exit.local_median_stop,
+        TradeFilterWakeupLocalMedianStopExitConfig,
+    )
+    assert wakeup.exit.local_median_stop.enabled is True
     assert wakeup.exit.action.mode == "block_new_entries"
     assert isinstance(wakeup.position_freeze, TradeFilterWakeupPositionFreezeConfig)
     assert wakeup.position_freeze.enabled is True
@@ -90,6 +97,7 @@ def test_wakeup_regime_absent_stays_none_and_nested_defaults_are_structural():
     assert wakeup.entry.volume_expansion.min_ratio is None
     assert wakeup.exit.ttl.bars is None
     assert wakeup.exit.no_fresh_candidate.quantile is None
+    assert wakeup.exit.local_median_stop.enabled is False
     assert wakeup.exit.action.mode is None
     assert wakeup.position_freeze.enabled is False
     assert wakeup.position_freeze.min_hold_bars is None
@@ -106,6 +114,7 @@ def test_wakeup_dataclasses_are_exported():
         "TradeFilterWakeupExitConfig",
         "TradeFilterWakeupTtlExitConfig",
         "TradeFilterWakeupNoFreshCandidateExitConfig",
+        "TradeFilterWakeupLocalMedianStopExitConfig",
         "TradeFilterWakeupExitActionConfig",
         "TradeFilterWakeupPositionFreezeConfig",
     }
@@ -131,6 +140,7 @@ def test_shared_allowed_keys_reject_unknown_wakeup_subkeys():
     raw["wakeup_regime"]["entry"]["volume_expansion"]["surprise"] = True
     raw["wakeup_regime"]["exit"]["ttl"]["surprise"] = True
     raw["wakeup_regime"]["exit"]["no_fresh_candidate"]["surprise"] = True
+    raw["wakeup_regime"]["exit"]["local_median_stop"]["surprise"] = True
     raw["wakeup_regime"]["exit"]["action"]["surprise"] = True
     raw["wakeup_regime"]["position_freeze"]["surprise"] = True
 
@@ -149,6 +159,8 @@ def test_shared_allowed_keys_reject_unknown_wakeup_subkeys():
         "unknown config key: 'trade_filter.wakeup_regime.exit.ttl.surprise'",
         "unknown config key: "
         "'trade_filter.wakeup_regime.exit.no_fresh_candidate.surprise'",
+        "unknown config key: "
+        "'trade_filter.wakeup_regime.exit.local_median_stop.surprise'",
         "unknown config key: 'trade_filter.wakeup_regime.exit.action.surprise'",
         "unknown config key: "
         "'trade_filter.wakeup_regime.position_freeze.surprise'",

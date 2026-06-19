@@ -312,6 +312,11 @@ class TradeFilterWakeupMaxTradesPerCycleConfig:
 
 
 @dataclass
+class TradeFilterWakeupLocalMedianStopExitConfig:
+    enabled: object = False
+
+
+@dataclass
 class TradeFilterWakeupExitActionConfig:
     mode: object = None
 
@@ -326,6 +331,9 @@ class TradeFilterWakeupExitConfig:
     )
     max_trades_per_cycle: TradeFilterWakeupMaxTradesPerCycleConfig = field(
         default_factory=TradeFilterWakeupMaxTradesPerCycleConfig
+    )
+    local_median_stop: TradeFilterWakeupLocalMedianStopExitConfig = field(
+        default_factory=TradeFilterWakeupLocalMedianStopExitConfig
     )
     action: TradeFilterWakeupExitActionConfig = field(
         default_factory=TradeFilterWakeupExitActionConfig
@@ -564,7 +572,8 @@ TRADE_FILTER_ALLOWED_KEYS: dict[str, frozenset[str]] = {
         "enabled", "short_window", "baseline_window", "min_ratio",
     }),
     "trade_filter.wakeup_regime.exit": frozenset({
-        "ttl", "no_fresh_candidate", "max_trades_per_cycle", "action",
+        "ttl", "no_fresh_candidate", "max_trades_per_cycle",
+        "local_median_stop", "action",
     }),
     "trade_filter.wakeup_regime.exit.ttl": frozenset({
         "enabled", "bars",
@@ -574,6 +583,9 @@ TRADE_FILTER_ALLOWED_KEYS: dict[str, frozenset[str]] = {
     }),
     "trade_filter.wakeup_regime.exit.max_trades_per_cycle": frozenset({
         "enabled", "max_trades",
+    }),
+    "trade_filter.wakeup_regime.exit.local_median_stop": frozenset({
+        "enabled",
     }),
     "trade_filter.wakeup_regime.exit.action": frozenset({
         "mode",
@@ -758,6 +770,7 @@ def build_trade_filter_config_from_raw(tf_raw: dict) -> TradeFilterConfig:
         ttl_raw: dict = exit_raw.get("ttl") or {}
         no_fresh_raw: dict = exit_raw.get("no_fresh_candidate") or {}
         max_trades_raw: dict = exit_raw.get("max_trades_per_cycle") or {}
+        local_median_stop_raw: dict = exit_raw.get("local_median_stop") or {}
         action_raw: dict = exit_raw.get("action") or {}
         position_freeze_raw = wakeup_raw.get("position_freeze") or {}
         position_freeze_raw_is_mapping = isinstance(position_freeze_raw, dict)
@@ -803,6 +816,9 @@ def build_trade_filter_config_from_raw(tf_raw: dict) -> TradeFilterConfig:
                 max_trades_per_cycle=TradeFilterWakeupMaxTradesPerCycleConfig(
                     enabled=max_trades_raw.get("enabled", False),
                     max_trades=max_trades_raw.get("max_trades", None),
+                ),
+                local_median_stop=TradeFilterWakeupLocalMedianStopExitConfig(
+                    enabled=local_median_stop_raw.get("enabled", False),
                 ),
                 action=TradeFilterWakeupExitActionConfig(
                     mode=action_raw.get("mode", None),
@@ -1953,6 +1969,7 @@ def _validate_wakeup_regime_block(
     ttl_path = exit_key + ("ttl",)
     nf_path = exit_key + ("no_fresh_candidate",)
     mt_path = exit_key + ("max_trades_per_cycle",)
+    lms_path = exit_key + ("local_median_stop",)
     action_path = exit_key + ("action",)
 
     ttl_enabled = _validate_wakeup_component_enabled(
@@ -1963,6 +1980,9 @@ def _validate_wakeup_regime_block(
     )
     max_trades_enabled = _validate_wakeup_component_enabled(
         wakeup_exit.max_trades_per_cycle, mt_path, raw_user_keys, errors
+    )
+    local_median_stop_enabled = _validate_wakeup_component_enabled(
+        wakeup_exit.local_median_stop, lms_path, raw_user_keys, errors
     )
 
     _validate_required_int_ge_one(
@@ -2001,7 +2021,12 @@ def _validate_wakeup_regime_block(
         required=max_trades_enabled,
     )
 
-    if wakeup_enabled and not any((ttl_enabled, nf_enabled, max_trades_enabled)):
+    if wakeup_enabled and not any((
+        ttl_enabled,
+        nf_enabled,
+        max_trades_enabled,
+        local_median_stop_enabled,
+    )):
         errors.append(
             "trade_filter.wakeup_regime requires at least one enabled exit condition"
         )
@@ -2630,6 +2655,7 @@ __all__ = [
     "TradeFilterWakeupTtlExitConfig",
     "TradeFilterWakeupNoFreshCandidateExitConfig",
     "TradeFilterWakeupMaxTradesPerCycleConfig",
+    "TradeFilterWakeupLocalMedianStopExitConfig",
     "TradeFilterWakeupExitActionConfig",
     "TradeFilterWakeupPositionFreezeConfig",
     "validate_trade_filter",

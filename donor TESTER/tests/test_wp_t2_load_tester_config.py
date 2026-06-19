@@ -931,6 +931,48 @@ class TestExitBImmediateOffTesterResolverAndParity:
         assert tf.lifecycle.exit_b_immediate_off is False
 
 
+class TestWakeupLocalMedianStopTesterConfig:
+    def test_mode_d_local_median_stop_only_exit_accepted(self, tmp_path: Path) -> None:
+        block = dedent("""
+            trade_filter:
+              enabled: true
+              type: zigzag_st_mode
+              zigzag:
+                mode: D
+                reversal_threshold: 0.005
+                candidate_trigger_threshold: 0.012
+                local_window: 5
+              lifecycle:
+                freeze_confirmed_legs: 0
+                stop_check: confirm_bar_only
+                stopping_exit: opposite_st_flip
+                exit_off_mode: "exit C"
+              wakeup_regime:
+                enabled: true
+                entry:
+                  candidate_height:
+                    enabled: true
+                    quantile: 0.65
+                exit:
+                  ttl:
+                    enabled: false
+                  no_fresh_candidate:
+                    enabled: false
+                  max_trades_per_cycle:
+                    enabled: false
+                  local_median_stop:
+                    enabled: true
+                  action:
+                    mode: block_new_entries
+        """).strip()
+        cfg = load_tester_config(str(_write_config(tmp_path, block)))
+        tf = cfg["trade_filter"]
+
+        assert tf.wakeup_regime.exit.local_median_stop.enabled is True
+        assert tf.wakeup_regime.exit.ttl.enabled is False
+        assert tf.wakeup_regime.exit.no_fresh_candidate.enabled is False
+
+
 class TestExitBImmediateOffFailureKeysRegistryTester:
     """§10.1.X snapshot: _V3_INIT_FAILURE_KEYS (tester side)."""
 
@@ -1050,6 +1092,8 @@ class TestFastExportConfigParsing:
             "cycle": False,
             "trades": False,
             "false_start_max_bars": 6,
+            "diagnostics_v2": False,
+            "diagnostics_v2_flags": {},
         }
 
     def test_merge_cli_and_config_includes_normalized_fast_flags(

@@ -1,5 +1,21 @@
 # TZ v2: Cycle Sheet Exit-C Reason Attribution
 
+## 0. Runtime Invariants
+
+The implementation relies on these runtime facts from
+`donor/supertrend_optimizer/core/zigzag_st_filter.py`:
+
+- `wakeup_exit_reason` is written at most once per bar/cycle event
+  (`:3105`, `:3425-3472`, `:3662`).
+- A reason on the first `OFF` bar corresponds to `close_position`; the
+  `block_new_entries` path keeps the reason inside the active segment
+  (`:3480-3487`).
+- Reset and Exit-C are mutually exclusive on the same bar through the
+  `not is_reset` guard (`:3426`).
+
+`donor TESTER/tests/conftest.py:33-36` fixes namespace resolution so tests in
+`donor TESTER/tests/` import the mutable `donor/.../excel_tester.py`.
+
 ## 1. Goal
 
 In the tester `cycle` sheet, completed Mode D wakeup cycles must show the raw

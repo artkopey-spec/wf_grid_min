@@ -1,5 +1,8 @@
 # TZ: Cycle Sheet Exit-C Reason Attribution
 
+> Superseded by `docs/cycle_sheet_exit_c_reason_attribution_tz_v2.md`.
+> Implement v2 only; this v1 document is retained for historical context.
+
 ## 1. Goal
 
 In Mode D, the `cycle` sheet must show the real wakeup-cycle termination reason:

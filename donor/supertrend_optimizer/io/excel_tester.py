@@ -253,6 +253,14 @@ CYCLE_SHEET_COLUMNS: Tuple[str, ...] = (
     "% сделок с положительным фин результатом в цикле",
 )
 
+_EXIT_C_REASONS = frozenset({
+    "cycle_take_profit",
+    "ttl",
+    "no_fresh_candidate",
+    "local_median_stop",
+    "cycle_trade_limit",
+})
+
 # Cycle sheet contract for volume-only mode (volume_enabled=True, zigzag_enabled=False).
 # ZigZag-specific fields (legs, medians, thresholds) are intentionally excluded.
 VOLUME_CYCLE_SHEET_COLUMNS: Tuple[str, ...] = (
@@ -418,6 +426,41 @@ def _resolve_cycle_direction(
     return ""
 
 
+def _find_cycle_exit_c_reason(
+    wakeup_exit_reason_arr: np.ndarray,
+    start_bar: int,
+    off_bar: int,
+    n: int,
+) -> Tuple[Optional[str], Optional[int]]:
+    try:
+        arr = np.asarray(wakeup_exit_reason_arr)
+        if arr.ndim == 0 or arr.size == 0 or n <= 0:
+            return None, None
+        end_window = min(int(off_bar), int(n) - 1, len(arr) - 1)
+        start = int(start_bar)
+        if start < 0 or start > end_window:
+            return None, None
+
+        matches: List[Tuple[str, int]] = []
+        for bar in range(start, end_window + 1):
+            value = arr[bar]
+            try:
+                if value is None or pd.isna(value):
+                    continue
+            except (TypeError, ValueError):
+                pass
+            reason = str(value)
+            if reason in _EXIT_C_REASONS:
+                matches.append((reason, bar))
+                if len(matches) > 1:
+                    return None, None
+        if len(matches) == 1:
+            return matches[0]
+        return None, None
+    except Exception:
+        return None, None
+
+
 def _empty_cycle_sheet_df() -> pd.DataFrame:
     return pd.DataFrame(columns=CYCLE_SHEET_COLUMNS)
 
@@ -579,6 +622,24 @@ def _build_cycle_sheet_df(
     # docs/time_filter_plan_v1_final.txt §6.4: backward-compat, may be absent
     _tf_reset_raw = filter_diagnostics.get("time_filter_reset_event")
     time_filter_reset_arr = np.asarray(_tf_reset_raw)[:n] if _tf_reset_raw is not None else None
+    exit_c_attribution_enabled = False
+    wakeup_exit_reason_arr: Optional[np.ndarray] = None
+    try:
+        zigzag_mode_arr = np.asarray(filter_diagnostics.get("zigzag_mode")).ravel()
+        wakeup_exit_reason_raw = filter_diagnostics.get("wakeup_exit_reason")
+        reason_arr = np.asarray(wakeup_exit_reason_raw)
+        if (
+            zigzag_mode_arr.size >= 1
+            and str(zigzag_mode_arr[0]) == "D"
+            and wakeup_exit_reason_raw is not None
+            and reason_arr.ndim > 0
+            and reason_arr.size >= 1
+        ):
+            exit_c_attribution_enabled = True
+            wakeup_exit_reason_arr = reason_arr
+    except Exception:
+        exit_c_attribution_enabled = False
+        wakeup_exit_reason_arr = None
 
     candidate_threshold = _materialize_cycle_candidate_threshold(
         arrays["candidate_trigger_threshold"], n
@@ -607,7 +668,42 @@ def _build_cycle_sheet_df(
     index = df.iloc[:n].index
     rows: List[Dict[str, Any]] = []
     for start_bar, end_bar in _completed_cycle_segments(state_arr):
-        interval = slice(start_bar, end_bar + 1)
+        segment_interval = slice(start_bar, end_bar + 1)
+        off_bar = end_bar + 1
+        exit_c_reason = None
+        exit_reason_bar = None
+        if exit_c_attribution_enabled and wakeup_exit_reason_arr is not None:
+            exit_c_reason, exit_reason_bar = _find_cycle_exit_c_reason(
+                wakeup_exit_reason_arr,
+                start_bar,
+                off_bar,
+                n,
+            )
+
+        # docs/time_filter_plan_v1_final.txt: reset priority remains first.
+        if off_bar < n and int(daily_reset_arr[off_bar]) == 1:
+            end_reason = "daily_reset"
+        elif (
+            off_bar < n
+            and time_filter_reset_arr is not None
+            and int(time_filter_reset_arr[off_bar]) == 1
+        ):
+            end_reason = "time_filter_reset"
+        elif exit_c_reason is not None:
+            end_reason = exit_c_reason
+        else:
+            end_reason = "FSM_OFF"
+
+        leg_end_bar = end_bar
+        if (
+            exit_c_attribution_enabled
+            and exit_c_reason is not None
+            and end_reason == exit_c_reason
+            and exit_reason_bar == off_bar
+            and off_bar < n
+        ):
+            leg_end_bar = off_bar
+        leg_interval = slice(start_bar, leg_end_bar + 1)
         direction = _resolve_cycle_direction(
             trigger_source_arr[start_bar],
             candidate_dir_arr[start_bar],
@@ -615,8 +711,11 @@ def _build_cycle_sheet_df(
             confirmed_legs,
         )
 
-        leg_mask = np.asarray(per_bar.confirm_event[interval]) == 1
-        leg_heights = np.asarray(per_bar.last_confirmed_leg_height_pct[interval], dtype=np.float64)[leg_mask]
+        leg_mask = np.asarray(per_bar.confirm_event[leg_interval]) == 1
+        leg_heights = np.asarray(
+            per_bar.last_confirmed_leg_height_pct[leg_interval],
+            dtype=np.float64,
+        )[leg_mask]
         leg_heights = leg_heights[np.isfinite(leg_heights)]
         legs_count = int(len(leg_heights))
         if legs_count:
@@ -636,9 +735,9 @@ def _build_cycle_sheet_df(
                 if legs_count > 0 else float("nan")
             )
 
-        interval_close = close[interval]
-        interval_high = high[interval]
-        interval_low = low[interval]
+        interval_close = close[segment_interval]
+        interval_high = high[segment_interval]
+        interval_low = low[segment_interval]
         ohlc_valid = bool(
             np.all(np.isfinite(interval_close))
             and np.all(np.isfinite(interval_high))
@@ -665,18 +764,6 @@ def _build_cycle_sheet_df(
             max_move_pct = float("nan")
             max_drawdown_pct = float("nan")
 
-        off_bar = end_bar + 1
-        # docs/time_filter_plan_v1_final.txt §6.4: priority daily_reset > time_filter_reset
-        if off_bar < n and int(daily_reset_arr[off_bar]) == 1:
-            end_reason = "daily_reset"
-        elif (
-            off_bar < n
-            and time_filter_reset_arr is not None
-            and int(time_filter_reset_arr[off_bar]) == 1
-        ):
-            end_reason = "time_filter_reset"
-        else:
-            end_reason = "FSM_OFF"
         cycle_trades = _cycle_trades_for_segment(trades_df, start_bar, end_bar)
 
         rows.append({

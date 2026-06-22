@@ -44,6 +44,19 @@ def _expected_cycle_columns() -> list[str]:
     ]
 
 
+_CYCLE_COLS = _expected_cycle_columns()
+COL_BARS = _CYCLE_COLS[3]
+COL_LEGS = _CYCLE_COLS[4]
+COL_MEDIAN_LEG = _CYCLE_COLS[5]
+COL_CYCLE_SIZE = _CYCLE_COLS[7]
+COL_START_PRICE = _CYCLE_COLS[11]
+COL_END_PRICE = _CYCLE_COLS[12]
+COL_HIGH = _CYCLE_COLS[13]
+COL_LOW = _CYCLE_COLS[14]
+COL_REASON = _CYCLE_COLS[17]
+COL_MAX_LEG = _CYCLE_COLS[18]
+
+
 def _excel_tester_module():
     import supertrend_optimizer.io.excel_tester as excel_tester
 
@@ -100,6 +113,21 @@ def _diagnostics(
         "candidate_leg_direction": np.asarray(candidate_dirs, dtype=np.int8),
         "st_flip_dir": np.full(n, -1, dtype=np.int8),
     }
+
+
+def _enable_mode_d_exit_reason(
+    diag: dict[str, np.ndarray],
+    reasons_by_bar: dict[int, str] | None = None,
+    *,
+    mode: object = "D",
+) -> dict[str, np.ndarray]:
+    n = len(diag["trade_filter_state"])
+    diag["zigzag_mode"] = np.full(n, mode, dtype=object)
+    reasons = np.full(n, "none", dtype=object)
+    for bar, reason in (reasons_by_bar or {}).items():
+        reasons[bar] = reason
+    diag["wakeup_exit_reason"] = reasons
+    return diag
 
 
 def _volume_diagnostics(
@@ -339,6 +367,230 @@ def test_cycle_direction_resolver_contract(source, candidate_dir, legs, expected
     import supertrend_optimizer.io.excel_tester as excel_tester
 
     assert excel_tester._resolve_cycle_direction(source, candidate_dir, 2, legs) == expected
+
+
+def test_exit_c_reason_set_stays_in_sync_with_runtime_exit_c_writers():
+    excel_tester = _excel_tester_module()
+    # Keep this list in sync with zigzag_st_filter.py:3436-3469.
+    runtime_exit_c_reasons = {
+        "cycle_take_profit",
+        "ttl",
+        "no_fresh_candidate",
+        "local_median_stop",
+        "cycle_trade_limit",
+    }
+
+    assert runtime_exit_c_reasons <= excel_tester._EXIT_C_REASONS
+
+
+@pytest.mark.parametrize(
+    "arr,start_bar,off_bar,n,expected",
+    [
+        (np.array([], dtype=object), 0, 1, 2, (None, None)),
+        (np.array(["local_median_stop"], dtype=object), -1, 0, 1, (None, None)),
+        (np.array(["none"], dtype=object), 2, 1, 3, (None, None)),
+        (np.array("local_median_stop", dtype=object), 0, 0, 1, (None, None)),
+        (np.array(["none"], dtype=object), 0, 5, 10, (None, None)),
+        (
+            np.array(["none", "ttl", "none"], dtype=object),
+            0,
+            5,
+            10,
+            ("ttl", 1),
+        ),
+        (
+            np.array(["ttl", "none", "cycle_trade_limit"], dtype=object),
+            0,
+            2,
+            3,
+            (None, None),
+        ),
+    ],
+)
+def test_find_cycle_exit_c_reason_fail_closed_contract(arr, start_bar, off_bar, n, expected):
+    excel_tester = _excel_tester_module()
+
+    assert excel_tester._find_cycle_exit_c_reason(arr, start_bar, off_bar, n) == expected
+
+
+def test_mode_d_exit_c_close_position_off_bar_extends_only_leg_metrics(monkeypatch):
+    excel_tester = _excel_tester_module()
+    _patch_leg_outputs(monkeypatch, excel_tester, confirm_bar=4, height=0.05)
+    states = ["OFF", "ST_ACTIVE_FREEZE", "ST_ACTIVE_MONITORING", "ST_ACTIVE_MONITORING", "OFF"]
+    diag = _enable_mode_d_exit_reason(
+        _diagnostics(
+            states,
+            trigger_sources=["none", "candidate_threshold", "none", "none", "none"],
+            candidate_dirs=[0, 1, 0, 0, 0],
+        ),
+        {4: "local_median_stop"},
+    )
+
+    row = excel_tester._build_cycle_sheet_df(diag, _df(len(states))).iloc[0]
+
+    assert row[COL_REASON] == "local_median_stop"
+    assert row["End bar index"] == 3
+    assert row[COL_BARS] == 3
+    assert row[COL_START_PRICE] == 101.0
+    assert row[COL_END_PRICE] == 103.0
+    assert row[COL_HIGH] == 105.0
+    assert row[COL_LOW] == 99.0
+    assert row[COL_CYCLE_SIZE] == pytest.approx((103.0 - 101.0) / 101.0 * 100.0)
+    assert row[COL_LEGS] == 1
+    assert row[COL_MEDIAN_LEG] == pytest.approx(0.05)
+    assert row[COL_MAX_LEG] == pytest.approx(0.05)
+
+
+def test_mode_d_exit_c_inside_active_segment_does_not_extend_leg_interval(monkeypatch):
+    excel_tester = _excel_tester_module()
+    _patch_leg_outputs(monkeypatch, excel_tester, confirm_bar=4, height=0.05)
+    states = ["OFF", "ST_ACTIVE_FREEZE", "ST_ACTIVE_MONITORING", "ST_ACTIVE_MONITORING", "OFF"]
+    diag = _enable_mode_d_exit_reason(
+        _diagnostics(
+            states,
+            trigger_sources=["none", "candidate_threshold", "none", "none", "none"],
+            candidate_dirs=[0, 1, 0, 0, 0],
+        ),
+        {3: "local_median_stop"},
+    )
+
+    row = excel_tester._build_cycle_sheet_df(diag, _df(len(states))).iloc[0]
+
+    assert row[COL_REASON] == "local_median_stop"
+    assert row[COL_LEGS] == 0
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["ttl", "no_fresh_candidate", "cycle_trade_limit", "cycle_take_profit"],
+)
+def test_mode_d_exit_c_raw_reason_coverage(monkeypatch, reason):
+    excel_tester = _excel_tester_module()
+    _patch_no_legs(monkeypatch, excel_tester)
+    states = ["OFF", "ST_ACTIVE_FREEZE", "OFF"]
+    diag = _enable_mode_d_exit_reason(
+        _diagnostics(
+            states,
+            trigger_sources=["none", "candidate_threshold", "none"],
+            candidate_dirs=[0, 1, 0],
+        ),
+        {2: reason},
+    )
+
+    row = excel_tester._build_cycle_sheet_df(diag, _df(len(states))).iloc[0]
+
+    assert row[COL_REASON] == reason
+
+
+@pytest.mark.parametrize(
+    ("reset_key", "expected_reason"),
+    [
+        ("daily_reset_event", "daily_reset"),
+        ("time_filter_reset_event", "time_filter_reset"),
+    ],
+)
+def test_mode_d_resets_override_exit_c_and_prevent_off_bar_leg_extension(
+    monkeypatch,
+    reset_key,
+    expected_reason,
+):
+    excel_tester = _excel_tester_module()
+    _patch_leg_outputs(monkeypatch, excel_tester, confirm_bar=4, height=0.05)
+    states = ["OFF", "ST_ACTIVE_FREEZE", "ST_ACTIVE_MONITORING", "ST_ACTIVE_MONITORING", "OFF"]
+    diag = _enable_mode_d_exit_reason(
+        _diagnostics(
+            states,
+            trigger_sources=["none", "candidate_threshold", "none", "none", "none"],
+            candidate_dirs=[0, 1, 0, 0, 0],
+        ),
+        {4: "local_median_stop"},
+    )
+    if reset_key == "daily_reset_event":
+        diag["daily_reset_event"] = np.array([0, 0, 0, 0, 1], dtype=np.int8)
+    else:
+        diag["time_filter_reset_event"] = np.array([0, 0, 0, 0, 1], dtype=np.int8)
+
+    row = excel_tester._build_cycle_sheet_df(diag, _df(len(states))).iloc[0]
+
+    assert row[COL_REASON] == expected_reason
+    assert row[COL_LEGS] == 0
+
+
+@pytest.mark.parametrize(
+    ("mode,wakeup_reason"),
+    [
+        pytest.param("C", "local_median_stop", id="non_d_guard"),
+        pytest.param("D", None, id="legacy_without_reason"),
+    ],
+)
+def test_exit_c_attribution_guards_keep_legacy_fsm_off(monkeypatch, mode, wakeup_reason):
+    excel_tester = _excel_tester_module()
+    _patch_leg_outputs(monkeypatch, excel_tester, confirm_bar=2, height=0.05)
+    states = ["OFF", "ST_ACTIVE_FREEZE", "OFF"]
+    diag = _diagnostics(
+        states,
+        trigger_sources=["none", "candidate_threshold", "none"],
+        candidate_dirs=[0, 1, 0],
+    )
+    diag["zigzag_mode"] = np.full(len(states), mode, dtype=object)
+    if wakeup_reason is not None:
+        diag["wakeup_exit_reason"] = np.array(["none", "none", wakeup_reason], dtype=object)
+
+    row = excel_tester._build_cycle_sheet_df(diag, _df(len(states))).iloc[0]
+
+    assert row[COL_REASON] == "FSM_OFF"
+    assert row[COL_LEGS] == 0
+
+
+# Defensive synthetic cases: runtime invariants should prevent these shapes,
+# but the exporter must fail closed when optional diagnostics drift or corrupt.
+def test_exit_c_multiple_reasons_fail_closed_to_fsm_off(monkeypatch):
+    excel_tester = _excel_tester_module()
+    _patch_leg_outputs(monkeypatch, excel_tester, confirm_bar=3, height=0.05)
+    states = ["OFF", "ST_ACTIVE_FREEZE", "ST_ACTIVE_MONITORING", "OFF"]
+    diag = _enable_mode_d_exit_reason(
+        _diagnostics(
+            states,
+            trigger_sources=["none", "candidate_threshold", "none", "none"],
+            candidate_dirs=[0, 1, 0, 0],
+        ),
+        {1: "ttl", 3: "local_median_stop"},
+    )
+
+    row = excel_tester._build_cycle_sheet_df(diag, _df(len(states))).iloc[0]
+
+    assert row[COL_REASON] == "FSM_OFF"
+    assert row[COL_LEGS] == 0
+
+
+@pytest.mark.parametrize(
+    ("zigzag_mode", "wakeup_exit_reason"),
+    [
+        (np.array(["D"], dtype=object), np.array(["none"], dtype=object)),
+        (np.array([], dtype=object), np.array(["none", "none", "local_median_stop"], dtype=object)),
+        (np.array(["D"], dtype=object), "local_median_stop"),
+    ],
+)
+def test_exit_c_malformed_optional_diagnostics_disable_attribution(
+    monkeypatch,
+    zigzag_mode,
+    wakeup_exit_reason,
+):
+    excel_tester = _excel_tester_module()
+    _patch_leg_outputs(monkeypatch, excel_tester, confirm_bar=2, height=0.05)
+    states = ["OFF", "ST_ACTIVE_FREEZE", "OFF"]
+    diag = _diagnostics(
+        states,
+        trigger_sources=["none", "candidate_threshold", "none"],
+        candidate_dirs=[0, 1, 0],
+    )
+    diag["zigzag_mode"] = zigzag_mode
+    diag["wakeup_exit_reason"] = wakeup_exit_reason
+
+    row = excel_tester._build_cycle_sheet_df(diag, _df(len(states))).iloc[0]
+
+    assert row[COL_REASON] == "FSM_OFF"
+    assert row[COL_LEGS] == 0
 
 
 def test_headers_contract_and_empty_builder_output(monkeypatch):

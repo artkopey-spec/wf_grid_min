@@ -1114,6 +1114,9 @@ class TestWakeupWhitelistPhase0Schema:
         for path in wakeup_paths:
             assert frozenset(wf_allowed[path]) == shared_allowed[path]
 
+        assert "direction_mode" in wf_allowed["trade_filter.wakeup_regime.entry"]
+        assert "direction_mode" in shared_allowed["trade_filter.wakeup_regime.entry"]
+
     def test_disabled_filter_known_wakeup_keys_reach_shared_wf_grid_reject(self, tmp_path):
         yaml = _MINIMAL_BASE + """\
 trade_filter:
@@ -1173,6 +1176,37 @@ trade_filter:
             yaml,
             "unknown config key: 'trade_filter.wakeup_regime.entry.candidate_height.surprise'",
         )
+
+    def test_wf_grid_still_rejects_wakeup_regime_with_direction_mode(self, tmp_path):
+        yaml = _MINIMAL_BASE + """\
+trade_filter:
+  enabled: true
+  type: zigzag_st_mode
+  zigzag:
+    mode: D
+    reversal_threshold: 0.005
+    candidate_trigger_threshold: 0.012
+    local_window: 5
+  lifecycle:
+    freeze_confirmed_legs: 3
+    stop_check: confirm_bar_only
+    stopping_exit: opposite_st_flip
+    exit_off_mode: exit C
+  wakeup_regime:
+    enabled: true
+    entry:
+      direction_mode: inverse
+      candidate_height:
+        enabled: true
+        quantile: 0.65
+    exit:
+      ttl:
+        enabled: true
+        bars: 45
+      action:
+        mode: block_new_entries
+"""
+        _assert_error(tmp_path, yaml, "wakeup_regime is not supported by wf_grid")
 
 
 # ===========================================================================
@@ -1322,10 +1356,45 @@ class TestWakeupPhase0Validation:
 
         assert tf.wakeup_regime.lock_cycle_direction is False
 
+    def test_wakeup_direction_mode_absent_defaults_normal(self):
+        tf = _build_tf(_mode_d_raw())
+
+        assert tf.wakeup_regime.entry.direction_mode == "normal"
+
     def test_tester_accepts_mode_d_exit_c_wakeup_block_new_entries(self):
         errors, ekeys = _run_phase0_raw(_mode_d_raw("block_new_entries"), "tester")
         assert errors == []
         assert ekeys == []
+
+    @pytest.mark.parametrize("value", ["normal", "inverse"])
+    def test_tester_accepts_wakeup_direction_mode(self, value):
+        raw = _mode_d_raw()
+        raw["wakeup_regime"]["entry"]["direction_mode"] = value
+
+        errors, ekeys = _run_phase0_raw(raw, "tester")
+
+        assert errors == []
+        assert ekeys == []
+
+    @pytest.mark.parametrize("value", ["invers", "x", 1, True, None])
+    def test_wakeup_direction_mode_rejects_invalid_values(self, value):
+        raw = _mode_d_raw()
+        raw["wakeup_regime"]["entry"]["direction_mode"] = value
+
+        errors, ekeys = _run_phase0_raw(raw, "tester")
+
+        assert any("trade_filter.wakeup_regime.entry.direction_mode" in e for e in errors)
+        _superset_assert(ekeys, {"wakeup_direction_mode_invalid"})
+
+    def test_wakeup_direction_mode_validated_when_enabled_is_malformed(self):
+        raw = _mode_d_raw()
+        raw["wakeup_regime"]["enabled"] = "yes"
+        raw["wakeup_regime"]["entry"]["direction_mode"] = 1
+
+        errors, ekeys = _run_phase0_raw(raw, "tester")
+
+        assert any("trade_filter.wakeup_regime.enabled must be bool" in e for e in errors)
+        _superset_assert(ekeys, {"wakeup_direction_mode_invalid"})
 
     @pytest.mark.parametrize("value", [True, False])
     def test_tester_accepts_mode_d_wakeup_lock_cycle_direction_bool(self, value):
@@ -1355,6 +1424,13 @@ class TestWakeupPhase0Validation:
         cfg = tf.wakeup_regime.exit.local_median_stop
         assert cfg.enabled is False
 
+    def test_wakeup_cycle_take_profit_absent_defaults_disabled(self):
+        tf = _build_tf(_mode_d_raw())
+
+        cfg = tf.wakeup_regime.exit.cycle_take_profit
+        assert cfg.enabled is False
+        assert cfg.pnl_pct is None
+
     def test_tester_accepts_wakeup_max_trades_per_cycle(self):
         raw = _mode_d_raw()
         raw["wakeup_regime"]["exit"]["max_trades_per_cycle"] = {
@@ -1366,6 +1442,74 @@ class TestWakeupPhase0Validation:
 
         assert errors == []
         assert ekeys == []
+
+    @pytest.mark.parametrize("pnl_pct", [0.01, 0.005, 0.025])
+    def test_tester_accepts_wakeup_cycle_take_profit(self, pnl_pct):
+        raw = _mode_d_raw()
+        raw["wakeup_regime"]["exit"]["cycle_take_profit"] = {
+            "enabled": True,
+            "pnl_pct": pnl_pct,
+        }
+
+        errors, ekeys = _run_phase0_raw(raw, "tester")
+
+        assert errors == []
+        assert ekeys == []
+
+    def test_tester_accepts_wakeup_cycle_take_profit_disabled_without_pnl_pct(self):
+        raw = _mode_d_raw()
+        raw["wakeup_regime"]["exit"]["cycle_take_profit"] = {
+            "enabled": False,
+        }
+
+        errors, ekeys = _run_phase0_raw(raw, "tester")
+
+        assert errors == []
+        assert ekeys == []
+
+    def test_tester_accepts_wakeup_cycle_take_profit_as_only_exit_condition(self):
+        raw = _mode_d_raw()
+        raw["wakeup_regime"]["exit"]["ttl"]["enabled"] = False
+        raw["wakeup_regime"]["exit"]["no_fresh_candidate"]["enabled"] = False
+        raw["wakeup_regime"]["exit"]["cycle_take_profit"] = {
+            "enabled": True,
+            "pnl_pct": 0.01,
+        }
+
+        errors, ekeys = _run_phase0_raw(raw, "tester")
+
+        assert errors == []
+        assert ekeys == []
+
+    @pytest.mark.parametrize("value", [0, -0.01, None, True, False, "1%"])
+    def test_wakeup_cycle_take_profit_invalid_pnl_pct_rejected(self, value):
+        raw = _mode_d_raw()
+        raw["wakeup_regime"]["exit"]["cycle_take_profit"] = {
+            "enabled": True,
+            "pnl_pct": value,
+        }
+
+        errors, _ = _run_phase0_raw(raw, "tester")
+
+        assert (
+            "trade_filter.wakeup_regime.exit.cycle_take_profit.pnl_pct"
+            in "\n".join(errors)
+        )
+
+    @pytest.mark.parametrize("value", ["true", 1, 0, None])
+    def test_wakeup_cycle_take_profit_enabled_rejects_non_bool_values(self, value):
+        raw = _mode_d_raw()
+        raw["wakeup_regime"]["exit"]["cycle_take_profit"] = {
+            "enabled": value,
+            "pnl_pct": 0.01,
+        }
+
+        errors, _ = _run_phase0_raw(raw, "tester")
+
+        assert (
+            "trade_filter.wakeup_regime.exit.cycle_take_profit.enabled must be bool"
+            in "\n".join(errors)
+        )
 
     def test_tester_accepts_wakeup_local_median_stop_as_only_exit_condition(self):
         raw = _mode_d_raw()
@@ -2374,6 +2518,7 @@ class TestExitBImmediateOffFailureKeysRegistry:
         "exit_c_rejects_legacy_triggers",
         "wakeup_regime_requires_mode_d",
         "wakeup_enabled_requires_mode_d",
+        "wakeup_direction_mode_invalid",
         "position_freeze_enabled_invalid_type",
         "position_freeze_enabled_requires_wakeup_enabled",
         "position_freeze_enabled_requires_mode_d",

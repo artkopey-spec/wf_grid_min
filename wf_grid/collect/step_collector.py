@@ -129,6 +129,7 @@ _ZIGZAG_FILTER_SUMMARY_COLUMNS: List[str] = [
     "median_stop_triggered_count",
     # exit-off mode B (docs/plan_exit_off_modes.txt)
     "zz_leg_stop_triggered_count",
+    "wakeup_exit_cycle_take_profit_count",
     "exit_off_mode",
     "exit_off_zz_leg_count",
     # Plan v3: exit_b_immediate_off echo + per-period fired count
@@ -149,6 +150,7 @@ _ZIGZAG_DISCRIMINATOR_KEYS = frozenset(
         "trigger_count_both",
         "median_stop_triggered_count",
         "zz_leg_stop_triggered_count",
+        "wakeup_exit_cycle_take_profit_count",
         "exit_off_mode",
         "exit_off_zz_leg_count",
         "exit_b_immediate_off",
@@ -215,6 +217,9 @@ def _unpack_filter_summary(summary: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "lifecycle_starts_count": "lifecycle_starts_count",
         "median_stop_triggered_count": "median_stop_triggered_count",
         "zz_leg_stop_triggered_count": "zz_leg_stop_triggered_count",
+        "wakeup_exit_cycle_take_profit_count": (
+            "wakeup_exit_cycle_take_profit_count"
+        ),
         "exit_off_mode": "exit_off_mode",
         "exit_off_zz_leg_count": "exit_off_zz_leg_count",
         "exit_b_immediate_off": "exit_b_immediate_off",

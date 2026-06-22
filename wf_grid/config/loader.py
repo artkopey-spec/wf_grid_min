@@ -250,6 +250,7 @@ _ALLOWED_KEYS: dict[str, set[str]] = {
         "candidate_age",
         "atr_expansion",
         "volume_expansion",
+        "direction_mode",
     },
     "trade_filter.wakeup_regime.entry.candidate_height": {
         "enabled",
@@ -275,6 +276,7 @@ _ALLOWED_KEYS: dict[str, set[str]] = {
         "ttl",
         "no_fresh_candidate",
         "max_trades_per_cycle",
+        "cycle_take_profit",
         "local_median_stop",
         "action",
     },
@@ -291,6 +293,10 @@ _ALLOWED_KEYS: dict[str, set[str]] = {
     "trade_filter.wakeup_regime.exit.max_trades_per_cycle": {
         "enabled",
         "max_trades",
+    },
+    "trade_filter.wakeup_regime.exit.cycle_take_profit": {
+        "enabled",
+        "pnl_pct",
     },
     "trade_filter.wakeup_regime.exit.local_median_stop": {
         "enabled",

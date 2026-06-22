@@ -440,6 +440,7 @@ def run_backtest_fast(
             index=index,                      # NEW: propogate for daily_reset
             volume_runtime=volume_runtime if volume_enabled else None,
             volume=volume,
+            commission_rate=commission,
             collect_filter_diagnostics=collect_filter_diagnostics,
         )
         positions = filter_result.positions

@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import supertrend_optimizer.core.trades as trades_module
 from supertrend_optimizer.core.trades import extract_trades
 
 
@@ -47,6 +48,38 @@ def _make_inputs(positions_list, prices_list, commission_rate=0.001):
 def _total_commission_from_positions(positions, commission_rate):
     """Compute total commission = sum(abs(diff(positions))) * rate."""
     return float(np.sum(np.abs(np.diff(positions))) * commission_rate)
+
+
+def test_extract_trades_uses_closed_leg_trade_economics_helper(monkeypatch):
+    positions, returns, prices, index, commission_rate, trend = _make_inputs(
+        [0, 1, -1, -1, 0],
+        [100, 100, 101, 101, 99],
+        commission_rate=0.001,
+    )
+    original = trades_module.closed_leg_trade_economics
+    calls = []
+
+    def spy(entry_idx, exit_idx, direction, positions_arg, prices_arg, commission_arg):
+        economics = original(
+            entry_idx,
+            exit_idx,
+            direction,
+            positions_arg,
+            prices_arg,
+            commission_arg,
+        )
+        calls.append((entry_idx, exit_idx, direction, economics))
+        return economics
+
+    monkeypatch.setattr(trades_module, "closed_leg_trade_economics", spy)
+
+    df = extract_trades(positions, returns, prices, index, commission_rate, trend)
+
+    assert len(calls) == len(df)
+    for (_, _, _, economics), (_, row) in zip(calls, df.iterrows()):
+        assert row["gross_pnl_pct"] == economics["gross_pnl_pct"]
+        assert row["commission_pct"] == economics["commission_pct"]
+        assert row["net_pnl_pct"] == economics["net_pnl_pct"]
 
 
 # ---------------------------------------------------------------------------

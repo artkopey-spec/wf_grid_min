@@ -60,6 +60,10 @@ from supertrend_optimizer.core._reset_events import (
     detect_st_flip,
 )
 from supertrend_optimizer.core.calculator import calculate_atr_rma, calculate_true_range
+from supertrend_optimizer.core.trades import (
+    closed_leg_trade_economics,
+    net_pnl_pct_to_micropct,
+)
 from supertrend_optimizer.utils.exceptions import ConfigError
 
 if TYPE_CHECKING:
@@ -80,6 +84,7 @@ __all__ = [
     "build_zigzag_global_stats",
     "compute_zigzag_per_bar",
     "detect_st_flip",
+    "apply_wakeup_direction_mode",
     "apply",
     "attach_trade_filter_diagnostics",
 ]
@@ -1291,6 +1296,7 @@ def _resolve_mode_d_wakeup_entry(
 
 
 class _WakeupExitConfigParts(NamedTuple):
+    cycle_take_profit: object
     ttl: object
     no_fresh_candidate: object
     max_trades_per_cycle: object
@@ -1306,6 +1312,7 @@ def _resolve_mode_d_wakeup_exit(
     if exit_cfg is None:
         raise ConfigError("apply() Mode D requires trade_filter.wakeup_regime.exit")
     return _WakeupExitConfigParts(
+        cycle_take_profit=getattr(exit_cfg, "cycle_take_profit", None),
         ttl=getattr(exit_cfg, "ttl", None),
         no_fresh_candidate=getattr(exit_cfg, "no_fresh_candidate", None),
         max_trades_per_cycle=getattr(exit_cfg, "max_trades_per_cycle", None),
@@ -1315,6 +1322,8 @@ def _resolve_mode_d_wakeup_exit(
 
 
 def _wakeup_exit_action_for_reason(reason: str) -> str:
+    if reason == "cycle_take_profit":
+        return "exit_cycle_take_profit"
     if reason == "ttl":
         return "exit_ttl"
     if reason == "no_fresh_candidate":
@@ -1578,6 +1587,34 @@ def _validate_apply_inputs(
                 f"bars, expected {n}"
             )
     return n
+
+
+def _require_cycle_take_profit_open_prices(
+    open_prices: "Optional[np.ndarray]",
+    n: int,
+) -> np.ndarray:
+    if open_prices is None:
+        raise ConfigError(
+            "apply() requires open_prices when "
+            "trade_filter.wakeup_regime.exit.cycle_take_profit.enabled=true"
+        )
+    arr = np.asarray(open_prices, dtype=np.float64)
+    if arr.ndim != 1:
+        raise ConfigError(
+            "apply() open_prices must be 1-D when "
+            "trade_filter.wakeup_regime.exit.cycle_take_profit.enabled=true"
+        )
+    if arr.shape[0] != n:
+        raise ConfigError(
+            f"apply() open_prices length {arr.shape[0]} != n={n} when "
+            "trade_filter.wakeup_regime.exit.cycle_take_profit.enabled=true"
+        )
+    if not np.all(np.isfinite(arr)) or np.any(arr <= 0.0):
+        raise ConfigError(
+            "apply() open_prices must be finite and strictly positive when "
+            "trade_filter.wakeup_regime.exit.cycle_take_profit.enabled=true"
+        )
+    return arr
 
 
 def _update_held_pos(held_pos: int, flip_dir: int, trade_mode: str) -> int:
@@ -2155,6 +2192,8 @@ def _allocate_apply_arrays(
         "wakeup_cycle_age_bars_arr": np.full(n, -1, dtype=np.int64),
         "wakeup_bars_since_fresh_candidate_arr": np.full(n, -1, dtype=np.int64),
         "wakeup_cycle_trade_count_arr": np.full(n, -1, dtype=np.int64),
+        "wakeup_cycle_realized_pnl_pct_arr": np.zeros(n, dtype=np.float64),
+        "wakeup_exit_cycle_take_profit_triggered_arr": np.zeros(n, dtype=np.int8),
         "wakeup_exit_ttl_triggered_arr": np.zeros(n, dtype=np.int8),
         "wakeup_exit_no_fresh_candidate_triggered_arr": np.zeros(n, dtype=np.int8),
         "wakeup_exit_local_median_stop_triggered_arr": np.zeros(
@@ -2328,6 +2367,12 @@ def _finalize_apply_result(
                 "wakeup_cycle_trade_count": arrays[
                     "wakeup_cycle_trade_count_arr"
                 ],
+                "wakeup_cycle_realized_pnl_pct": arrays[
+                    "wakeup_cycle_realized_pnl_pct_arr"
+                ],
+                "wakeup_exit_cycle_take_profit_triggered": arrays[
+                    "wakeup_exit_cycle_take_profit_triggered_arr"
+                ],
                 "wakeup_exit_ttl_triggered": arrays[
                     "wakeup_exit_ttl_triggered_arr"
                 ],
@@ -2376,6 +2421,27 @@ def _finalize_apply_result(
     )
 
 
+def apply_wakeup_direction_mode(
+    positions: np.ndarray,
+    trade_filter_config: Any,
+    *,
+    mode_d_enabled: bool,
+) -> np.ndarray:
+    """Optionally invert the final Mode D wakeup position stream post-FSM."""
+    if mode_d_enabled is not True:
+        return positions
+
+    wakeup = getattr(trade_filter_config, "wakeup_regime", None)
+    if getattr(wakeup, "enabled", None) is not True:
+        return positions
+
+    entry = getattr(wakeup, "entry", None)
+    if getattr(entry, "direction_mode", "normal") != "inverse":
+        return positions
+
+    return -positions
+
+
 def apply(
     *,
     trend: np.ndarray,
@@ -2384,7 +2450,7 @@ def apply(
     zigzag_global_stats: ZigZagGlobalStats,
     # close is required unless per_bar is supplied directly (test override).
     close: "Optional[np.ndarray]" = None,
-    # open_prices accepted for run_backtest_fast API symmetry; not used here.
+    # Open prices are used by cycle_take_profit economics when that Exit C is enabled.
     open_prices: "Optional[np.ndarray]" = None,
     global_offset: int = 0,
     execution_model: Any = None,
@@ -2403,6 +2469,7 @@ def apply(
     volume: "Optional[np.ndarray]" = None,
     high: "Optional[np.ndarray]" = None,
     low: "Optional[np.ndarray]" = None,
+    commission_rate: float | None = None,
     collect_filter_diagnostics: bool = True,
 ) -> "ZigZagSTFilterResult":
     """Run the ZigZag ST FSM and build ``filtered_positions``.
@@ -2439,7 +2506,8 @@ def apply(
         used by ZigZag pivot/height calculations.
     open_prices : np.ndarray, optional
         Accepted for ``run_backtest_fast`` API symmetry (§8.3.1) but
-        not used inside ZigZag pivot/height calculations.
+        not used inside ZigZag pivot/height calculations. Required when
+        ``trade_filter.wakeup_regime.exit.cycle_take_profit.enabled`` is true.
     global_offset : int
         Metadata only (passed through for diagnostics, not used in
         pivot/height formula per §4.3).
@@ -2770,6 +2838,7 @@ def apply(
     wakeup_candidate_age_cfg = None
     wakeup_atr_cfg = None
     wakeup_volume_cfg = None
+    wakeup_cycle_take_profit_cfg = None
     wakeup_ttl_cfg = None
     wakeup_no_fresh_cfg = None
     wakeup_max_trades_per_cycle_cfg = None
@@ -2788,6 +2857,7 @@ def apply(
             wakeup_volume_cfg,
         ) = _resolve_mode_d_wakeup_entry(trade_filter_config)
         (
+            wakeup_cycle_take_profit_cfg,
             wakeup_ttl_cfg,
             wakeup_no_fresh_cfg,
             wakeup_max_trades_per_cycle_cfg,
@@ -2828,6 +2898,38 @@ def apply(
             )
 
     wakeup_regime_cfg = getattr(trade_filter_config, "wakeup_regime", None)
+    wakeup_cycle_take_profit_enabled = (
+        mode_d_enabled
+        and wakeup_regime_cfg is not None
+        and getattr(wakeup_regime_cfg, "enabled", False) is True
+        and wakeup_cycle_take_profit_cfg is not None
+        and getattr(wakeup_cycle_take_profit_cfg, "enabled", False) is True
+    )
+    wakeup_cycle_take_profit_threshold_micropct = 0
+    open_prices_for_cycle_take_profit = None
+    commission_rate_for_cycle_take_profit = 0.0
+    if wakeup_cycle_take_profit_enabled:
+        if commission_rate is None:
+            raise ConfigError(
+                "apply() requires commission_rate when "
+                "trade_filter.wakeup_regime.exit.cycle_take_profit.enabled=true"
+            )
+        commission_rate_for_cycle_take_profit = float(commission_rate)
+        if (
+            not math.isfinite(commission_rate_for_cycle_take_profit)
+            or commission_rate_for_cycle_take_profit < 0.0
+        ):
+            raise ConfigError(
+                "apply() commission_rate must be finite and non-negative when "
+                "trade_filter.wakeup_regime.exit.cycle_take_profit.enabled=true"
+            )
+        open_prices_for_cycle_take_profit = _require_cycle_take_profit_open_prices(
+            open_prices,
+            n,
+        )
+        wakeup_cycle_take_profit_threshold_micropct = int(
+            round(float(getattr(wakeup_cycle_take_profit_cfg, "pnl_pct")) * 1e8)
+        )
     wakeup_lock_cycle_direction = (
         mode_d_enabled
         and wakeup_regime_cfg is not None
@@ -2935,6 +3037,12 @@ def apply(
         wakeup_cycle_trade_count_arr = _apply_arrays[
             "wakeup_cycle_trade_count_arr"
         ]
+        wakeup_cycle_realized_pnl_pct_arr = _apply_arrays[
+            "wakeup_cycle_realized_pnl_pct_arr"
+        ]
+        wakeup_exit_cycle_take_profit_triggered_arr = _apply_arrays[
+            "wakeup_exit_cycle_take_profit_triggered_arr"
+        ]
         wakeup_exit_ttl_triggered_arr = _apply_arrays[
             "wakeup_exit_ttl_triggered_arr"
         ]
@@ -2982,6 +3090,11 @@ def apply(
     cycle_trade_count = 0
     pos_freeze_until = -1
     pos_freeze_pending = False
+    cycle_realized_pnl_micropct = 0
+    tested_cycle_pnl_micropct = 0
+    trade_entry_idx = -1
+    trade_entry_pos = 0
+    trade_entry_in_cycle_scope = False
 
     # ------------------------------------------------------------------
     # 4) Main FSM loop.
@@ -3010,6 +3123,42 @@ def apply(
             held_pos_at_bar_start_arr[t] = np.int8(held_pos_at_bar_start)
             confirmed_legs_at_bar_start_arr[t] = confirmed_legs_at_bar_start
 
+        if (
+            mode_d_enabled
+            and wakeup_cycle_take_profit_enabled
+            and t > 0
+            and filtered_positions[t] != filtered_positions[t - 1]
+        ):
+            if (
+                trade_entry_idx >= 0
+                and trade_entry_pos != 0
+                and filtered_positions[t - 1] != 0
+                and trade_entry_in_cycle_scope
+            ):
+                leg = closed_leg_trade_economics(
+                    trade_entry_idx,
+                    t,
+                    trade_entry_pos,
+                    filtered_positions,
+                    open_prices_for_cycle_take_profit,
+                    commission_rate_for_cycle_take_profit,
+                )
+                cycle_realized_pnl_micropct += net_pnl_pct_to_micropct(
+                    leg["net_pnl_pct"]
+                )
+            if filtered_positions[t] == 0:
+                trade_entry_idx = -1
+                trade_entry_pos = 0
+                trade_entry_in_cycle_scope = False
+            else:
+                trade_entry_idx = t
+                trade_entry_pos = int(filtered_positions[t])
+                trade_entry_in_cycle_scope = (
+                    state_at_bar_start == ZigZagFSMState.ST_ACTIVE_FREEZE
+                )
+
+        tested_cycle_pnl_micropct = cycle_realized_pnl_micropct
+
         # ----- §9 step 1: combined-reset wipe (after snapshots) ----------
         # combined_reset_event covers both daily_reset and time_filter_reset
         # (docs/time_filter_plan_v1_final.txt §4.4).
@@ -3024,6 +3173,10 @@ def apply(
             _stopping_start = -1
             cycle_direction = 0
             cycle_trade_count = 0
+            cycle_realized_pnl_micropct = 0
+            trade_entry_idx = -1
+            trade_entry_pos = 0
+            trade_entry_in_cycle_scope = False
             (
                 wakeup_cycle_age,
                 wakeup_bars_since_fresh,
@@ -3171,6 +3324,8 @@ def apply(
                     trigger_source_this_bar = _TRIGGER_SOURCE_WAKEUP
                     wakeup_started_this_bar = True
                     cycle_trade_count = 1
+                    cycle_realized_pnl_micropct = 0
+                    tested_cycle_pnl_micropct = 0
             else:
                 volume_allowed = (
                     volume_condition_allowed_runtime is None
@@ -3272,6 +3427,14 @@ def apply(
             ):
                 wakeup_exit_c_reason_this_bar = None
                 if (
+                    wakeup_cycle_take_profit_enabled
+                    and tested_cycle_pnl_micropct
+                    >= wakeup_cycle_take_profit_threshold_micropct
+                ):
+                    if diag_enabled:
+                        wakeup_exit_cycle_take_profit_triggered_arr[t] = np.int8(1)
+                    wakeup_exit_c_reason_this_bar = "cycle_take_profit"
+                elif (
                     _is_component_enabled(wakeup_ttl_cfg)
                     and wakeup_cycle_age >= int(getattr(wakeup_ttl_cfg, "bars"))
                 ):
@@ -3316,6 +3479,8 @@ def apply(
                     )
                     if wakeup_exit_action_mode == "block_new_entries":
                         state = ZigZagFSMState.ST_STOPPING
+                        cycle_realized_pnl_micropct = 0
+                        trade_entry_in_cycle_scope = False
                     elif wakeup_exit_action_mode == "close_position":
                         if diag_enabled:
                             wakeup_exit_close_triggered_arr[t] = np.int8(1)
@@ -3323,6 +3488,8 @@ def apply(
                         held_pos = 0
                         cycle_direction = 0
                         cycle_trade_count = 0
+                        cycle_realized_pnl_micropct = 0
+                        trade_entry_in_cycle_scope = False
                         pos_freeze_until = -1
                         pos_freeze_pending = False
                         (
@@ -3472,6 +3639,11 @@ def apply(
                 ZigZagFSMState.ST_STOPPING,
             ):
                 wakeup_cycle_trade_count_arr[t] = int(cycle_trade_count)
+
+            if diag_enabled:
+                wakeup_cycle_realized_pnl_pct_arr[t] = (
+                    tested_cycle_pnl_micropct / 1e8
+                )
 
             if (
                 diag_enabled
@@ -3836,6 +4008,12 @@ def apply(
                 if state_at_bar_start == ZigZagFSMState.ST_STOPPING:
                     _stopping_start = -1  # reset after leaving STOPPING
                 stopping_started_at_arr[t] = -1
+
+    filtered_positions = apply_wakeup_direction_mode(
+        filtered_positions,
+        trade_filter_config,
+        mode_d_enabled=mode_d_enabled,
+    )
 
     if not diag_enabled:
         return ZigZagSTFilterResult(

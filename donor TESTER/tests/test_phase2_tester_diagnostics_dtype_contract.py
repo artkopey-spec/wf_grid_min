@@ -155,6 +155,98 @@ def _run_enabled(df, *, daily_reset: bool = False):
     )
 
 
+def _make_wakeup_mode_d_cycle_take_profit_cfg():
+    from supertrend_optimizer.core.trade_filter_config import (
+        TradeFilterConfig,
+        TradeFilterDiagnosticsConfig,
+        TradeFilterLifecycleConfig,
+        TradeFilterWakeupAtrExpansionConfig,
+        TradeFilterWakeupCandidateAgeConfig,
+        TradeFilterWakeupCandidateHeightConfig,
+        TradeFilterWakeupCycleTakeProfitExitConfig,
+        TradeFilterWakeupEntryConfig,
+        TradeFilterWakeupExitActionConfig,
+        TradeFilterWakeupExitConfig,
+        TradeFilterWakeupLocalMedianStopExitConfig,
+        TradeFilterWakeupMaxTradesPerCycleConfig,
+        TradeFilterWakeupNoFreshCandidateExitConfig,
+        TradeFilterWakeupRegimeConfig,
+        TradeFilterWakeupTtlExitConfig,
+        TradeFilterWakeupVolumeExpansionConfig,
+        TradeFilterZigZagConfig,
+    )
+
+    return TradeFilterConfig(
+        enabled=True,
+        type="zigzag_st_mode",
+        zigzag=TradeFilterZigZagConfig(
+            enabled=True,
+            mode="D",
+            reversal_threshold=0.03,
+            local_window=5,
+            candidate_trigger_threshold=0.04,
+        ),
+        lifecycle=TradeFilterLifecycleConfig(
+            freeze_confirmed_legs=0,
+            stop_check="confirm_bar_only",
+            stopping_exit="opposite_st_flip",
+            exit_off_mode="exit C",
+        ),
+        diagnostics=TradeFilterDiagnosticsConfig(
+            export_state_columns=True,
+            export_trigger_columns=True,
+        ),
+        wakeup_regime=TradeFilterWakeupRegimeConfig(
+            enabled=True,
+            entry=TradeFilterWakeupEntryConfig(
+                candidate_height=TradeFilterWakeupCandidateHeightConfig(
+                    enabled=True,
+                    quantile=0.65,
+                ),
+                candidate_age=TradeFilterWakeupCandidateAgeConfig(enabled=False),
+                atr_expansion=TradeFilterWakeupAtrExpansionConfig(enabled=False),
+                volume_expansion=TradeFilterWakeupVolumeExpansionConfig(enabled=False),
+            ),
+            exit=TradeFilterWakeupExitConfig(
+                ttl=TradeFilterWakeupTtlExitConfig(enabled=False),
+                no_fresh_candidate=TradeFilterWakeupNoFreshCandidateExitConfig(
+                    enabled=False,
+                ),
+                max_trades_per_cycle=TradeFilterWakeupMaxTradesPerCycleConfig(
+                    enabled=False,
+                ),
+                cycle_take_profit=TradeFilterWakeupCycleTakeProfitExitConfig(
+                    enabled=True,
+                    pnl_pct=0.01,
+                ),
+                local_median_stop=TradeFilterWakeupLocalMedianStopExitConfig(
+                    enabled=False,
+                ),
+                action=TradeFilterWakeupExitActionConfig(mode="close_position"),
+            ),
+        ),
+    )
+
+
+def _run_wakeup_mode_d_cycle_take_profit(df):
+    from supertrend_optimizer.core.zigzag_st_filter import build_zigzag_global_stats
+    from supertrend_optimizer.testing.runner import run_period
+    from supertrend_optimizer.utils.enums import ExecutionModel
+
+    cfg = _make_wakeup_mode_d_cycle_take_profit_cfg()
+    stats = build_zigzag_global_stats(df["close"].values, cfg)
+    return run_period(
+        df=df,
+        atr_period=14,
+        multiplier=3.0,
+        trade_mode="revers",
+        commission=0.001,
+        execution_model=ExecutionModel.OPEN_TO_OPEN,
+        trade_filter_config=cfg,
+        zigzag_global_stats=stats,
+    )
+
+
 class TestDiagnosticsDtypeContract:
     """Strict spec §13 keyset + dtype contract (#25)."""
 
@@ -308,6 +400,22 @@ class TestDiagnosticsDtypeContract:
         assert not found_legacy, (
             f"Found 2.0-TESTER legacy keys in filter_diagnostics: {found_legacy}. "
             "These must NOT be present in Phase 2 output."
+        )
+
+
+class TestWakeupModeDExactDtypeContract:
+    """Strict dtype contract for Mode D wakeup diagnostics added after Phase 2."""
+
+    def test_cycle_take_profit_runtime_diagnostics_exact_dtypes(self) -> None:
+        df = _make_synthetic_ohlc()
+        r = _run_wakeup_mode_d_cycle_take_profit(df)
+        fd = r.filter_diagnostics
+
+        assert fd["wakeup_cycle_realized_pnl_pct"].dtype == np.float64
+        assert fd["wakeup_exit_cycle_take_profit_triggered"].dtype == np.int8
+        assert len(fd["wakeup_cycle_realized_pnl_pct"]) == len(r.result.positions)
+        assert len(fd["wakeup_exit_cycle_take_profit_triggered"]) == len(
+            r.result.positions
         )
 
 

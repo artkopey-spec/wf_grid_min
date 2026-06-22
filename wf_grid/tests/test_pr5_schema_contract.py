@@ -193,6 +193,8 @@ _EXCEL_PER_BAR_HEADERS_SNAPSHOT: dict = {
     "wakeup_cycle_age_bars":                    "Wakeup Cycle Age Bars",
     "wakeup_bars_since_fresh_candidate":        "Wakeup Bars Since Fresh Candidate",
     "wakeup_cycle_trade_count":                 "Wakeup Cycle Trade Count",
+    "wakeup_cycle_realized_pnl_pct":            "Wakeup Cycle Realized PnL Pct",
+    "wakeup_exit_cycle_take_profit_triggered":  "Wakeup Exit Cycle Take Profit Triggered",
     "wakeup_exit_ttl_triggered":                "Wakeup Exit TTL Triggered",
     "wakeup_exit_no_fresh_candidate_triggered": "Wakeup Exit No Fresh Candidate Triggered",
     "wakeup_exit_local_median_stop_triggered":  "Wakeup Exit Local Median Stop Triggered",
@@ -269,6 +271,7 @@ _STEP_LONG_FILTER_COLUMNS_SNAPSHOT = [
     "lifecycle_starts_count",
     "median_stop_triggered_count",
     "zz_leg_stop_triggered_count",
+    "wakeup_exit_cycle_take_profit_count",
     "exit_off_mode",
     "exit_off_zz_leg_count",
     "exit_b_immediate_off",        # Plan v3 §8

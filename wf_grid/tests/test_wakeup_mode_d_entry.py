@@ -12,14 +12,16 @@ from supertrend_optimizer.core.zigzag_st_filter import (
     ZigZagPerBar,
     _compute_wakeup_atr_ratio,
     _effective_wakeup_trade_mode,
+    apply_wakeup_direction_mode,
     attach_trade_filter_diagnostics as attach_trade_filter_diagnostics_public,
     apply,
 )
 import supertrend_optimizer.core.zigzag_st_filter as zigzag_st_filter_module
+from supertrend_optimizer.core.backtest import calculate_returns
 from supertrend_optimizer.core.filter_trade_diagnostics import (
     attach_trade_filter_diagnostics,
 )
-from supertrend_optimizer.core.trades import extract_trades
+from supertrend_optimizer.core.trades import extract_trades, net_pnl_pct_to_micropct
 from supertrend_optimizer.engine.result import BacktestResult
 from supertrend_optimizer.io.excel_tester import (
     FILTER_DIAGNOSTICS_100_DISPLAY_NAMES,
@@ -54,6 +56,8 @@ MODE_D_WAKEUP_EXPECTED_KEYS = frozenset({
     "wakeup_cycle_age_bars",
     "wakeup_bars_since_fresh_candidate",
     "wakeup_cycle_trade_count",
+    "wakeup_cycle_realized_pnl_pct",
+    "wakeup_exit_cycle_take_profit_triggered",
     "wakeup_exit_ttl_triggered",
     "wakeup_exit_no_fresh_candidate_triggered",
     "wakeup_exit_local_median_stop_triggered",
@@ -88,10 +92,13 @@ def _cfg(
     local_median_stop_enabled: bool = False,
     max_trades_enabled: bool = False,
     max_trades: int | None = None,
+    cycle_take_profit_enabled: bool = False,
+    cycle_take_profit_pnl_pct: float | None = None,
     action_mode: str = "block_new_entries",
     lock_cycle_direction: bool = False,
     position_freeze_enabled: bool = False,
     position_freeze_min_hold_bars: int = 2,
+    direction_mode: object = "normal",
 ) -> SimpleNamespace:
     return SimpleNamespace(
         lifecycle=SimpleNamespace(
@@ -123,6 +130,7 @@ def _cfg(
                     baseline_window=3,
                     min_ratio=1.0,
                 ),
+                direction_mode=direction_mode,
             ),
             exit=SimpleNamespace(
                 ttl=SimpleNamespace(enabled=ttl_enabled, bars=ttl_bars),
@@ -135,6 +143,10 @@ def _cfg(
                 max_trades_per_cycle=SimpleNamespace(
                     enabled=max_trades_enabled,
                     max_trades=max_trades,
+                ),
+                cycle_take_profit=SimpleNamespace(
+                    enabled=cycle_take_profit_enabled,
+                    pnl_pct=cycle_take_profit_pnl_pct,
                 ),
                 local_median_stop=SimpleNamespace(
                     enabled=local_median_stop_enabled,
@@ -240,6 +252,61 @@ def _valid_ohlc(n: int = 6) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return high, low, close
 
 
+def test_apply_wakeup_direction_mode_inverse_returns_new_inverted_array():
+    inp = np.array([0, 1, 1, -1, -1, 0], dtype=np.int8)
+    before = inp.copy()
+
+    result = apply_wakeup_direction_mode(
+        inp,
+        _cfg(direction_mode="inverse"),
+        mode_d_enabled=True,
+    )
+
+    np.testing.assert_array_equal(
+        result,
+        np.array([0, -1, -1, 1, 1, 0], dtype=np.int8),
+    )
+    assert result.dtype == np.int8
+    assert result[0] == 0
+    assert result[-1] == 0
+    np.testing.assert_array_equal(inp, before)
+    assert result is not inp
+
+
+@pytest.mark.parametrize(
+    "config, mode_d_enabled",
+    [
+        (_cfg(direction_mode="normal"), True),
+        (_cfg(direction_mode="inverse"), False),
+        (_cfg(direction_mode="inverse"), np.bool_(True)),
+        (_cfg(direction_mode="inverse"), 1),
+        (_cfg(direction_mode="inverse"), None),
+        (_cfg(direction_mode="inverse"), False),
+        (_cfg(direction_mode="normal"), False),
+        (None, True),
+        (SimpleNamespace(), True),
+        (SimpleNamespace(wakeup_regime=SimpleNamespace(enabled=False)), True),
+        (SimpleNamespace(wakeup_regime=SimpleNamespace(enabled=True)), True),
+        (
+            SimpleNamespace(
+                wakeup_regime=SimpleNamespace(
+                    enabled=True,
+                    entry=SimpleNamespace(),
+                )
+            ),
+            True,
+        ),
+    ],
+)
+def test_apply_wakeup_direction_mode_noop_returns_same_object(config, mode_d_enabled):
+    inp = np.array([0, 1, 1, -1, -1, 0], dtype=np.int8)
+
+    result = apply_wakeup_direction_mode(inp, config, mode_d_enabled=mode_d_enabled)
+
+    assert result is inp
+    np.testing.assert_array_equal(inp, np.array([0, 1, 1, -1, -1, 0], dtype=np.int8))
+
+
 def test_mode_d_counters_trigger_bar_fresh_candidate_starts_at_zero():
     result = apply(
         trend=np.zeros(6, dtype=np.int64),
@@ -270,6 +337,132 @@ def test_mode_d_collect_filter_diagnostics_false_returns_none_and_same_positions
     assert enabled.filter_diagnostics is not None
     assert disabled.filter_diagnostics is None
     np.testing.assert_array_equal(enabled.positions, disabled.positions)
+
+
+def test_mode_d_direction_mode_absent_equals_explicit_normal():
+    kwargs = dict(
+        trend=np.zeros(6, dtype=np.int64),
+        trade_mode="both",
+        zigzag_global_stats=_stats(),
+        per_bar=_per_bar(t=1),
+    )
+
+    absent = apply(trade_filter_config=_cfg(), **kwargs)
+    explicit = apply(trade_filter_config=_cfg(direction_mode="normal"), **kwargs)
+
+    np.testing.assert_array_equal(absent.positions, explicit.positions)
+    assert absent.filter_diagnostics.keys() == explicit.filter_diagnostics.keys()
+
+
+def test_mode_d_direction_mode_inverse_applies_to_both_diagnostic_branches():
+    kwargs = dict(
+        trend=np.zeros(6, dtype=np.int64),
+        trade_mode="both",
+        trade_filter_config=_cfg(direction_mode="inverse"),
+        zigzag_global_stats=_stats(),
+        per_bar=_per_bar(t=1),
+    )
+
+    enabled = apply(**kwargs, collect_filter_diagnostics=True)
+    disabled = apply(**kwargs, collect_filter_diagnostics=False)
+
+    np.testing.assert_array_equal(enabled.positions, [0, 0, -1, -1, -1, -1])
+    np.testing.assert_array_equal(enabled.positions, disabled.positions)
+    assert enabled.filter_diagnostics is not None
+    assert disabled.filter_diagnostics is None
+
+
+def test_mode_d_direction_mode_inverse_keeps_diagnostics_pre_inversion():
+    kwargs = dict(
+        trend=np.zeros(6, dtype=np.int64),
+        trade_mode="both",
+        zigzag_global_stats=_stats(),
+        per_bar=_per_bar(t=1),
+    )
+
+    normal = apply(trade_filter_config=_cfg(direction_mode="normal"), **kwargs)
+    inverse = apply(trade_filter_config=_cfg(direction_mode="inverse"), **kwargs)
+
+    assert normal.filter_diagnostics.keys() == inverse.filter_diagnostics.keys()
+    np.testing.assert_array_equal(inverse.positions, -normal.positions)
+    for key in (
+        "wakeup_active_direction",
+        "wakeup_entry_candidate_leg_direction",
+        "trade_filter_trigger_source",
+        "wakeup_position_action",
+    ):
+        np.testing.assert_array_equal(
+            inverse.filter_diagnostics[key],
+            normal.filter_diagnostics[key],
+        )
+
+
+def test_mode_d_direction_mode_inverse_mirrors_positions_and_trades():
+    kwargs = dict(
+        trend=np.zeros(6, dtype=np.int64),
+        trade_mode="both",
+        zigzag_global_stats=_stats(),
+        per_bar=_per_bar(t=1),
+    )
+
+    normal = apply(trade_filter_config=_cfg(direction_mode="normal"), **kwargs)
+    inverse = apply(trade_filter_config=_cfg(direction_mode="inverse"), **kwargs)
+    open_prices = np.array([100.0, 101.0, 102.0, 103.0, 104.0, 105.0])
+    index = pd.RangeIndex(len(open_prices))
+
+    returns_normal = calculate_returns(
+        open_prices,
+        normal.positions,
+        0.0,
+        execution_model=ExecutionModel.OPEN_TO_OPEN,
+    )
+    returns_inverse = calculate_returns(
+        open_prices,
+        inverse.positions,
+        0.0,
+        execution_model=ExecutionModel.OPEN_TO_OPEN,
+    )
+    trades_normal = extract_trades(
+        normal.positions,
+        returns_normal,
+        open_prices,
+        index,
+        0.0,
+        trend=np.zeros(6, dtype=np.int64),
+    )
+    trades_inverse = extract_trades(
+        inverse.positions,
+        returns_inverse,
+        open_prices,
+        index,
+        0.0,
+        trend=np.zeros(6, dtype=np.int64),
+    )
+
+    assert np.count_nonzero(normal.positions) >= 1
+    assert len(trades_normal) >= 1
+    np.testing.assert_array_equal(inverse.positions, -normal.positions)
+    assert np.abs(inverse.positions).sum() == np.abs(normal.positions).sum()
+    assert len(trades_inverse) == len(trades_normal)
+    np.testing.assert_array_equal(
+        trades_inverse["entry_index"].to_numpy(),
+        trades_normal["entry_index"].to_numpy(),
+    )
+    np.testing.assert_array_equal(
+        trades_inverse["exit_index"].to_numpy(),
+        trades_normal["exit_index"].to_numpy(),
+    )
+    assert trades_normal["direction"].tolist() == ["LONG"]
+    assert trades_inverse["direction"].tolist() == ["SHORT"]
+    np.testing.assert_allclose(
+        trades_inverse["gross_pnl_pct"].to_numpy(),
+        -trades_normal["gross_pnl_pct"].to_numpy(),
+        atol=1e-6,
+    )
+    np.testing.assert_array_equal(
+        inverse.filter_diagnostics["wakeup_active_direction"],
+        normal.filter_diagnostics["wakeup_active_direction"],
+    )
 
 
 @pytest.mark.parametrize(
@@ -781,6 +974,381 @@ def test_mode_d_cycle_trade_limit_max_one_close_position_next_active_bar():
     assert set(diag["wakeup_cycle_trade_limit_config"]) == {1}
     assert int(diag["wakeup_exit_close_triggered"][2]) == 1
     assert diag["trade_filter_state"][2] == "OFF"
+
+
+def test_mode_d_cycle_take_profit_threshold_exact_triggers_close_position():
+    trend = np.array([0, 1, -1, -1, -1], dtype=np.int64)
+    result = apply(
+        trend=trend,
+        trade_mode="both",
+        trade_filter_config=_cfg(
+            ttl_enabled=False,
+            cycle_take_profit_enabled=True,
+            cycle_take_profit_pnl_pct=0.01,
+            action_mode="close_position",
+        ),
+        zigzag_global_stats=_stats(),
+        per_bar=_per_bar(t=1, n=5),
+        open_prices=np.array([100.0, 100.0, 100.0, 101.0, 101.0]),
+        commission_rate=0.0,
+    )
+
+    diag = result.filter_diagnostics
+    assert int(diag["wakeup_exit_cycle_take_profit_triggered"][3]) == 1
+    assert int(diag["wakeup_exit_close_triggered"][3]) == 1
+    assert diag["wakeup_exit_reason"][3] == "cycle_take_profit"
+    assert diag["wakeup_position_action"][3] == "exit_cycle_take_profit"
+    assert diag["wakeup_cycle_realized_pnl_pct"][3] == 0.01
+    assert int(diag["wakeup_exit_cycle_take_profit_triggered"].sum()) == 1
+    assert result.positions.tolist() == [0, 0, 1, -1, 0]
+
+
+def test_mode_d_cycle_take_profit_below_threshold_does_not_trigger():
+    trend = np.array([0, 1, -1, -1, -1], dtype=np.int64)
+    result = apply(
+        trend=trend,
+        trade_mode="both",
+        trade_filter_config=_cfg(
+            ttl_enabled=False,
+            cycle_take_profit_enabled=True,
+            cycle_take_profit_pnl_pct=0.01,
+            action_mode="close_position",
+        ),
+        zigzag_global_stats=_stats(),
+        per_bar=_per_bar(t=1, n=5),
+        open_prices=np.array([100.0, 100.0, 100.0, 100.99, 100.99]),
+        commission_rate=0.0,
+    )
+
+    diag = result.filter_diagnostics
+    assert int(diag["wakeup_exit_cycle_take_profit_triggered"].sum()) == 0
+    assert diag["wakeup_cycle_realized_pnl_pct"][3] == 0.0099
+
+
+def test_mode_d_cycle_take_profit_lite_positions_match_diagnostics():
+    trend = np.array([0, 1, -1, -1, -1], dtype=np.int64)
+    kwargs = dict(
+        trend=trend,
+        trade_mode="both",
+        trade_filter_config=_cfg(
+            ttl_enabled=False,
+            cycle_take_profit_enabled=True,
+            cycle_take_profit_pnl_pct=0.01,
+            action_mode="close_position",
+        ),
+        zigzag_global_stats=_stats(),
+        per_bar=_per_bar(t=1, n=5),
+        open_prices=np.array([100.0, 100.0, 100.0, 101.0, 101.0]),
+        commission_rate=0.0,
+    )
+
+    diag_result = apply(**kwargs)
+    lite_result = apply(**kwargs, collect_filter_diagnostics=False)
+
+    assert lite_result.filter_diagnostics is None
+    assert lite_result.positions.tolist() == diag_result.positions.tolist()
+
+
+def test_mode_d_cycle_take_profit_block_new_entries_does_not_close_immediately():
+    result = apply(
+        trend=np.array([0, 1, -1, -1, 1, 1], dtype=np.int64),
+        trade_mode="both",
+        trade_filter_config=_cfg(
+            ttl_enabled=False,
+            cycle_take_profit_enabled=True,
+            cycle_take_profit_pnl_pct=0.01,
+            action_mode="block_new_entries",
+        ),
+        zigzag_global_stats=_stats(),
+        per_bar=_per_bar(t=1, n=6),
+        open_prices=np.array([100.0, 100.0, 100.0, 101.0, 101.0, 101.0]),
+        commission_rate=0.0,
+    )
+
+    diag = result.filter_diagnostics
+    assert int(diag["wakeup_exit_cycle_take_profit_triggered"][3]) == 1
+    assert int(diag["wakeup_exit_close_triggered"][3]) == 0
+    assert diag["wakeup_exit_reason"][3] == "cycle_take_profit"
+    assert diag["trade_filter_state"][3] == "ST_STOPPING"
+    assert result.positions.tolist() == [0, 0, 1, -1, -1, 0]
+
+
+def test_mode_d_cycle_take_profit_final_bar_requests_action_without_new_close():
+    result = apply(
+        trend=np.array([0, 1, -1, -1], dtype=np.int64),
+        trade_mode="both",
+        trade_filter_config=_cfg(
+            ttl_enabled=False,
+            cycle_take_profit_enabled=True,
+            cycle_take_profit_pnl_pct=0.01,
+            action_mode="close_position",
+        ),
+        zigzag_global_stats=_stats(),
+        per_bar=_per_bar(t=1, n=4),
+        open_prices=np.array([100.0, 100.0, 100.0, 101.0]),
+        commission_rate=0.0,
+    )
+
+    diag = result.filter_diagnostics
+    assert result.positions.tolist() == [0, 0, 1, -1]
+    assert int(diag["wakeup_exit_cycle_take_profit_triggered"][3]) == 1
+    assert int(diag["wakeup_exit_close_triggered"][3]) == 1
+
+    trades = extract_trades(
+        result.positions,
+        returns=np.zeros(3, dtype=np.float64),
+        execution_prices=np.array([100.0, 100.0, 100.0, 101.0]),
+        index=pd.date_range("2026-01-01", periods=4, freq="min"),
+        commission_rate=0.0,
+        trend=np.array([0, 1, -1, -1], dtype=np.int64),
+    )
+    assert trades.iloc[-1]["entry_index"] == 3
+    assert trades.iloc[-1]["exit_index"] == 3
+    assert trades.iloc[-1]["bars_held"] == 0
+
+
+def test_mode_d_cycle_take_profit_threshold_uses_net_pnl_after_commission():
+    result = apply(
+        trend=np.array([0, 1, -1, -1, -1], dtype=np.int64),
+        trade_mode="both",
+        trade_filter_config=_cfg(
+            ttl_enabled=False,
+            cycle_take_profit_enabled=True,
+            cycle_take_profit_pnl_pct=0.009,
+            action_mode="close_position",
+        ),
+        zigzag_global_stats=_stats(),
+        per_bar=_per_bar(t=1, n=5),
+        open_prices=np.array([100.0, 100.0, 100.0, 101.0, 101.0]),
+        commission_rate=0.001,
+    )
+
+    diag = result.filter_diagnostics
+    assert int(diag["wakeup_exit_cycle_take_profit_triggered"].sum()) == 0
+    assert diag["wakeup_cycle_realized_pnl_pct"][3] == pytest.approx(0.008)
+
+
+def test_mode_d_cycle_take_profit_reset_caused_close_is_excluded():
+    result = apply(
+        trend=np.array([0, 1, 1, 1, 1], dtype=np.int64),
+        trade_mode="both",
+        trade_filter_config=_cfg(
+            ttl_enabled=False,
+            cycle_take_profit_enabled=True,
+            cycle_take_profit_pnl_pct=0.01,
+            action_mode="close_position",
+        ),
+        zigzag_global_stats=_stats(),
+        per_bar=_per_bar(t=1, n=5),
+        daily_reset_event=np.array([False, False, True, False, False]),
+        open_prices=np.array([100.0, 100.0, 100.0, 200.0, 200.0]),
+        commission_rate=0.0,
+    )
+
+    diag = result.filter_diagnostics
+    assert result.positions.tolist() == [0, 0, 1, 0, 0]
+    assert int(diag["wakeup_exit_cycle_take_profit_triggered"].sum()) == 0
+    assert diag["wakeup_cycle_realized_pnl_pct"][3] == 0.0
+
+
+def test_mode_d_cycle_take_profit_membership_matches_trade_net_micropct():
+    prices = np.array([100.0, 100.0, 100.0, 101.0, 101.0])
+    result = apply(
+        trend=np.array([0, 1, -1, -1, -1], dtype=np.int64),
+        trade_mode="both",
+        trade_filter_config=_cfg(
+            ttl_enabled=False,
+            cycle_take_profit_enabled=True,
+            cycle_take_profit_pnl_pct=0.01,
+            action_mode="close_position",
+        ),
+        zigzag_global_stats=_stats(),
+        per_bar=_per_bar(t=1, n=5),
+        open_prices=prices,
+        commission_rate=0.0,
+    )
+
+    trades = extract_trades(
+        result.positions,
+        returns=np.zeros(4, dtype=np.float64),
+        execution_prices=prices,
+        index=pd.date_range("2026-01-01", periods=5, freq="min"),
+        commission_rate=0.0,
+        trend=np.array([0, 1, -1, -1, -1], dtype=np.int64),
+    )
+    realized_micropct = int(
+        round(result.filter_diagnostics["wakeup_cycle_realized_pnl_pct"][3] * 1e8)
+    )
+    member_micropct = net_pnl_pct_to_micropct(trades.iloc[0]["net_pnl_pct"])
+    assert realized_micropct == member_micropct
+
+
+def test_mode_d_cycle_take_profit_beats_ttl_on_same_bar():
+    result = apply(
+        trend=np.array([0, 1, -1, -1, -1], dtype=np.int64),
+        trade_mode="both",
+        trade_filter_config=_cfg(
+            ttl_enabled=True,
+            ttl_bars=2,
+            cycle_take_profit_enabled=True,
+            cycle_take_profit_pnl_pct=0.01,
+            action_mode="close_position",
+        ),
+        zigzag_global_stats=_stats(),
+        per_bar=_per_bar(t=1, n=5),
+        open_prices=np.array([100.0, 100.0, 100.0, 101.0, 101.0]),
+        commission_rate=0.0,
+    )
+
+    diag = result.filter_diagnostics
+    assert diag["wakeup_exit_reason"][3] == "cycle_take_profit"
+    assert diag["wakeup_position_action"][3] == "exit_cycle_take_profit"
+    assert int(diag["wakeup_exit_cycle_take_profit_triggered"][3]) == 1
+    assert int(diag["wakeup_exit_ttl_triggered"][3]) == 0
+
+
+def test_mode_d_cycle_take_profit_one_shot_and_stopping_close_excluded():
+    result = apply(
+        trend=np.array([0, 1, -1, -1, 1, 1], dtype=np.int64),
+        trade_mode="both",
+        trade_filter_config=_cfg(
+            ttl_enabled=False,
+            cycle_take_profit_enabled=True,
+            cycle_take_profit_pnl_pct=0.01,
+            action_mode="block_new_entries",
+        ),
+        zigzag_global_stats=_stats(),
+        per_bar=_per_bar(t=1, n=6),
+        open_prices=np.array([100.0, 100.0, 100.0, 101.0, 101.0, 50.0]),
+        commission_rate=0.0,
+    )
+
+    diag = result.filter_diagnostics
+    assert result.positions.tolist() == [0, 0, 1, -1, -1, 0]
+    assert diag["wakeup_exit_reason"][3] == "cycle_take_profit"
+    assert int(diag["wakeup_exit_cycle_take_profit_triggered"].sum()) == 1
+    assert int(diag["wakeup_exit_cycle_take_profit_triggered"][5]) == 0
+    assert diag["wakeup_cycle_realized_pnl_pct"][5] == 0.0
+
+
+def test_mode_d_cycle_take_profit_new_cycle_starts_with_zero_accumulator():
+    per_bar = _per_bar(t=1, n=8)
+    per_bar.candidate_height_pct[4] = 0.12
+    per_bar.candidate_age_bars[4] = 3
+    per_bar.candidate_leg_direction[4] = 1
+
+    result = apply(
+        trend=np.array([0, 1, -1, -1, 1, 1, -1, -1], dtype=np.int64),
+        trade_mode="both",
+        trade_filter_config=_cfg(
+            ttl_enabled=False,
+            cycle_take_profit_enabled=True,
+            cycle_take_profit_pnl_pct=0.009,
+            action_mode="close_position",
+        ),
+        zigzag_global_stats=_stats(),
+        per_bar=per_bar,
+        open_prices=np.array(
+            [100.0, 100.0, 100.0, 101.0, 101.0, 101.0, 101.0, 102.0]
+        ),
+        commission_rate=0.0,
+    )
+
+    diag = result.filter_diagnostics
+    assert diag["trade_filter_trigger_source"][4] == "wakeup_regime"
+    assert diag["wakeup_cycle_realized_pnl_pct"][4] == 0.0
+    assert np.flatnonzero(diag["wakeup_exit_cycle_take_profit_triggered"]).tolist() == [
+        3,
+        7,
+    ]
+
+
+def test_mode_d_cycle_take_profit_time_filter_reset_accumulates_before_reset():
+    result = apply(
+        trend=np.array([0, 1, -1, -1, -1], dtype=np.int64),
+        trade_mode="both",
+        trade_filter_config=_cfg(
+            ttl_enabled=False,
+            cycle_take_profit_enabled=True,
+            cycle_take_profit_pnl_pct=0.01,
+            action_mode="close_position",
+        ),
+        zigzag_global_stats=_stats(),
+        per_bar=_per_bar(t=1, n=5),
+        time_filter_events=(
+            np.ones(5, dtype=bool),
+            np.array([False, False, False, True, False], dtype=bool),
+        ),
+        open_prices=np.array([100.0, 100.0, 100.0, 101.0, 101.0]),
+        commission_rate=0.0,
+    )
+
+    diag = result.filter_diagnostics
+    assert diag["filter_block_reason"][3] == "time_filter_reset"
+    assert diag["wakeup_cycle_realized_pnl_pct"][3] == 0.01
+    assert int(diag["wakeup_exit_cycle_take_profit_triggered"].sum()) == 0
+
+
+def test_mode_d_cycle_take_profit_disabled_preserves_old_positions():
+    common = dict(
+        trend=np.array([0, 1, -1, -1, -1], dtype=np.int64),
+        trade_mode="both",
+        zigzag_global_stats=_stats(),
+        per_bar=_per_bar(t=1, n=5),
+        open_prices=np.array([100.0, 100.0, 100.0, 101.0, 101.0]),
+        commission_rate=0.0,
+    )
+    disabled = apply(
+        **common,
+        trade_filter_config=_cfg(
+            ttl_enabled=False,
+            cycle_take_profit_enabled=False,
+            action_mode="close_position",
+        ),
+    )
+    absent = apply(
+        **common,
+        trade_filter_config=_cfg(
+            ttl_enabled=False,
+            action_mode="close_position",
+        ),
+    )
+
+    np.testing.assert_array_equal(disabled.positions, absent.positions)
+    assert int(disabled.filter_diagnostics["wakeup_exit_cycle_take_profit_triggered"].sum()) == 0
+
+
+def test_mode_d_cycle_take_profit_membership_matches_reversal_f16_net_micropct():
+    prices = np.array([100.0, 100.0, 100.0, 101.0, 101.0])
+    result = apply(
+        trend=np.array([0, 1, -1, -1, -1], dtype=np.int64),
+        trade_mode="both",
+        trade_filter_config=_cfg(
+            ttl_enabled=False,
+            cycle_take_profit_enabled=True,
+            cycle_take_profit_pnl_pct=0.008,
+            action_mode="close_position",
+        ),
+        zigzag_global_stats=_stats(),
+        per_bar=_per_bar(t=1, n=5),
+        open_prices=prices,
+        commission_rate=0.001,
+    )
+
+    trades = extract_trades(
+        result.positions,
+        returns=np.zeros(4, dtype=np.float64),
+        execution_prices=prices,
+        index=pd.date_range("2026-01-01", periods=5, freq="min"),
+        commission_rate=0.001,
+        trend=np.array([0, 1, -1, -1, -1], dtype=np.int64),
+    )
+    realized_micropct = int(
+        round(result.filter_diagnostics["wakeup_cycle_realized_pnl_pct"][3] * 1e8)
+    )
+    member_micropct = net_pnl_pct_to_micropct(trades.iloc[0]["net_pnl_pct"])
+    assert trades.iloc[0]["commission_pct"] == 0.2
+    assert realized_micropct == member_micropct
 
 
 def test_mode_d_cycle_trade_limit_block_new_entries_prevents_fourth_opening():
@@ -1429,6 +1997,8 @@ def test_mode_d_wakeup_diagnostics_keyset_lengths_and_dtypes():
         "wakeup_cycle_age_bars": np.int64,
         "wakeup_bars_since_fresh_candidate": np.int64,
         "wakeup_cycle_trade_count": np.int64,
+        "wakeup_cycle_realized_pnl_pct": np.float64,
+        "wakeup_exit_cycle_take_profit_triggered": np.int8,
         "wakeup_exit_ttl_triggered": np.int8,
         "wakeup_exit_no_fresh_candidate_triggered": np.int8,
         "wakeup_exit_local_median_stop_triggered": np.int8,
@@ -2026,6 +2596,7 @@ def test_mode_d_excel_display_names_and_filters_summary_rows():
         "wakeup_starts_count": 2,
         "wakeup_entry_attempts_count": 3,
         "wakeup_exit_ttl_count": 1,
+        "wakeup_exit_cycle_take_profit_count": 9,
         "wakeup_exit_no_fresh_candidate_count": 1,
         "wakeup_exit_local_median_stop_count": 2,
         "wakeup_exit_close_count": 0,
@@ -2069,6 +2640,7 @@ def test_mode_d_excel_display_names_and_filters_summary_rows():
     assert row["Wakeup Starts"] == 2
     assert row["Wakeup Entry Attempts"] == 3
     assert row["Wakeup Exit TTL"] == 1
+    assert row["Wakeup Exit Cycle Take Profit"] == 9
     assert row["Wakeup Exit No Fresh Candidate"] == 1
     assert row["Wakeup Exit Local Median Stop"] == 2
     assert row["Wakeup Exit Close"] == 0
@@ -2143,6 +2715,7 @@ def test_mode_d_zigzag_trigger_events_use_wakeup_branch_and_link_trade():
         ("ttl", "wakeup_exit_ttl"),
         ("no_fresh_candidate", "wakeup_exit_no_fresh_candidate"),
         ("cycle_trade_limit", "wakeup_exit_cycle_trade_limit"),
+        ("cycle_take_profit", "wakeup_exit_cycle_take_profit"),
         ("reset", "wakeup_exit_reset"),
         ("opposite_st_flip", "wakeup_exit_opposite_st_flip"),
     ],
@@ -2201,6 +2774,7 @@ def test_mode_d_trade_exit_reason_none_preserves_legacy_mapping():
         ("reverse_on_st_flip", "wakeup_reverse_on_st_flip"),
         ("flat_on_disallowed_st_flip", "wakeup_flat_on_disallowed_st_flip"),
         ("exit_cycle_trade_limit", "wakeup_exit_cycle_trade_limit"),
+        ("exit_cycle_take_profit", "wakeup_exit_cycle_take_profit"),
         ("restore_allowed_position_on_st_flip", "st_flip"),
         ("position_freeze_ignored_opposite_st_flip", "st_flip"),
     ],

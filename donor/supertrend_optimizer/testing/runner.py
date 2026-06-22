@@ -444,6 +444,10 @@ def _build_wakeup_summary_fields(
         getattr(entry, "volume_expansion", None) if entry is not None else None
     )
     ttl = getattr(exit_cfg, "ttl", None) if exit_cfg is not None else None
+    cycle_take_profit = (
+        getattr(exit_cfg, "cycle_take_profit", None)
+        if exit_cfg is not None else None
+    )
     no_fresh = (
         getattr(exit_cfg, "no_fresh_candidate", None)
         if exit_cfg is not None else None
@@ -473,6 +477,9 @@ def _build_wakeup_summary_fields(
         "wakeup_starts_count": int(np.sum(trigger_source == "wakeup_regime")),
         "wakeup_entry_attempts_count": _sum_int8("wakeup_entry_all_ok"),
         "wakeup_exit_ttl_count": _sum_int8("wakeup_exit_ttl_triggered"),
+        "wakeup_exit_cycle_take_profit_count": _sum_int8(
+            "wakeup_exit_cycle_take_profit_triggered"
+        ),
         "wakeup_exit_no_fresh_candidate_count": _sum_int8(
             "wakeup_exit_no_fresh_candidate_triggered"
         ),
@@ -534,6 +541,9 @@ def _build_wakeup_summary_fields(
         "wakeup_volume_baseline_window": getattr(volume, "baseline_window", None),
         "wakeup_volume_min_ratio": getattr(volume, "min_ratio", None),
         "wakeup_ttl_bars": getattr(ttl, "bars", None),
+        "wakeup_cycle_take_profit_pnl_pct": getattr(
+            cycle_take_profit, "pnl_pct", None
+        ),
         "wakeup_no_fresh_max_age_bars": getattr(no_fresh, "max_age_bars", None),
         "wakeup_no_fresh_timeout_bars": getattr(no_fresh, "timeout_bars", None),
         "trigger_count_candidate_threshold": 0,
@@ -628,6 +638,7 @@ def _build_filter_diagnostics_summary(
                     "wakeup_volume_baseline_window",
                     "wakeup_volume_min_ratio",
                     "wakeup_ttl_bars",
+                    "wakeup_cycle_take_profit_pnl_pct",
                     "wakeup_no_fresh_max_age_bars",
                     "wakeup_no_fresh_timeout_bars",
                 )

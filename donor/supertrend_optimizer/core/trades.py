@@ -22,6 +22,103 @@ from typing import List, Dict, Any
 import pandas as pd
 
 
+def net_pnl_pct_to_micropct(net_pnl_pct: float) -> int:
+    return int(round(round(float(net_pnl_pct), 6) * 1_000_000))
+
+
+def closed_leg_trade_economics(
+    entry_idx: int,
+    exit_idx: int,
+    direction: int,
+    positions: np.ndarray,
+    execution_prices: np.ndarray,
+    commission_rate: float,
+) -> dict[str, float]:
+    """Return rounded gross/commission/net PnL for one closed leg."""
+    pos_arr = np.asarray(positions)
+    price_arr = np.asarray(execution_prices, dtype=np.float64)
+    if pos_arr.ndim != 1:
+        raise ValueError("positions must be a 1-D array")
+    if price_arr.ndim != 1:
+        raise ValueError("execution_prices must be a 1-D array")
+    if len(price_arr) != len(pos_arr):
+        raise ValueError(
+            f"execution_prices length {len(price_arr)} != positions length {len(pos_arr)}"
+        )
+    if not (0 <= int(entry_idx) <= int(exit_idx) < len(price_arr)):
+        raise ValueError(
+            f"invalid trade interval entry_idx={entry_idx}, exit_idx={exit_idx}, "
+            f"len={len(price_arr)}"
+        )
+    if int(direction) not in (-1, 1):
+        raise ValueError(f"direction must be +1 or -1, got {direction!r}")
+
+    entry_idx = int(entry_idx)
+    exit_idx = int(exit_idx)
+    direction = int(direction)
+    entry_price = float(price_arr[entry_idx])
+    exit_price = float(price_arr[exit_idx])
+    if (
+        not np.isfinite(entry_price)
+        or not np.isfinite(exit_price)
+        or entry_price <= 0.0
+        or exit_price <= 0.0
+    ):
+        raise ValueError(
+            "execution_prices at entry/exit must be finite and strictly positive"
+        )
+
+    commission_rate_f = float(commission_rate)
+    if not np.isfinite(commission_rate_f) or commission_rate_f < 0.0:
+        raise ValueError(
+            f"commission_rate must be finite and non-negative, got {commission_rate!r}"
+        )
+
+    if direction > 0:
+        total_return = (exit_price - entry_price) / entry_price
+    else:
+        total_return = (entry_price - exit_price) / entry_price
+    gross_pnl_pct = round(total_return * 100.0, 6)
+
+    commission_per_bar = np.abs(np.diff(pos_arr)) * commission_rate_f
+    commission_pct = round(
+        float(np.sum(commission_per_bar[entry_idx:exit_idx]) * 100.0),
+        6,
+    )
+    net_pnl_pct = round(gross_pnl_pct - commission_pct, 6)
+
+    if entry_idx > 0 and (entry_idx - 1) < len(commission_per_bar):
+        if pos_arr[entry_idx - 1] == 0:
+            opening_comm_pct = commission_per_bar[entry_idx - 1] * 100.0
+            commission_pct = round(commission_pct + opening_comm_pct, 6)
+            net_pnl_pct = round(net_pnl_pct - opening_comm_pct, 6)
+        elif (
+            pos_arr[entry_idx - 1] != 0
+            and pos_arr[entry_idx] != 0
+            and (pos_arr[entry_idx - 1] > 0) != (pos_arr[entry_idx] > 0)
+        ):
+            half_comm_pct = commission_rate_f * 100.0
+            commission_pct = round(commission_pct + half_comm_pct, 6)
+            net_pnl_pct = round(net_pnl_pct - half_comm_pct, 6)
+
+    if (
+        exit_idx > entry_idx
+        and 0 < exit_idx < len(pos_arr)
+        and pos_arr[exit_idx - 1] != 0
+        and pos_arr[exit_idx] != 0
+        and (pos_arr[exit_idx - 1] > 0) != (pos_arr[exit_idx] > 0)
+    ):
+        half_comm_pct = commission_rate_f * 100.0
+        commission_pct = round(commission_pct - half_comm_pct, 6)
+        net_pnl_pct = round(net_pnl_pct + half_comm_pct, 6)
+
+    return {
+        "gross_pnl_pct": gross_pnl_pct,
+        "commission_pct": commission_pct,
+        "net_pnl_pct": net_pnl_pct,
+    }
+
+
 def extract_trades(
     positions: np.ndarray,
     returns: np.ndarray,
@@ -112,20 +209,10 @@ def extract_trades(
             columns.append('supertrend_color')
         return pd.DataFrame(columns=columns)
 
-    # Pre-calculate commission per bar using forward diff (synchronized with backtest).
-    # commission_per_bar[i] covers the transition positions[i] → positions[i+1],
-    # which corresponds to bar i in returns (length = n, indices 0..n-1).
-    commission_per_bar = np.zeros(n, dtype=np.float64)
-    for i in range(n):
-        commission_per_bar[i] = abs(positions[i + 1] - positions[i]) * commission_rate
-
-    # -----------------------------------------------------------------------
     # Main trade-extraction loop.
-    #
     # Iterates over ALL n+1 position slots (i = 0 .. n) so that EVERY
     # transition — including the final positions[n-1] → positions[n] — is
     # handled uniformly.  No separate edge-case block is needed.
-    #
     # When i == n the slot has no corresponding return bar; a trade opened
     # here will have bars_held = 0 (pending trade).
     # -----------------------------------------------------------------------
@@ -150,7 +237,8 @@ def extract_trades(
                     entry_idx=entry_idx,
                     exit_idx=i,
                     returns=returns,
-                    commission_per_bar=commission_per_bar,
+                    positions=positions,
+                    commission_rate=commission_rate,
                     execution_prices=execution_prices,
                     index=index,
                     trend=trend,
@@ -177,7 +265,8 @@ def extract_trades(
             entry_idx=entry_idx,
             exit_idx=n,
             returns=returns,
-            commission_per_bar=commission_per_bar,
+            positions=positions,
+            commission_rate=commission_rate,
             execution_prices=execution_prices,
             index=index,
             trend=trend,
@@ -185,68 +274,10 @@ def extract_trades(
         )
         trades.append(trade)
 
-    # -----------------------------------------------------------------------
-    # Unified commission post-processing (single pass).
-    #
-    # Two adjustments must be made after the main loop; combining them into
-    # one pass eliminates the risk of double-counting that existed when two
-    # separate loops ran sequentially.
-    #
-    # Adjustment 1 — Opening commission (flat → position transition):
-    #   When a trade opens from flat (positions[entry-1] == 0) the
-    #   commission for that entry bar lives at commission_per_bar[entry-1],
-    #   which is OUTSIDE the trade interval [entry, exit).  Move it inside
-    #   so that sum(trades.commission_pct) == sum(bar-level commission)*100.
-    #
-    # Adjustment 2 — Reversal commission split (F-16):
-    #   At a ±1 → ∓1 reversal bar the position diff is ±2, so
-    #   commission_per_bar[reversal_bar] == 2 × commission_rate.
-    #   That bar falls inside the CLOSING trade's interval, charging the
-    #   full 2× to the closer while the opener gets nothing.
-    #   Fix: transfer exactly 1× rate from the closing trade to the
-    #   opening trade.  Portfolio-level total commission is unchanged.
-    #
-    # These two conditions are MUTUALLY EXCLUSIVE:
-    #   - Adj-1 fires when positions[entry-1] == 0  (came from flat)
-    #   - Adj-2 fires when positions[entry-1] != 0  (came from opposite side)
-    # Therefore running them in one loop with an elif is safe.
-    # -----------------------------------------------------------------------
-    for i, trade in enumerate(trades):
-        entry = trade['entry_index']
-
-        # --- Adjustment 1: opening commission from flat ---
-        if entry > 0 and (entry - 1) < n and positions[entry - 1] == 0:
-            opening_comm_pct = commission_per_bar[entry - 1] * 100.0
-            trade['commission_pct'] = round(trade['commission_pct'] + opening_comm_pct, 6)
-            trade['net_pnl_pct'] = round(trade['net_pnl_pct'] - opening_comm_pct, 6)
-            # gross_pnl is price-based → unchanged; net↓ + comm↑ cancel out
-
-        # --- Adjustment 2: reversal split (F-16) ---
-        elif i > 0:
-            closing = trades[i - 1]
-            exit_idx = closing['exit_index']
-            # Must be a back-to-back transition (same bar)
-            if exit_idx == entry:
-                # Guard: exit_idx must be an interior index of positions
-                if 0 < exit_idx < len(positions):
-                    pos_before = positions[exit_idx - 1]
-                    pos_after = positions[exit_idx]
-                    # Both non-zero and opposite signs → reversal
-                    if (pos_before != 0 and pos_after != 0
-                            and (pos_before > 0) != (pos_after > 0)):
-                        half_comm_pct = commission_rate * 100.0
-                        closing['commission_pct'] = round(
-                            closing['commission_pct'] - half_comm_pct, 6)
-                        closing['net_pnl_pct'] = round(
-                            closing['net_pnl_pct'] + half_comm_pct, 6)
-                        trade['commission_pct'] = round(
-                            trade['commission_pct'] + half_comm_pct, 6)
-                        trade['net_pnl_pct'] = round(
-                            trade['net_pnl_pct'] - half_comm_pct, 6)
-
     # Conservation invariant: sum of per-trade commission must equal the sum
     # of all bar-level commission costs (both expressed in percent).
     if trades and commission_rate > 0:
+        commission_per_bar = np.abs(np.diff(positions)) * commission_rate
         total_bar_comm_pct = float(np.sum(commission_per_bar) * 100.0)
         total_trade_comm_pct = sum(t['commission_pct'] for t in trades)
         if not abs(total_trade_comm_pct - total_bar_comm_pct) < 1e-4:
@@ -278,7 +309,8 @@ def _build_trade(
     entry_idx: int,
     exit_idx: int,
     returns: np.ndarray,
-    commission_per_bar: np.ndarray,
+    positions: np.ndarray,
+    commission_rate: float,
     execution_prices: np.ndarray,
     index: pd.Index,
     trend: np.ndarray | None = None,
@@ -321,19 +353,19 @@ def _build_trade(
     # Bars held
     bars_held = exit_idx - entry_idx
 
-    # Gross PnL % — simple return from entry/exit prices
     position = 1 if direction == "LONG" else -1
-    if position > 0:
-        total_return = (exit_price - entry_price) / entry_price
-    else:
-        total_return = (entry_price - exit_price) / entry_price
-    gross_pnl_pct = total_return * 100.0
+    economics = closed_leg_trade_economics(
+        entry_idx,
+        exit_idx,
+        position,
+        positions,
+        execution_prices,
+        commission_rate,
+    )
+    commission_pct = economics["commission_pct"]
 
-    # Commission % — sum of commission per bar in trade interval [entry, exit)
-    commission_pct = float(np.sum(commission_per_bar[entry_idx:exit_idx]) * 100.0)
-
-    # Net PnL %
-    net_pnl_pct = gross_pnl_pct - commission_pct
+    gross_pnl_pct = economics["gross_pnl_pct"]
+    net_pnl_pct = economics["net_pnl_pct"]
 
     trade_dict: Dict[str, Any] = {
         'trade_id': trade_id,
@@ -345,9 +377,9 @@ def _build_trade(
         'exit_index': exit_idx,
         'exit_price': round(exit_price, 6),
         'bars_held': bars_held,
-        'gross_pnl_pct': round(gross_pnl_pct, 6),
-        'commission_pct': round(commission_pct, 6),
-        'net_pnl_pct': round(net_pnl_pct, 6),
+        'gross_pnl_pct': gross_pnl_pct,
+        'commission_pct': commission_pct,
+        'net_pnl_pct': net_pnl_pct,
     }
 
     # SuperTrend color — always written (BUG-07 fix)

@@ -80,6 +80,7 @@ _V3_INIT_FAILURE_KEYS = frozenset({
     "exit_c_rejects_legacy_triggers",
     "wakeup_regime_requires_mode_d",
     "wakeup_enabled_requires_mode_d",
+    "wakeup_direction_mode_invalid",
     "position_freeze_enabled_invalid_type",
     "position_freeze_enabled_requires_wakeup_enabled",
     "position_freeze_enabled_requires_mode_d",
@@ -289,6 +290,8 @@ class TradeFilterWakeupEntryConfig:
     volume_expansion: TradeFilterWakeupVolumeExpansionConfig = field(
         default_factory=TradeFilterWakeupVolumeExpansionConfig
     )
+    # Stored under entry for config structure; applied post-FSM to the full position stream.
+    direction_mode: object = "normal"
 
 
 @dataclass
@@ -312,6 +315,12 @@ class TradeFilterWakeupMaxTradesPerCycleConfig:
 
 
 @dataclass
+class TradeFilterWakeupCycleTakeProfitExitConfig:
+    enabled: object = False
+    pnl_pct: object = None
+
+
+@dataclass
 class TradeFilterWakeupLocalMedianStopExitConfig:
     enabled: object = False
 
@@ -331,6 +340,9 @@ class TradeFilterWakeupExitConfig:
     )
     max_trades_per_cycle: TradeFilterWakeupMaxTradesPerCycleConfig = field(
         default_factory=TradeFilterWakeupMaxTradesPerCycleConfig
+    )
+    cycle_take_profit: TradeFilterWakeupCycleTakeProfitExitConfig = field(
+        default_factory=TradeFilterWakeupCycleTakeProfitExitConfig
     )
     local_median_stop: TradeFilterWakeupLocalMedianStopExitConfig = field(
         default_factory=TradeFilterWakeupLocalMedianStopExitConfig
@@ -557,7 +569,7 @@ TRADE_FILTER_ALLOWED_KEYS: dict[str, frozenset[str]] = {
     }),
     "trade_filter.wakeup_regime.entry": frozenset({
         "candidate_height", "candidate_age", "atr_expansion",
-        "volume_expansion",
+        "volume_expansion", "direction_mode",
     }),
     "trade_filter.wakeup_regime.entry.candidate_height": frozenset({
         "enabled", "quantile",
@@ -573,7 +585,7 @@ TRADE_FILTER_ALLOWED_KEYS: dict[str, frozenset[str]] = {
     }),
     "trade_filter.wakeup_regime.exit": frozenset({
         "ttl", "no_fresh_candidate", "max_trades_per_cycle",
-        "local_median_stop", "action",
+        "cycle_take_profit", "local_median_stop", "action",
     }),
     "trade_filter.wakeup_regime.exit.ttl": frozenset({
         "enabled", "bars",
@@ -583,6 +595,9 @@ TRADE_FILTER_ALLOWED_KEYS: dict[str, frozenset[str]] = {
     }),
     "trade_filter.wakeup_regime.exit.max_trades_per_cycle": frozenset({
         "enabled", "max_trades",
+    }),
+    "trade_filter.wakeup_regime.exit.cycle_take_profit": frozenset({
+        "enabled", "pnl_pct",
     }),
     "trade_filter.wakeup_regime.exit.local_median_stop": frozenset({
         "enabled",
@@ -770,6 +785,7 @@ def build_trade_filter_config_from_raw(tf_raw: dict) -> TradeFilterConfig:
         ttl_raw: dict = exit_raw.get("ttl") or {}
         no_fresh_raw: dict = exit_raw.get("no_fresh_candidate") or {}
         max_trades_raw: dict = exit_raw.get("max_trades_per_cycle") or {}
+        cycle_take_profit_raw: dict = exit_raw.get("cycle_take_profit") or {}
         local_median_stop_raw: dict = exit_raw.get("local_median_stop") or {}
         action_raw: dict = exit_raw.get("action") or {}
         position_freeze_raw = wakeup_raw.get("position_freeze") or {}
@@ -801,6 +817,7 @@ def build_trade_filter_config_from_raw(tf_raw: dict) -> TradeFilterConfig:
                     ),
                     min_ratio=volume_expansion_raw.get("min_ratio", None),
                 ),
+                direction_mode=entry_raw.get("direction_mode", "normal"),
             ),
             exit=TradeFilterWakeupExitConfig(
                 ttl=TradeFilterWakeupTtlExitConfig(
@@ -816,6 +833,10 @@ def build_trade_filter_config_from_raw(tf_raw: dict) -> TradeFilterConfig:
                 max_trades_per_cycle=TradeFilterWakeupMaxTradesPerCycleConfig(
                     enabled=max_trades_raw.get("enabled", False),
                     max_trades=max_trades_raw.get("max_trades", None),
+                ),
+                cycle_take_profit=TradeFilterWakeupCycleTakeProfitExitConfig(
+                    enabled=cycle_take_profit_raw.get("enabled", False),
+                    pnl_pct=cycle_take_profit_raw.get("pnl_pct", None),
                 ),
                 local_median_stop=TradeFilterWakeupLocalMedianStopExitConfig(
                     enabled=local_median_stop_raw.get("enabled", False),
@@ -1829,6 +1850,27 @@ def _validate_wakeup_component_enabled(
     return enabled is True
 
 
+def _validate_wakeup_direction_mode(value: object, errors: list[str]) -> None:
+    if not isinstance(value, str):
+        _append_validation_error(
+            errors,
+            "trade_filter.wakeup_regime.entry.direction_mode must be a string, "
+            f"got {type(value).__name__} ({value!r})",
+            _VALIDATION_ERROR_KEYS.get(),
+            "wakeup_direction_mode_invalid",
+        )
+        return
+
+    if value not in ("normal", "inverse"):
+        _append_validation_error(
+            errors,
+            "trade_filter.wakeup_regime.entry.direction_mode must be "
+            f"'normal' or 'inverse', got {value!r}",
+            _VALIDATION_ERROR_KEYS.get(),
+            "wakeup_direction_mode_invalid",
+        )
+
+
 def _validate_wakeup_regime_block(
     tf: TradeFilterConfig,
     errors: list[str],
@@ -1850,6 +1892,15 @@ def _validate_wakeup_regime_block(
             errors,
         )
 
+    entry_key = wakeup_key + ("entry",)
+    entry = wakeup.entry
+    direction_mode_key = entry_key + ("direction_mode",)
+    if direction_mode_key in raw_user_keys:
+        _validate_wakeup_direction_mode(
+            getattr(entry, "direction_mode", "normal"),
+            errors,
+        )
+
     if not _validate_bool_field(
         getattr(wakeup, "enabled", False),
         "trade_filter.wakeup_regime.enabled",
@@ -1858,7 +1909,6 @@ def _validate_wakeup_regime_block(
         return
 
     wakeup_enabled = wakeup.enabled is True
-    entry_key = wakeup_key + ("entry",)
     exit_key = wakeup_key + ("exit",)
     if wakeup_enabled:
         if entry_key not in raw_user_keys:
@@ -1872,7 +1922,6 @@ def _validate_wakeup_regime_block(
                 "wakeup_regime.enabled is true"
             )
 
-    entry = wakeup.entry
     ch_path = entry_key + ("candidate_height",)
     ca_path = entry_key + ("candidate_age",)
     atr_path = entry_key + ("atr_expansion",)
@@ -1969,6 +2018,7 @@ def _validate_wakeup_regime_block(
     ttl_path = exit_key + ("ttl",)
     nf_path = exit_key + ("no_fresh_candidate",)
     mt_path = exit_key + ("max_trades_per_cycle",)
+    ctp_path = exit_key + ("cycle_take_profit",)
     lms_path = exit_key + ("local_median_stop",)
     action_path = exit_key + ("action",)
 
@@ -1980,6 +2030,9 @@ def _validate_wakeup_regime_block(
     )
     max_trades_enabled = _validate_wakeup_component_enabled(
         wakeup_exit.max_trades_per_cycle, mt_path, raw_user_keys, errors
+    )
+    cycle_take_profit_enabled = _validate_wakeup_component_enabled(
+        wakeup_exit.cycle_take_profit, ctp_path, raw_user_keys, errors
     )
     local_median_stop_enabled = _validate_wakeup_component_enabled(
         wakeup_exit.local_median_stop, lms_path, raw_user_keys, errors
@@ -2020,11 +2073,19 @@ def _validate_wakeup_regime_block(
         errors,
         required=max_trades_enabled,
     )
+    _validate_required_positive_finite(
+        wakeup_exit.cycle_take_profit.pnl_pct,
+        ctp_path + ("pnl_pct",) in raw_user_keys,
+        "trade_filter.wakeup_regime.exit.cycle_take_profit.pnl_pct",
+        errors,
+        required=cycle_take_profit_enabled,
+    )
 
     if wakeup_enabled and not any((
         ttl_enabled,
         nf_enabled,
         max_trades_enabled,
+        cycle_take_profit_enabled,
         local_median_stop_enabled,
     )):
         errors.append(
@@ -2655,6 +2716,7 @@ __all__ = [
     "TradeFilterWakeupTtlExitConfig",
     "TradeFilterWakeupNoFreshCandidateExitConfig",
     "TradeFilterWakeupMaxTradesPerCycleConfig",
+    "TradeFilterWakeupCycleTakeProfitExitConfig",
     "TradeFilterWakeupLocalMedianStopExitConfig",
     "TradeFilterWakeupExitActionConfig",
     "TradeFilterWakeupPositionFreezeConfig",

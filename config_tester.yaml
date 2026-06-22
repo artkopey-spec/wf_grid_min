@@ -1,14 +1,14 @@
-# Full diagnostics config for representative 20.06 run:
-# 2032_modeD_slow_lite_long_asw005_alw0700_amr30_vsw007_vbw0800_vmr28_ttl090_hold01
+# Full diagnostics config for mass-run config #0551:
+# lite_atr010_mult10_ch_q060_ttl090_hold03_lw13_rev005
 #
 # Run example:
-#   python -m supertrend_optimizer.cli.tester --csv data.csv --config config_tester.yaml --out result_2032_full_diagnostics.xlsx
+#   python -m supertrend_optimizer.cli.tester --csv data.csv --config config_tester.yaml --out result_lite_atr010_mult10_ch_q060_ttl090_hold03_lw13_rev005_full_diagnostics.xlsx
 
 supertrend:
-  atr_period: 20
+  atr_period: 10
   multiplier: 1.0
 
-trade_mode: long
+trade_mode: revers
 period: false
 
 commission: 0.0000
@@ -37,20 +37,26 @@ export:
   cycle: true
   trades: true
   false_start_max_bars: 4
+  diagnostics_v2: true
+  diagnostics_v2_flags: {}
 
 trade_filter:
   enabled: true
   type: zigzag_st_mode
+
+  diagnostics:
+    export_state_columns: true
+    export_trigger_columns: true
 
   zigzag:
     enabled: true
     mode: D
     global_stats_source: full_dataset
     leg_height_mode: pct
-    reversal_threshold: 0.001
+    reversal_threshold: 0.005
     candidate_trigger_threshold: 0.012
     global_median: auto
-    local_window: 5
+    local_window: 13
     daily_reset: false
     candidate_duration_gate:
       enabled: false
@@ -62,7 +68,7 @@ trade_filter:
     exit_off_mode: "exit C"
 
   time_filter:
-    enabled: true
+    enabled: false
     window: "09:00-19:00"
 
   volume:
@@ -80,7 +86,7 @@ trade_filter:
     regime_high_ratio: 1.2
     direction_lookback_bars: 5
     baseline_session:
-      enabled: true
+      enabled: false
       window: "09:00-19:00"
 
   wakeup_regime:
@@ -89,20 +95,20 @@ trade_filter:
     entry:
       candidate_height:
         enabled: true
-        quantile: 0.4
+        quantile: 0.6
       candidate_age:
         enabled: false
         max_bars: 10
       atr_expansion:
-        enabled: true
-        short_window: 5
-        long_window: 700
-        min_ratio: 2.0
+        enabled: false
+        short_window: 30
+        long_window: 400
+        min_ratio: 1.6
       volume_expansion:
-        enabled: true
-        short_window: 7
-        baseline_window: 800
-        min_ratio: 2.0
+        enabled: false
+        short_window: 10
+        baseline_window: 1000
+        min_ratio: 0.5
 
     exit:
       ttl:
@@ -113,14 +119,13 @@ trade_filter:
         quantile: 0.60
         max_age_bars: 15
         timeout_bars: 20
-      max_trades_per_cycle:
+      local_median_stop:
         enabled: true
-        max_trades: 6
       action:
         mode: close_position
 
     position_freeze:
       enabled: true
-      min_hold_bars: 1
+      min_hold_bars: 3
       apply_to: internal_opposite_st_flip
       release_action: apply_if_still_opposite

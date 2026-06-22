@@ -175,6 +175,14 @@ def _compute_filter_diagnostics_summary(
     if zz_leg_arr is not None:
         summary["zz_leg_stop_triggered_count"] = int(np.sum(np.asarray(zz_leg_arr) == 1))
 
+    wakeup_ctp_arr = filter_diagnostics.get(
+        "wakeup_exit_cycle_take_profit_triggered"
+    )
+    if wakeup_ctp_arr is not None:
+        summary["wakeup_exit_cycle_take_profit_count"] = int(
+            np.sum(np.asarray(wakeup_ctp_arr) == 1)
+        )
+
     eom_arr = filter_diagnostics.get("exit_off_mode")
     if eom_arr is not None:
         _e = np.asarray(eom_arr)

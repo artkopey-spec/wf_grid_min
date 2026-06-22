@@ -5,8 +5,8 @@
 #   python -m supertrend_optimizer.cli.tester --csv data.csv --config config_tester.yaml --out result_lite_atr010_mult10_ch_q060_ttl090_hold03_lw13_rev005_full_diagnostics.xlsx
 
 supertrend:
-  atr_period: 10
-  multiplier: 1.0
+  atr_period: 50
+  multiplier: 2.5
 
 trade_mode: revers
 period: false
@@ -53,10 +53,10 @@ trade_filter:
     mode: D
     global_stats_source: full_dataset
     leg_height_mode: pct
-    reversal_threshold: 0.005
+    reversal_threshold: 0.001
     candidate_trigger_threshold: 0.012
     global_median: auto
-    local_window: 13
+    local_window: 8
     daily_reset: false
     candidate_duration_gate:
       enabled: false
@@ -93,9 +93,10 @@ trade_filter:
     enabled: true
     lock_cycle_direction: false
     entry:
+      direction_mode: inverse
       candidate_height:
         enabled: true
-        quantile: 0.6
+        quantile: 0.4
       candidate_age:
         enabled: false
         max_bars: 10
@@ -126,6 +127,6 @@ trade_filter:
 
     position_freeze:
       enabled: true
-      min_hold_bars: 3
+      min_hold_bars: 1
       apply_to: internal_opposite_st_flip
       release_action: apply_if_still_opposite

@@ -351,6 +351,7 @@ def test_mode_d_direction_mode_absent_equals_explicit_normal():
     explicit = apply(trade_filter_config=_cfg(direction_mode="normal"), **kwargs)
 
     np.testing.assert_array_equal(absent.positions, explicit.positions)
+    np.testing.assert_array_equal(absent.positions, [0, 0, 1, 1, 1, 1])
     assert absent.filter_diagnostics.keys() == explicit.filter_diagnostics.keys()
 
 

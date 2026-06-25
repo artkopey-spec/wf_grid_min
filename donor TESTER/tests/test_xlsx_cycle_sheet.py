@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import math
+from datetime import datetime
 from types import SimpleNamespace
 
 import numpy as np
@@ -1260,15 +1261,28 @@ def test_write_cycle_sheet_autofilter_and_datetime_format(tmp_path):
     cycle_df.loc[0, "Конец цикла"] = pd.Timestamp("2026-01-01 03:04:05")
 
     path = tmp_path / "cycle_writer.xlsx"
-    with pd.ExcelWriter(path, engine="openpyxl") as writer:
+    with pd.ExcelWriter(
+        path,
+        engine="xlsxwriter",
+        engine_kwargs={"options": {"strings_to_urls": False}},
+        datetime_format="yyyy-mm-dd hh:mm:ss",
+    ) as writer:
         excel_tester._write_cycle_sheet(writer, cycle_df)
 
     wb = openpyxl.load_workbook(path)
     ws = wb["cycle"]
     assert [cell.value for cell in ws[1]] == list(excel_tester.CYCLE_SHEET_COLUMNS)
     assert ws.auto_filter.ref == "A1:W1"
-    assert ws["A2"].number_format == "YYYY-MM-DD HH:MM:SS"
-    assert ws["B2"].number_format == "YYYY-MM-DD HH:MM:SS"
+    assert ws["A2"].value == datetime(2026, 1, 1, 1, 2, 3)
+    assert ws["B2"].value == datetime(2026, 1, 1, 3, 4, 5)
+    assert ws["A2"].number_format in {
+        "YYYY-MM-DD HH:MM:SS",
+        "yyyy-mm-dd hh:mm:ss",
+    }
+    assert ws["B2"].number_format in {
+        "YYYY-MM-DD HH:MM:SS",
+        "yyyy-mm-dd hh:mm:ss",
+    }
 
 
 def test_write_empty_cycle_sheet_keeps_autofilter(tmp_path):
@@ -1276,7 +1290,12 @@ def test_write_empty_cycle_sheet_keeps_autofilter(tmp_path):
     import supertrend_optimizer.io.excel_tester as excel_tester
 
     path = tmp_path / "cycle_writer_empty.xlsx"
-    with pd.ExcelWriter(path, engine="openpyxl") as writer:
+    with pd.ExcelWriter(
+        path,
+        engine="xlsxwriter",
+        engine_kwargs={"options": {"strings_to_urls": False}},
+        datetime_format="yyyy-mm-dd hh:mm:ss",
+    ) as writer:
         excel_tester._write_cycle_sheet(
             writer,
             pd.DataFrame(columns=excel_tester.CYCLE_SHEET_COLUMNS),

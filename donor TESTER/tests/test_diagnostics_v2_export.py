@@ -234,3 +234,33 @@ def test_export_diagnostics_v2_applies_generic_sheet_formatting(tmp_path):
         assert ws.column_dimensions["A"].width >= 8
     finally:
         wb.close()
+
+
+def test_write_diagnostics_v2_sheet_direct_xlsxwriter_formatting(tmp_path):
+    out = tmp_path / "direct_diagnostics_v2.xlsx"
+    df = pd.DataFrame(
+        {
+            "Check": ["rows"],
+            "Status": ["ok"],
+            "Value": [1],
+            "Details": ["direct helper readback"],
+            "Timestamp": pd.Series(
+                [pd.Timestamp("2026-01-01 01:02:03", tz="UTC")],
+                dtype=object,
+            ),
+            "Extra": ["x"],
+        }
+    )
+
+    with excel_tester._create_xlsx_writer(str(out)) as writer:
+        excel_tester._write_diagnostics_v2_sheet(writer, "Direct_Diagnostics", df)
+
+    wb = load_workbook(out)
+    try:
+        ws = wb["Direct_Diagnostics"]
+        assert ws.freeze_panes == "A2"
+        assert ws.auto_filter.ref == "A1:F2"
+        assert ws.column_dimensions["A"].width >= 8
+        assert ws["E2"].value == pd.Timestamp("2026-01-01 01:02:03").to_pydatetime()
+    finally:
+        wb.close()

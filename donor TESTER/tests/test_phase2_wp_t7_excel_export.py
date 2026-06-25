@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import io
 import tempfile
+from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 import pytest
@@ -296,6 +297,110 @@ def _load_baseline_wb(path: Path):
         pytest.skip(f"Baseline file not found: {path} (run WP-T1 capture first)")
     import openpyxl
     return openpyxl.load_workbook(str(path))
+
+
+def _openpyxl_load(path: Path):
+    import openpyxl
+    return openpyxl.load_workbook(path)
+
+
+def test_xlsxwriter_export_helpers_accept_object_timezone_datetimes(tmp_path) -> None:
+    import supertrend_optimizer.io.excel_tester as excel_tester
+
+    tz_dt = datetime(2026, 1, 1, 1, 2, 3, tzinfo=timezone.utc)
+    tz_exit = datetime(2026, 1, 1, 2, 3, 4, tzinfo=timezone.utc)
+    path = tmp_path / "object_tz_datetimes.xlsx"
+
+    signals_df = pd.DataFrame({
+        "signal_time": pd.Series([tz_dt], dtype=object),
+        "signal_body_pct": [0.1],
+        "signal_range_pct": [0.2],
+        "signal_body_pct_median_ratio": [2.1],
+        "signal_range_pct_median_ratio": [1.7],
+        "t1_return_pct": [-0.01],
+        "t2_return_pct": [0.02],
+        "t3_return_pct": [-0.03],
+    })
+    trades_raw = pd.DataFrame({
+        "entry_time": pd.Series([tz_dt], dtype=object),
+        "exit_time": pd.Series([tz_exit], dtype=object),
+        "entry_price": [100.0],
+        "exit_price": [101.0],
+        "direction": ["LONG"],
+        "trade_id": [1],
+    })
+    false_start_df = pd.DataFrame({
+        excel_tester.TRADES_DISPLAY_NAMES["entry_time"]: pd.Series([tz_dt], dtype=object),
+        excel_tester.TRADES_DISPLAY_NAMES["exit_time"]: pd.Series([tz_exit], dtype=object),
+        excel_tester.SIGNALS_DISPLAY_NAMES["signal_time"]: pd.Series([tz_dt], dtype=object),
+        excel_tester.TRADES_DISPLAY_NAMES["bars_held"]: [1],
+        excel_tester.TRADES_DISPLAY_NAMES["net_pnl_pct"]: [-0.1],
+        excel_tester.SIGNALS_DISPLAY_NAMES["is_reversal"]: [False],
+    })
+
+    with excel_tester._create_xlsx_writer(str(path)) as writer:
+        excel_tester._write_signals_sheet(writer, "Signals", signals_df)
+
+        trades_df = excel_tester._prepare_legacy_trades_df(
+            trades_raw,
+            filter_enabled=False,
+            filter_diagnostics_available=False,
+        )
+        trades_df.to_excel(writer, sheet_name="Trades_Normal", index=False)
+        excel_tester._format_trades_datetime(
+            writer,
+            trades_df,
+            writer.sheets["Trades_Normal"],
+        )
+
+        excel_tester._write_trades_sheet(writer, "Trades_EqualBlocks", trades_raw)
+        excel_tester._write_false_start_sheet(writer, trades_raw, false_start_df)
+
+    wb = _openpyxl_load(path)
+    assert wb["Signals"]["A2"].value == datetime(2026, 1, 1, 1, 2, 3)
+    assert wb["Trades_Normal"]["A2"].value == datetime(2026, 1, 1, 1, 2, 3)
+    assert wb["Trades_EqualBlocks"]["A2"].value == datetime(2026, 1, 1, 1, 2, 3)
+
+    false_ws = wb[excel_tester.FALSE_START_SHEET_NAME]
+    header_row = None
+    for row in false_ws.iter_rows():
+        if row[0].value == excel_tester.TRADES_DISPLAY_NAMES["entry_time"]:
+            header_row = row[0].row
+            break
+    assert header_row is not None
+    assert false_ws.cell(row=header_row + 1, column=1).value == datetime(2026, 1, 1, 1, 2, 3)
+
+
+def test_signals_xlsxwriter_conditional_formatting_non_empty_and_empty(tmp_path) -> None:
+    import supertrend_optimizer.io.excel_tester as excel_tester
+
+    non_empty_path = tmp_path / "signals_non_empty.xlsx"
+    signals_df = pd.DataFrame({
+        "signal_time": pd.to_datetime(["2026-01-01 01:02:03"]),
+        "signal_body_pct": [0.1],
+        "signal_range_pct": [0.2],
+        "signal_body_pct_median_ratio": [2.1],
+        "signal_range_pct_median_ratio": [1.7],
+        "t1_return_pct": [-0.01],
+        "t2_return_pct": [0.02],
+        "t3_return_pct": [-0.03],
+    })
+    with excel_tester._create_xlsx_writer(str(non_empty_path)) as writer:
+        excel_tester._write_signals_sheet(writer, "Signals", signals_df)
+
+    wb = _openpyxl_load(non_empty_path)
+    ws = wb["Signals"]
+    assert ws.auto_filter.ref == "A1:H1"
+    assert len(ws.conditional_formatting._cf_rules) == 7
+
+    empty_path = tmp_path / "signals_empty.xlsx"
+    with excel_tester._create_xlsx_writer(str(empty_path)) as writer:
+        excel_tester._write_signals_sheet(writer, "Signals", signals_df.iloc[0:0])
+
+    empty_wb = _openpyxl_load(empty_path)
+    empty_ws = empty_wb["Signals"]
+    assert empty_ws.auto_filter.ref == "A1:H1"
+    assert len(empty_ws.conditional_formatting._cf_rules) == 0
 
 
 # ---------------------------------------------------------------------------

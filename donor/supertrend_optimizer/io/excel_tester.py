@@ -28,6 +28,10 @@ from supertrend_optimizer.core.zigzag_st_filter import (
 )
 
 
+# Full-bar filter diagnostics sheet (333k+ rows) remains heavy for XLSX export.
+_FILTER_DIAGNOSTICS_100_MAX_ROWS = 100_000
+
+
 # ---------------------------------------------------------------------------
 # Display name maps
 # ---------------------------------------------------------------------------
@@ -324,6 +328,63 @@ FALSE_START_COLUMNS_WITH_FILTER: Tuple[str, ...] = FALSE_START_COLUMNS + (
 # ---------------------------------------------------------------------------
 # Low-level helpers (unchanged from pre-Phase-2)
 # ---------------------------------------------------------------------------
+
+def _create_xlsx_writer(output_path: str) -> pd.ExcelWriter:
+    return pd.ExcelWriter(
+        output_path,
+        engine="xlsxwriter",
+        engine_kwargs={"options": {"strings_to_urls": False}},
+        datetime_format="yyyy-mm-dd hh:mm:ss",
+    )
+
+
+def _set_autofilter(
+    ws: Any,
+    header_row: int,
+    n_cols: int,
+    n_data_rows: int = 0,
+    *,
+    include_data_rows: bool = False,
+) -> None:
+    if n_cols <= 0:
+        return
+    last_row = header_row + max(n_data_rows, 0) if include_data_rows else header_row
+    ws.autofilter(header_row, 0, last_row, n_cols - 1)
+
+
+def _set_datetime_columns(
+    writer: pd.ExcelWriter,
+    ws: Any,
+    df: pd.DataFrame,
+    columns: Tuple[str, ...],
+    *,
+    width: float | None = None,
+) -> None:
+    fmt = writer.book.add_format({"num_format": "yyyy-mm-dd hh:mm:ss"})
+    df_columns = list(df.columns)
+    for col in columns:
+        if col not in df_columns:
+            continue
+        col_idx = df_columns.index(col)
+        ws.set_column(col_idx, col_idx, width, fmt)
+
+
+def _strip_tz_from_excel_values(
+    df: pd.DataFrame,
+    columns: Tuple[str, ...] | None = None,
+) -> pd.DataFrame:
+    out = df.copy()
+    target_columns = columns if columns is not None else tuple(out.columns)
+    for col in target_columns:
+        if col not in out.columns:
+            continue
+        series = out[col]
+        if isinstance(series.dtype, pd.DatetimeTZDtype):
+            out[col] = series.dt.tz_localize(None)
+        elif series.dtype == "object":
+            out[col] = series.map(_excel_safe_datetime_value)
+    return out
+
 
 def _normalize_timestamp_naive(ts: Any) -> pd.Timestamp:
     """Strip timezone for comparisons / Excel compatibility."""
@@ -1142,18 +1203,17 @@ def _write_cycle_sheet(writer: pd.ExcelWriter, cycle_df: pd.DataFrame) -> None:
     cycle_df.to_excel(writer, sheet_name=CYCLE_SHEET_NAME, index=False)
 
     ws = writer.sheets[CYCLE_SHEET_NAME]
-    from openpyxl.utils import get_column_letter
 
     n_cols = len(cycle_df.columns)
     if n_cols > 0:
-        ws.auto_filter.ref = f"A1:{get_column_letter(n_cols)}1"
+        _set_autofilter(ws, 0, n_cols, include_data_rows=False)
 
-    datetime_columns = {"Начало цикла", "Конец цикла"}
-    for col_idx, col_name in enumerate(cycle_df.columns, start=1):
-        if col_name not in datetime_columns:
-            continue
-        for row_idx in range(2, len(cycle_df) + 2):
-            ws.cell(row=row_idx, column=col_idx).number_format = "YYYY-MM-DD HH:MM:SS"
+    _set_datetime_columns(
+        writer,
+        ws,
+        cycle_df,
+        ("Начало цикла", "Конец цикла"),
+    )
 
 
 def _price_matches_exec_entry(exec_price: Any, entry_price: Any, rtol: float = 1e-5, atol: float = 1e-8) -> bool:
@@ -1343,16 +1403,16 @@ def _build_false_start_sheet_df(
 
 def _strip_tz_from_false_start_datetimes(df: pd.DataFrame) -> None:
     """In-place: remove tz from Entry/Exit/Signal Time for Excel."""
-    for col in (
+    columns = (
         TRADES_DISPLAY_NAMES["entry_time"],
         TRADES_DISPLAY_NAMES["exit_time"],
         SIGNALS_DISPLAY_NAMES["signal_time"],
-    ):
+    )
+    normalized = _strip_tz_from_excel_values(df, columns)
+    for col in columns:
         if col not in df.columns:
             continue
-        s = df[col]
-        if pd.api.types.is_datetime64_any_dtype(s) and s.dt.tz is not None:
-            df[col] = s.dt.tz_localize(None)
+        df[col] = normalized[col]
 
 
 def _build_false_start_summary_df(
@@ -1414,8 +1474,6 @@ def _write_false_start_sheet(
     false_start_df: pd.DataFrame,
 ) -> None:
     """Write ``false start`` sheet: summary block, main table, autofilter, datetimes."""
-    from openpyxl.utils import get_column_letter
-
     _strip_tz_from_false_start_datetimes(false_start_df)
 
     summary_df = _build_false_start_summary_df(trades_df_raw, false_start_df)
@@ -1423,41 +1481,30 @@ def _write_false_start_sheet(
 
     summary_df.to_excel(writer, sheet_name=FALSE_START_SHEET_NAME, index=False)
     false_start_df.to_excel(
-        writer, sheet_name=FALSE_START_SHEET_NAME, index=False, startrow=main_startrow
+        writer,
+        sheet_name=FALSE_START_SHEET_NAME,
+        index=False,
+        startrow=main_startrow,
+        startcol=0,
     )
     ws = writer.sheets[FALSE_START_SHEET_NAME]
     n_cols = len(false_start_df.columns)
     if n_cols > 0:
-        header_excel_row = main_startrow + 1
-        ws.auto_filter.ref = (
-            f"A{header_excel_row}:{get_column_letter(n_cols)}{header_excel_row}"
-        )
+        _set_autofilter(ws, main_startrow, n_cols, include_data_rows=False)
 
     if len(false_start_df) == 0:
         return
 
-    for col_name in (
-        TRADES_DISPLAY_NAMES["entry_time"],
-        TRADES_DISPLAY_NAMES["exit_time"],
-        SIGNALS_DISPLAY_NAMES["signal_time"],
-    ):
-        if col_name not in false_start_df.columns:
-            continue
-        series = false_start_df[col_name]
-        if not pd.api.types.is_datetime64_any_dtype(series):
-            continue
-        drop = series.dropna()
-        if len(drop) == 0:
-            continue
-        first_val = drop.iloc[0]
-        if isinstance(first_val, pd.Timestamp) and (
-            first_val.hour != 0 or first_val.minute != 0 or first_val.second != 0
-        ):
-            col_idx = list(false_start_df.columns).index(col_name) + 1
-            first_data_excel_row = main_startrow + 2
-            last_data_excel_row = main_startrow + 1 + len(false_start_df)
-            for row_idx in range(first_data_excel_row, last_data_excel_row + 1):
-                ws.cell(row=row_idx, column=col_idx).number_format = "YYYY-MM-DD HH:MM:SS"
+    _set_datetime_columns(
+        writer,
+        ws,
+        false_start_df,
+        (
+            TRADES_DISPLAY_NAMES["entry_time"],
+            TRADES_DISPLAY_NAMES["exit_time"],
+            SIGNALS_DISPLAY_NAMES["signal_time"],
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1587,6 +1634,15 @@ def _write_filter_diagnostics_100_sheet(
     if filter_diagnostics is None:
         return
     n = len(next(iter(filter_diagnostics.values())))
+    if n > _FILTER_DIAGNOSTICS_100_MAX_ROWS:
+        print(
+            f"  [export] Skipping FilterDiagnostics_100 ({n:,} bars > "
+            f"{_FILTER_DIAGNOSTICS_100_MAX_ROWS:,} row limit). "
+            f"Set trade_filter.diagnostics.export_state_columns: false "
+            f"or use a shorter CSV for full per-bar diagnostics.",
+            flush=True,
+        )
+        return
     row_data: Dict[str, Any] = {"Bar Index": np.arange(n)}
     for key, arr in filter_diagnostics.items():
         display = FILTER_DIAGNOSTICS_100_DISPLAY_NAMES.get(key, key)
@@ -1984,7 +2040,13 @@ def _write_filters_summary_sheet(
     sheet = "filters_summary"
     params_df.to_excel(writer, sheet_name=sheet, index=False)
     period_start = len(params_df) + 2
-    period_df.to_excel(writer, sheet_name=sheet, index=False, startrow=period_start)
+    period_df.to_excel(
+        writer,
+        sheet_name=sheet,
+        index=False,
+        startrow=period_start,
+        startcol=0,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2010,21 +2072,16 @@ def _write_signals_sheet(
     Disabled signals_df (19 cols) → 19 display cols; enabled (23 cols) →
     23 display cols (filter cols auto-renamed via SIGNALS_DISPLAY_NAMES).
     """
-    from openpyxl.utils import get_column_letter
-    from openpyxl.formatting.rule import ColorScaleRule, CellIsRule
-    from openpyxl.styles import PatternFill
-
     has_data = signals_df is not None and len(signals_df) > 0
 
     if signals_df is not None:
         # Rename only columns present in the DataFrame (filter cols included when enabled)
         signals_df = signals_df.rename(columns=SIGNALS_DISPLAY_NAMES)
         if has_data:
-            time_col = SIGNALS_DISPLAY_NAMES["signal_time"]
-            if time_col in signals_df.columns:
-                if pd.api.types.is_datetime64_any_dtype(signals_df[time_col]):
-                    if signals_df[time_col].dt.tz is not None:
-                        signals_df[time_col] = signals_df[time_col].dt.tz_localize(None)
+            signals_df = _strip_tz_from_excel_values(
+                signals_df,
+                (SIGNALS_DISPLAY_NAMES["signal_time"],),
+            )
     else:
         # Fallback: signals_df not provided (legacy path without WP-T6 wiring)
         signals_df = pd.DataFrame(columns=[
@@ -2040,73 +2097,65 @@ def _write_signals_sheet(
 
     # Autofilter on header row (always, even for empty sheet)
     if n_cols > 0:
-        ws.auto_filter.ref = f"A1:{get_column_letter(n_cols)}1"
+        _set_autofilter(ws, 0, n_cols, include_data_rows=False)
 
     if has_data:
         n_rows = len(signals_df)
         cols = list(signals_df.columns)
 
         # Datetime formatting for Signal Time
-        time_col = SIGNALS_DISPLAY_NAMES["signal_time"]
-        if time_col in cols:
-            first_vals = signals_df[time_col].dropna()
-            if len(first_vals) > 0:
-                first_val = first_vals.iloc[0]
-                if isinstance(first_val, pd.Timestamp) and (
-                    first_val.hour != 0 or first_val.minute != 0 or first_val.second != 0
-                ):
-                    col_idx = cols.index(time_col) + 1
-                    for row_idx in range(2, n_rows + 2):
-                        ws.cell(row=row_idx, column=col_idx).number_format = (
-                            "YYYY-MM-DD HH:MM:SS"
-                        )
+        _set_datetime_columns(
+            writer,
+            ws,
+            signals_df,
+            (SIGNALS_DISPLAY_NAMES["signal_time"],),
+        )
 
         # Conditional formatting: green→yellow→red on Signal Body/Range %
+        first_row = 1
+        last_row = n_rows
         for internal_key in ("signal_body_pct", "signal_range_pct"):
             display_name = SIGNALS_DISPLAY_NAMES[internal_key]
             if display_name in cols:
-                col_idx = cols.index(display_name) + 1
-                col_letter = get_column_letter(col_idx)
-                cf_range = f"{col_letter}2:{col_letter}{n_rows + 1}"
-                ws.conditional_formatting.add(
-                    cf_range,
-                    ColorScaleRule(
-                        start_type="min", start_color="63BE7B",
-                        mid_type="percentile", mid_value=50, mid_color="FFEB84",
-                        end_type="max", end_color="F8696B",
-                    ),
-                )
+                col_idx = cols.index(display_name)
+                ws.conditional_format(first_row, col_idx, last_row, col_idx, {
+                    "type": "3_color_scale",
+                    "min_color": "#63BE7B",
+                    "mid_color": "#FFEB84",
+                    "max_color": "#F8696B",
+                })
 
-        _fill_ratio_strong = PatternFill(start_color="F8696B", end_color="F8696B", fill_type="solid")
-        _fill_ratio_soft   = PatternFill(start_color="FFEB84", end_color="FFEB84", fill_type="solid")
+        ratio_strong_fmt = writer.book.add_format({"bg_color": "#F8696B"})
+        ratio_soft_fmt = writer.book.add_format({"bg_color": "#FFEB84"})
         for internal_key in ("signal_body_pct_median_ratio", "signal_range_pct_median_ratio"):
             display_name = SIGNALS_DISPLAY_NAMES[internal_key]
             if display_name in cols:
-                col_idx = cols.index(display_name) + 1
-                col_letter = get_column_letter(col_idx)
-                cf_range = f"{col_letter}2:{col_letter}{n_rows + 1}"
-                ws.conditional_formatting.add(
-                    cf_range,
-                    CellIsRule(operator="greaterThan", formula=["2"],
-                               fill=_fill_ratio_strong, stopIfTrue=True),
-                )
-                ws.conditional_formatting.add(
-                    cf_range,
-                    CellIsRule(operator="greaterThan", formula=["1.6"],
-                               fill=_fill_ratio_soft),
-                )
+                col_idx = cols.index(display_name)
+                ws.conditional_format(first_row, col_idx, last_row, col_idx, {
+                    "type": "cell",
+                    "criteria": ">",
+                    "value": 2,
+                    "format": ratio_strong_fmt,
+                    "stop_if_true": True,
+                })
+                ws.conditional_format(first_row, col_idx, last_row, col_idx, {
+                    "type": "cell",
+                    "criteria": ">",
+                    "value": 1.6,
+                    "format": ratio_soft_fmt,
+                })
 
-        _fill_neg = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+        neg_fmt = writer.book.add_format({"bg_color": "#FFC7CE"})
         for internal_key in ("t1_return_pct", "t2_return_pct", "t3_return_pct"):
             display_name = SIGNALS_DISPLAY_NAMES[internal_key]
             if display_name in cols:
-                col_idx = cols.index(display_name) + 1
-                col_letter = get_column_letter(col_idx)
-                cf_range = f"{col_letter}2:{col_letter}{n_rows + 1}"
-                ws.conditional_formatting.add(
-                    cf_range,
-                    CellIsRule(operator="lessThan", formula=["0"], fill=_fill_neg),
-                )
+                col_idx = cols.index(display_name)
+                ws.conditional_format(first_row, col_idx, last_row, col_idx, {
+                    "type": "cell",
+                    "criteria": "<",
+                    "value": 0,
+                    "format": neg_fmt,
+                })
 
 
 # Metrics used in the aggregate table (Summary block 2).
@@ -2136,14 +2185,13 @@ def _prepare_legacy_trades_df(
     """
     if trades_df is not None and len(trades_df) > 0:
         df = trades_df.rename(columns=TRADES_DISPLAY_NAMES)
-        # Strip timezone from datetime columns
-        for col_key in ("entry_time", "exit_time"):
-            col_name = TRADES_DISPLAY_NAMES[col_key]
-            if col_name in df.columns:
-                if pd.api.types.is_datetime64_any_dtype(df[col_name]):
-                    if df[col_name].dt.tz is not None:
-                        df[col_name] = df[col_name].dt.tz_localize(None)
-        return df
+        return _strip_tz_from_excel_values(
+            df,
+            (
+                TRADES_DISPLAY_NAMES["entry_time"],
+                TRADES_DISPLAY_NAMES["exit_time"],
+            ),
+        )
     else:
         # Empty trades — choose header set based on filter state (plan §9.4)
         if filter_enabled and filter_diagnostics_available:
@@ -2153,29 +2201,20 @@ def _prepare_legacy_trades_df(
 
 
 def _format_trades_datetime(
+    writer: pd.ExcelWriter,
     trades_df: pd.DataFrame,
     worksheet: Any,
 ) -> None:
-    """Apply YYYY-MM-DD HH:MM:SS format to entry/exit time cells if they include time."""
-    entry_time_col = TRADES_DISPLAY_NAMES["entry_time"]
-    exit_time_col = TRADES_DISPLAY_NAMES["exit_time"]
-    if entry_time_col not in trades_df.columns:
-        return
-    first_entry = trades_df[entry_time_col].dropna()
-    if len(first_entry) == 0:
-        return
-    first_val = first_entry.iloc[0]
-    if not (isinstance(first_val, pd.Timestamp) and (
-        first_val.hour != 0 or first_val.minute != 0 or first_val.second != 0
-    )):
-        return
-    cols = list(trades_df.columns)
-    entry_col_idx = cols.index(entry_time_col) + 1
-    exit_col_idx = cols.index(exit_time_col) + 1 if exit_time_col in cols else None
-    for row_idx in range(2, len(trades_df) + 2):
-        worksheet.cell(row=row_idx, column=entry_col_idx).number_format = "YYYY-MM-DD HH:MM:SS"
-        if exit_col_idx is not None:
-            worksheet.cell(row=row_idx, column=exit_col_idx).number_format = "YYYY-MM-DD HH:MM:SS"
+    """Apply datetime format to entry/exit time columns."""
+    _set_datetime_columns(
+        writer,
+        worksheet,
+        trades_df,
+        (
+            TRADES_DISPLAY_NAMES["entry_time"],
+            TRADES_DISPLAY_NAMES["exit_time"],
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2253,8 +2292,6 @@ def _write_tester_config_sheet(
     run_metadata: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Write first workbook sheet with config snapshot + run metadata."""
-    from openpyxl.utils import get_column_letter
-
     rows: List[Dict[str, str]] = []
     if config_yaml_snapshot is not None:
         if len(config_yaml_snapshot) == 0:
@@ -2285,7 +2322,7 @@ def _write_tester_config_sheet(
     ws = writer.sheets[TESTER_CONFIG_SHEET_NAME]
     n_cols = len(cfg_df.columns)
     if n_cols > 0:
-        ws.auto_filter.ref = f"A1:{get_column_letter(n_cols)}1"
+        _set_autofilter(ws, 0, n_cols, include_data_rows=False)
 
 
 def _write_diagnostics_v2_sheet(
@@ -2294,8 +2331,6 @@ def _write_diagnostics_v2_sheet(
     df: pd.DataFrame,
 ) -> None:
     """Write one diagnostics v2 payload without touching legacy formatting."""
-    from openpyxl.utils import get_column_letter
-
     max_excel_rows = 1_048_576
     if len(df) + 1 > max_excel_rows:
         raise ValueError(
@@ -2318,15 +2353,12 @@ def _write_diagnostics_v2_sheet(
     if n_cols == 0:
         return
 
-    ws.freeze_panes = "A2"
-    ws.auto_filter.ref = f"A1:{get_column_letter(n_cols)}{max(len(out) + 1, 1)}"
-    for col_idx, col_name in enumerate(out.columns, start=1):
+    ws.freeze_panes(1, 0)
+    _set_autofilter(ws, 0, n_cols, len(out), include_data_rows=True)
+    for col_idx, col_name in enumerate(out.columns, start=0):
         values = out[col_name].head(200).tolist()
         max_width = max([len(str(col_name)), *(len(str(value)) for value in values)])
-        ws.column_dimensions[get_column_letter(col_idx)].width = min(
-            max(max_width + 2, 8),
-            60,
-        )
+        ws.set_column(col_idx, col_idx, min(max(max_width + 2, 8), 60))
 
 
 def export_tester_results(
@@ -2444,7 +2476,7 @@ def export_tester_results(
             v2_flags,
         )
 
-    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+    with _create_xlsx_writer(output_path) as writer:
         # ── Tester_Config (always first) ──
         _write_tester_config_sheet(
             writer,
@@ -2479,7 +2511,11 @@ def export_tester_results(
             if filter_block_df is not None:
                 filter_start_row = len(summary_df) + 2  # +1 header + 1 blank row
                 filter_block_df.to_excel(
-                    writer, sheet_name="Summary", index=False, startrow=filter_start_row
+                    writer,
+                    sheet_name="Summary",
+                    index=False,
+                    startrow=filter_start_row,
+                    startcol=0,
                 )
 
         # ── Metrics and Trades sheets for each period ──
@@ -2512,7 +2548,7 @@ def export_tester_results(
                 )
                 trades_df.to_excel(writer, sheet_name=trades_sheet, index=False)
                 if len(trades_df) > 0:
-                    _format_trades_datetime(trades_df, writer.sheets[trades_sheet])
+                    _format_trades_datetime(writer, trades_df, writer.sheets[trades_sheet])
 
         # ── Signals sheet ──
         if export_signals and signals_df is not None:
@@ -2601,20 +2637,20 @@ def _write_trades_sheet(
     """Write a single trades sheet (equal_blocks path; no filter columns)."""
     if trades_df is not None and len(trades_df) > 0:
         trades_df = trades_df.rename(columns=TRADES_DISPLAY_NAMES)
-        entry_time_col = TRADES_DISPLAY_NAMES["entry_time"]
-        exit_time_col = TRADES_DISPLAY_NAMES["exit_time"]
-        for col in (entry_time_col, exit_time_col):
-            if col in trades_df.columns:
-                if pd.api.types.is_datetime64_any_dtype(trades_df[col]):
-                    if trades_df[col].dt.tz is not None:
-                        trades_df[col] = trades_df[col].dt.tz_localize(None)
+        trades_df = _strip_tz_from_excel_values(
+            trades_df,
+            (
+                TRADES_DISPLAY_NAMES["entry_time"],
+                TRADES_DISPLAY_NAMES["exit_time"],
+            ),
+        )
     else:
         trades_df = pd.DataFrame(columns=_CANONICAL_TRADE_DISPLAY_COLS)
 
     trades_df.to_excel(writer, sheet_name=sheet_name, index=False)
 
     if len(trades_df) > 0:
-        _format_trades_datetime(trades_df, writer.sheets[sheet_name])
+        _format_trades_datetime(writer, trades_df, writer.sheets[sheet_name])
 
 
 def export_equal_blocks_results(
@@ -2637,7 +2673,7 @@ def export_equal_blocks_results(
     run_metadata_payload: Dict[str, Any] = dict(run_metadata or {})
     # output_path_actual is NOT auto-injected; set it in run_metadata from the caller.
 
-    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+    with _create_xlsx_writer(output_path) as writer:
         # ── Tester_Config (always first) ──
         _write_tester_config_sheet(
             writer,
@@ -2672,18 +2708,10 @@ def export_equal_blocks_results(
 
         summary_df = pd.DataFrame(summary_rows)
 
-        for date_col in ("Start Date", "End Date"):
-            if date_col in summary_df.columns:
-                col = summary_df[date_col]
-                if pd.api.types.is_datetime64_any_dtype(col):
-                    if col.dt.tz is not None:
-                        summary_df[date_col] = col.dt.tz_localize(None)
-                else:
-                    def _strip_tz(v):
-                        if isinstance(v, pd.Timestamp) and v.tzinfo is not None:
-                            return v.tz_localize(None)
-                        return v
-                    summary_df[date_col] = summary_df[date_col].map(_strip_tz)
+        summary_df = _strip_tz_from_excel_values(
+            summary_df,
+            ("Start Date", "End Date"),
+        )
 
         # ── Summary Table 2: aggregate stats ──
         agg_rows = []
@@ -2717,7 +2745,13 @@ def export_equal_blocks_results(
         summary_df.to_excel(writer, sheet_name="Summary", index=False)
         start_row = len(summary_df) + 2
         agg_df = format_excel_export_df(agg_df)
-        agg_df.to_excel(writer, sheet_name="Summary", index=False, startrow=start_row)
+        agg_df.to_excel(
+            writer,
+            sheet_name="Summary",
+            index=False,
+            startrow=start_row,
+            startcol=0,
+        )
 
         # ── Per-segment sheets ──
         for seg in segment_results:

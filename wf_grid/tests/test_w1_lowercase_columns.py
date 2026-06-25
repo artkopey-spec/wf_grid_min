@@ -118,6 +118,23 @@ def test_tester_loader_logs_lowercase_collision_and_continues(caplog, tmp_path):
     assert "duplicate lowercase columns" in caplog.text
 
 
+def test_loader_accepts_angle_bracket_semicolon_export(tmp_path):
+    csv_path = tmp_path / "terminal_export.csv"
+    csv_path.write_text(
+        "<DATE>;<TIME>;<OPEN>;<HIGH>;<LOW>;<CLOSE>;<VOL>\n"
+        "20250103;100000;4012.5;4018.5;4005;4008;11182\n"
+        "20250103;100100;4009;4019.5;4000.5;4009.5;3634\n",
+        encoding="utf-8",
+    )
+
+    loaded = load_ohlc_csv(str(csv_path), sep=";")
+
+    assert list(loaded.columns) == ["open", "high", "low", "close", "vol"]
+    assert loaded.index[0] == pd.Timestamp("2025-01-03 10:00:00")
+    assert loaded.index[1] == pd.Timestamp("2025-01-03 10:01:00")
+    assert loaded.iloc[0]["open"] == 4012.5
+
+
 def test_ohlc_only_data_remains_valid_without_volume() -> None:
     df = _valid_df({
         "open": [1.0, 1.1, 1.2],

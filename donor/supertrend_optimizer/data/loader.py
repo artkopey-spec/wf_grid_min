@@ -116,8 +116,9 @@ def load_ohlc_csv(
 
     _check_no_duplicate_lowercase_columns(list(df.columns), path, mode="info")
 
-    # Normalise column names to lowercase
-    df.columns = df.columns.str.lower()
+    # Normalise column names: lowercase and strip angle-bracket wrappers
+    # (e.g. "<DATE>;<TIME>;<OPEN>..." exports from trading terminals).
+    df.columns = df.columns.str.lower().str.strip("<>")
 
     # ── Build DatetimeIndex ───────────────────────────────────────────────────
     cols = set(df.columns)

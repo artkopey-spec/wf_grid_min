@@ -1,8 +1,8 @@
 schema_version: 1
-# General WF Grid profile: time_filter активен, volume отключён (в data.csv нет volume).
-# Адаптировано под текущий data.csv: 717 баров, 1m, 3 торговых дня (2026-06-12/15/16),
-# сессия ~16:30–22:59 MSK (+03:00).
-# Запуск: python run.py --config config.yaml
+# WF Grid profile for the current data.csv.
+# Data snapshot: 333797 1m bars, 2025-05-05 07:00 to 2026-06-23 13:58 MSK (+03:00).
+# Columns: time, open, high, low, close, Volume. The loader normalizes Volume -> volume.
+# Run: python run.py --config config.yaml
 
 data:
   file_path: "data.csv"
@@ -10,8 +10,8 @@ data:
   annualization_basis: "trading"
 
 optimization:
-  atr_period_range: [20, 90]
-  multiplier_range: [1.0, 9.0]
+  atr_period_range: [10, 80]
+  multiplier_range: [1.0, 4.0]
   multiplier_step: 0.2
   atr_period_step: 3
   trade_mode: "revers"
@@ -27,13 +27,13 @@ validation:
   warmup_period: 0
   warmup_period_auto: true
   walk_forward:
-    train_size: "600bars"
-    test_size: "117bars"
-    step_size: "117bars"
+    train_size: "63000bars"
+    test_size: "21000bars"
+    step_size: "21000bars"
     scheme: "rolling"
     anchor: "end"
-    min_train_bars: 50
-    min_test_bars: 15
+    min_train_bars: 500
+    min_test_bars: 100
 
 gates:
   step:
@@ -82,13 +82,13 @@ export:
 
 trade_filter:
   enabled: false
-  # type: "zigzag_st_mode"  # раскомментировать при включении zigzag
+  # type: "zigzag_st_mode"  # uncomment when enabling zigzag
 
   zigzag:
     enabled: false
     # global_stats_source: "full_dataset"
     # leg_height_mode: "pct"
-    # reversal_threshold: 0.002
+    # reversal_threshold: 0.0005
     # candidate_trigger_threshold: auto
     # candidate_trigger_quantile: 0.80
     # global_median: "auto"
@@ -96,35 +96,39 @@ trade_filter:
     # daily_reset: true
     # mode: "A+B"
     # candidate_duration_gate:
-    #   enabled: true
+    #   enabled: false
     #   max_bars: 30
 
-  # lifecycle:                        # нужен только при zigzag.enabled: true
-  #   freeze_confirmed_legs: 5
+  # lifecycle:                        # needed only when zigzag.enabled: true
+  #   freeze_confirmed_legs: 3
   #   stop_check: "confirm_bar_only"
   #   stopping_exit: "opposite_st_flip"
-  #   exit_off_mode: "exit B"
+  #   exit_off_mode: "exit A"
   #   exit_off_zz_leg_count: 5
   #   exit_b_immediate_off: false
 
-  # diagnostics:                      # нужен только при zigzag.enabled: true
+  # diagnostics:                      # needed only when zigzag.enabled: true
   #   export_state_columns: true
   #   export_trigger_columns: true
 
   time_filter:
     enabled: false
-    window: "16:30-23:00"
+    window: "09:00-19:00"
 
   volume:
     enabled: false
     mode: "volume_A"
     aggregation: median
-    short_window: 24
-    baseline_window: 1000
-    threshold_ratio: 2.0
+    daily_reset: true
+    cycle_direction_gate: false
+    short_window: 25
+    baseline_window: 500
+    threshold_ratio: 1.6
+    exit_hysteresis_ratio: 1.6
+    exit_freeze_bars: 5
     regime_low_ratio: 0.8
     regime_high_ratio: 1.2
     direction_lookback_bars: 10
     baseline_session:
       enabled: false
-      window: null
+      window: "09:00-19:00"

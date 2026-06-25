@@ -68,6 +68,7 @@ from supertrend_optimizer.core.volume_metrics import (
 from wf_grid.wf.step_executor import StepResult
 
 from supertrend_optimizer.utils.time_utils import make_walk_forward_slices
+from supertrend_optimizer.data.loader import load_ohlc_csv
 from supertrend_optimizer.data.validator import (
     _check_no_duplicate_lowercase_columns,
     validate_ohlc_data,
@@ -78,13 +79,9 @@ logger = logging.getLogger(__name__)
 
 
 def _read_ohlc_csv(path: str | Path) -> pd.DataFrame:
-    data = pd.read_csv(path, index_col=0)
-    if pd.api.types.is_numeric_dtype(data.index):
-        return data
-    try:
-        data.index = pd.to_datetime(data.index, format="mixed", errors="raise")
-    except TypeError:
-        data.index = pd.to_datetime(data.index, errors="raise")
+    data = load_ohlc_csv(str(path))
+    if "vol" in data.columns and "volume" not in data.columns:
+        data = data.rename(columns={"vol": "volume"})
     return data
 
 # WP-PAR: project-root anchors for Windows spawn import safety (plan §3.1)

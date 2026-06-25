@@ -10,6 +10,14 @@ set OUT=result_single.xlsx
 if not "%~1"=="" set CSV=%~1
 if not "%~2"=="" set OUT=%~2
 
+echo.
+echo === Single-config tester ===
+echo Project: %~dp0
+echo CSV:     %CSV%
+echo Config:  %CONFIG%
+echo Output:  %OUT%
+echo.
+
 if not exist "%CSV%" (
     echo Error: CSV file not found: %CSV%
     pause
@@ -23,8 +31,12 @@ if not exist "%CONFIG%" (
 )
 
 set "PYTHONPATH=%~dp0donor;%PYTHONPATH%"
+set "PYTHONUNBUFFERED=1"
 
-python -m supertrend_optimizer.cli.tester --csv "%CSV%" --config "%CONFIG%" --out "%OUT%"
+echo Starting Python tester (this can take several minutes on large CSV + full diagnostics)...
+echo.
+
+python -u -m supertrend_optimizer.cli.tester --csv "%CSV%" --config "%CONFIG%" --out "%OUT%"
 
 if errorlevel 1 (
     echo.

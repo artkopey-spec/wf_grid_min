@@ -5,13 +5,16 @@
 #   python -m supertrend_optimizer.cli.tester --csv data.csv --config config_tester.yaml --out result_lite_atr010_mult10_ch_q060_ttl090_hold03_lw13_rev005_full_diagnostics.xlsx
 
 supertrend:
-  atr_period: 50
-  multiplier: 2.5
+  atr_period: 24
+  multiplier: 2.4
 
 trade_mode: revers
 period: false
 
-commission: 0.0000
+# MXU6 / MIX-9.26 futures cost model:
+# Finam 0.45 RUB + MOEX SCALPERFEE 7.70 RUB = 8.15 RUB per side.
+# Using MXU6 LAST_RUB ~= 228275 RUB: 8.15 / 228275 = 0.0000357025 per operation.
+commission: 0.0000357025
 
 warmup_period: 0
 warmup_period_auto: true
@@ -31,13 +34,13 @@ segmentation:
   n_parts: 7
 
 export:
-  diagnostics: true
-  signals: true
-  false_start: true
-  cycle: true
+  diagnostics: false
+  signals: false
+  false_start: false
+  cycle: false
   trades: true
   false_start_max_bars: 4
-  diagnostics_v2: true
+  diagnostics_v2: false
   diagnostics_v2_flags: {}
 
 trade_filter:
@@ -45,8 +48,8 @@ trade_filter:
   type: zigzag_st_mode
 
   diagnostics:
-    export_state_columns: true
-    export_trigger_columns: true
+    export_state_columns: false
+    export_trigger_columns: false
 
   zigzag:
     enabled: true
@@ -86,7 +89,7 @@ trade_filter:
     regime_high_ratio: 1.2
     direction_lookback_bars: 5
     baseline_session:
-      enabled: false
+      enabled: true
       window: "09:00-19:00"
 
   wakeup_regime:
@@ -95,7 +98,7 @@ trade_filter:
     entry:
       direction_mode: inverse
       candidate_height:
-        enabled: true
+        enabled: false
         quantile: 0.4
       candidate_age:
         enabled: false
@@ -106,7 +109,7 @@ trade_filter:
         long_window: 400
         min_ratio: 1.6
       volume_expansion:
-        enabled: false
+        enabled: true
         short_window: 10
         baseline_window: 1000
         min_ratio: 0.5
@@ -121,12 +124,12 @@ trade_filter:
         max_age_bars: 15
         timeout_bars: 20
       local_median_stop:
-        enabled: true
+        enabled: false
       action:
         mode: close_position
 
     position_freeze:
-      enabled: true
+      enabled: false
       min_hold_bars: 1
       apply_to: internal_opposite_st_flip
       release_action: apply_if_still_opposite

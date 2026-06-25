@@ -16,11 +16,11 @@ from supertrend_optimizer.cli.tester import load_tester_config  # noqa: E402
 
 OUT_DIR = ROOT / "config tester"
 
-ATR_PERIODS = (10, 30, 50, 70, 90, 110)
+ATR_PERIODS = (10, 20, 30, 40, 50, 60)
 MULT_MIN = 1.0
-MULT_MAX = 6.0
+MULT_MAX = 3.0
 MULT_STEP = 0.2
-TRADE_MODES = ("revers", "long")
+TRADE_MODES = ("revers",)
 
 
 def _mult_values() -> list[float]:

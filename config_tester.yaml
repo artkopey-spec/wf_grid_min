@@ -1,20 +1,14 @@
-# Full diagnostics config for mass-run config #0551:
-# lite_atr010_mult10_ch_q060_ttl090_hold03_lw13_rev005
-#
-# Run example:
-#   python -m supertrend_optimizer.cli.tester --csv data.csv --config config_tester.yaml --out result_lite_atr010_mult10_ch_q060_ttl090_hold03_lw13_rev005_full_diagnostics.xlsx
+# Tester config: zigzag_st_mode D + wakeup_regime (full diagnostics export)
+# Run: python run_batch_tester.py --csv data.csv --config config_tester.yaml
 
 supertrend:
-  atr_period: 24
-  multiplier: 2.4
+  atr_period: 50
+  multiplier: 2.5
 
 trade_mode: revers
 period: false
 
-# MXU6 / MIX-9.26 futures cost model:
-# Finam 0.45 RUB + MOEX SCALPERFEE 7.70 RUB = 8.15 RUB per side.
-# Using MXU6 LAST_RUB ~= 228275 RUB: 8.15 / 228275 = 0.0000357025 per operation.
-commission: 0.0000357025
+commission: 0.0000
 
 warmup_period: 0
 warmup_period_auto: true
@@ -78,7 +72,7 @@ trade_filter:
     reversal_threshold: 0.001
     candidate_trigger_threshold: 0.012
     global_median: auto
-    local_window: 8
+    local_window: 5
     daily_reset: false
     # Supported only with candidate_trigger_threshold: auto.
     # candidate_trigger_quantile: 0.60
@@ -124,7 +118,7 @@ trade_filter:
     regime_high_ratio: 1.2
     direction_lookback_bars: 5
     baseline_session:
-      enabled: true
+      enabled: false
       window: "09:00-19:00"
 
   wakeup_regime:
@@ -133,7 +127,7 @@ trade_filter:
     entry:
       direction_mode: inverse
       candidate_height:
-        enabled: false
+        enabled: true
         quantile: 0.4
       candidate_age:
         enabled: false
@@ -144,7 +138,7 @@ trade_filter:
         long_window: 400
         min_ratio: 1.6
       volume_expansion:
-        enabled: true
+        enabled: false
         short_window: 10
         baseline_window: 1000
         min_ratio: 0.5
@@ -159,7 +153,7 @@ trade_filter:
         max_age_bars: 15
         timeout_bars: 20
       max_trades_per_cycle:
-        enabled: false
+        enabled: true
         max_trades: 1
       cycle_take_profit:
         enabled: false
@@ -170,7 +164,7 @@ trade_filter:
         mode: close_position
 
     position_freeze:
-      enabled: false
+      enabled: true
       min_hold_bars: 1
       apply_to: internal_opposite_st_flip
       release_action: apply_if_still_opposite

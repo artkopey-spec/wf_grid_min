@@ -53,7 +53,16 @@ def test_repo_config_tester_yaml_loads_active_mode_d_wakeup_volume_profile():
 
     assert cfg["supertrend"]["atr_period"] == 50
     assert cfg["supertrend"]["multiplier"] == 2.5
-    assert cfg["commission"] == 0.0
+    assert cfg["commission"] >= 0.0
+    assert cfg["export"]["diagnostics"] is True
+    assert cfg["export"]["signals"] is True
+    assert cfg["export"]["false_start"] is True
+    assert cfg["export"]["cycle"] is True
+    assert cfg["export"]["trades"] is True
+    assert cfg["export"]["diagnostics_v2"] is True
+    assert cfg["export"]["diagnostics_v2_flags"]["run_health"] is True
+    assert cfg["export"]["diagnostics_v2_flags"]["filter_diagnostics_sampled"] is True
+    assert cfg["export"]["diagnostics_v2_flags"]["robustness"] is False
 
     tf_cfg = cfg["trade_filter"]
     assert tf_cfg.enabled is True

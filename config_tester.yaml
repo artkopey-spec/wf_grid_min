@@ -36,20 +36,20 @@ export:
   cycle: true
   trades: true
   false_start_max_bars: 4
-  diagnostics_v2: false
+  diagnostics_v2: true
   diagnostics_v2_flags:
-    index: false
-    reproducibility: false
-    dashboard: false
-    run_health: false
-    trade_analytics: false
-    equity_drawdown: false
-    filter_funnel: false
-    filter_attribution: false
-    cycle_summary: false
-    cost_sensitivity: false
-    remediation: false
-    filter_diagnostics_sampled: false
+    index: true
+    reproducibility: true
+    dashboard: true
+    run_health: true
+    trade_analytics: true
+    equity_drawdown: true
+    filter_funnel: true
+    filter_attribution: true
+    cycle_summary: true
+    cost_sensitivity: true
+    remediation: true
+    filter_diagnostics_sampled: true
     returns_calendar: false
     exit_quality: false
     false_start_2: false

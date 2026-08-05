@@ -96,8 +96,10 @@ from supertrend_optimizer.core.volume_metrics import (  # noqa: E402
 )
 from supertrend_optimizer.core.zigzag_st_filter import build_zigzag_global_stats  # noqa: E402
 from supertrend_optimizer.core.trade_filter_config import (  # noqa: E402
+    is_trade_filter_enabled,
     is_volume_enabled,
     is_zigzag_enabled,
+    resolve_trade_filter_mode,
 )
 from supertrend_optimizer.testing.runner import run_all_periods, run_equal_blocks  # noqa: E402
 from supertrend_optimizer.testing.signal_events import build_signal_events  # noqa: E402
@@ -111,6 +113,26 @@ RUNS = [
     ("equal_blocks", "result_equal_blocks.xlsx"),
     ("legacy",       "result_legacy.xlsx"),
 ]
+
+EQUAL_BLOCKS_SKIP_STATUS = "skipped_unsupported"
+EQUAL_BLOCKS_SKIP_REASON = "trade_filter_equal_blocks_not_supported"
+
+
+def equal_blocks_skip_metadata(
+    segmentation_mode: str,
+    trade_filter_config: object,
+) -> dict[str, str] | None:
+    """Return the documented canonical-batch skip record, when applicable."""
+    if (
+        segmentation_mode == "equal_blocks"
+        and is_trade_filter_enabled(trade_filter_config)
+    ):
+        return {
+            "mode": segmentation_mode,
+            "status": EQUAL_BLOCKS_SKIP_STATUS,
+            "reason": EQUAL_BLOCKS_SKIP_REASON,
+        }
+    return None
 
 
 def parse_args() -> argparse.Namespace:
@@ -269,6 +291,11 @@ def main() -> None:
             f"threshold={zigzag_global_stats.candidate_trigger_threshold:.4f} "
             f"({zigzag_global_stats.candidate_trigger_source})"
         )
+    elif is_trade_filter_enabled(tf_cfg):
+        print(
+            "  trade_filter: enabled "
+            f"(mode={resolve_trade_filter_mode(tf_cfg)})"
+        )
     else:
         print(f"  trade_filter: disabled")
     print("=" * 48)
@@ -286,10 +313,22 @@ def main() -> None:
     }
 
     saved_files: list[str] = []
+    run_statuses: list[dict[str, str]] = []
 
     for run_idx, (seg_mode, out_basename) in enumerate(RUNS, start=1):
         label = f"[{run_idx}/{len(RUNS)}] {seg_mode}"
         print(f"\n{label} ... started")
+
+        skip_metadata = equal_blocks_skip_metadata(seg_mode, tf_cfg)
+        if skip_metadata is not None:
+            print(
+                "WARNING: active trade filter is unsupported in equal_blocks; "
+                "the legacy-period run will continue."
+            )
+            print(f"  status = {skip_metadata['status']}")
+            print(f"  reason = {skip_metadata['reason']}")
+            run_statuses.append(skip_metadata)
+            continue
 
         params = copy.deepcopy(base_params)
         params["segmentation"]["mode"] = seg_mode
@@ -412,10 +451,19 @@ def main() -> None:
             sys.exit(1)
 
         saved_files.append(actual_output)
+        run_statuses.append(
+            {"mode": seg_mode, "status": "completed", "reason": ""}
+        )
         print(f"{label} ... done -> {Path(actual_output).name}")
 
     print("\n" + "=" * 48)
-    print(f"All {len(RUNS)} runs completed successfully!")
+    skipped = sum(
+        row["status"] == EQUAL_BLOCKS_SKIP_STATUS for row in run_statuses
+    )
+    print(
+        f"Batch completed successfully: {len(saved_files)} completed, "
+        f"{skipped} skipped_unsupported."
+    )
     for i, path in enumerate(saved_files, start=1):
         print(f"  {i}. {path}")
     print("=" * 48)

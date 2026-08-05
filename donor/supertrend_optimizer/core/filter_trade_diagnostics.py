@@ -14,16 +14,10 @@ def attach_trade_filter_diagnostics(
 ) -> Any:
     """Attach filter diagnostics columns to an extracted trades DataFrame.
 
-    ``trade_filter_state`` is required.  ZigZag-specific and volume-specific
+    Common reset fields are sufficient. ZigZag-specific and volume-specific
     fields are consumed only when present.
     """
     state_arr = filter_diagnostics.get("trade_filter_state")
-    if state_arr is None:
-        raise ConfigError(
-            "attach_trade_filter_diagnostics: 'trade_filter_state' key "
-            "missing from filter_diagnostics"
-        )
-
     trigger_arr = filter_diagnostics.get("trade_filter_trigger_source")
     daily_reset_arr = filter_diagnostics.get("daily_reset_event")
     time_reset_arr = filter_diagnostics.get("time_filter_reset_event")
@@ -34,7 +28,25 @@ def attach_trade_filter_diagnostics(
     wakeup_position_action_arr = filter_diagnostics.get("wakeup_position_action")
     state_at_bar_start_arr = filter_diagnostics.get("state_at_bar_start")
 
-    n_diag = len(state_arr)
+    length_source = next(
+        (
+            values
+            for values in (
+                state_arr,
+                daily_reset_arr,
+                time_reset_arr,
+                block_reason_arr,
+            )
+            if values is not None
+        ),
+        None,
+    )
+    if length_source is None:
+        raise ConfigError(
+            "attach_trade_filter_diagnostics requires at least one common "
+            "state/reset/reason array"
+        )
+    n_diag = len(length_source)
     pending_exit_idx = n_diag - 1
     entry_filter_states = []
     entry_trigger_sources = []
@@ -49,7 +61,7 @@ def attach_trade_filter_diagnostics(
         entry_signal_idx = max(entry_index - 1, 0)
         exit_signal_idx = max(exit_index - 1, 0)
 
-        if entry_signal_idx < n_diag:
+        if state_arr is not None and entry_signal_idx < len(state_arr):
             entry_filter_states.append(str(state_arr[entry_signal_idx]))
         else:
             entry_filter_states.append("UNKNOWN")
@@ -65,7 +77,9 @@ def attach_trade_filter_diagnostics(
             entry_volume_block_reasons.append("none")
 
         fsm_at_exit = (
-            str(state_arr[exit_signal_idx]) if exit_signal_idx < n_diag else "UNKNOWN"
+            str(state_arr[exit_signal_idx])
+            if state_arr is not None and exit_signal_idx < len(state_arr)
+            else "UNKNOWN"
         )
         fsm_at_exit_start = (
             _state_name_at(state_at_bar_start_arr, exit_signal_idx)
@@ -95,12 +109,12 @@ def attach_trade_filter_diagnostics(
             else "none"
         )
 
-        if wakeup_exit_reason is not None:
-            exit_reasons.append(wakeup_exit_reason)
-        elif reset_at_exit:
+        if reset_at_exit:
             exit_reasons.append("filter_daily_reset")
         elif time_reset_at_exit:
             exit_reasons.append("filter_time_reset")
+        elif wakeup_exit_reason is not None:
+            exit_reasons.append(wakeup_exit_reason)
         elif exit_index >= pending_exit_idx:
             exit_reasons.append("pending_open_trade_at_end")
         elif imm_at_exit:
@@ -117,8 +131,10 @@ def attach_trade_filter_diagnostics(
             exit_reasons.append("st_flip")
 
     out = trades_df.copy()
-    out["entry_filter_state"] = entry_filter_states
-    out["entry_trigger_source"] = entry_trigger_sources
+    if state_arr is not None:
+        out["entry_filter_state"] = entry_filter_states
+    if trigger_arr is not None:
+        out["entry_trigger_source"] = entry_trigger_sources
     if volume_reason_arr is not None:
         out["entry_volume_block_reason"] = entry_volume_block_reasons
     if wakeup_exit_reason_arr is not None:

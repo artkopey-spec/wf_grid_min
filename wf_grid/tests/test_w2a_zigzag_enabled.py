@@ -101,7 +101,10 @@ def test_explicit_zigzag_enabled_false_without_volume_rejected_by_validator():
 
     validate_trade_filter(cfg, errors, keys)
 
-    assert any("at least one subfilter must be enabled" in error for error in errors)
+    assert any(
+        "at least one trade subfilter must be enabled" in error
+        for error in errors
+    )
 
 
 def test_empty_zigzag_block_with_root_enabled_remains_legacy_compatible():

@@ -57,9 +57,15 @@ from supertrend_optimizer.core._block_reason import select_block_reason
 from supertrend_optimizer.core._reset_events import (
     _infer_daily_reset_event,
     _infer_time_filter_events,
+    ResetEvents,
     detect_st_flip,
+    resolve_reset_events,
 )
 from supertrend_optimizer.core.calculator import calculate_atr_rma, calculate_true_range
+from supertrend_optimizer.core.trade_filter_decision import (
+    build_filter_execution_metadata,
+    decide_trade_filter_entry,
+)
 from supertrend_optimizer.core.trades import (
     closed_leg_trade_economics,
     net_pnl_pct_to_micropct,
@@ -1182,6 +1188,7 @@ class ZigZagSTFilterResult:
     filter_diagnostics: Dict[str, np.ndarray]
     internal_legs: Optional[List[ConfirmedLeg]] = None
     filter_config_snapshot: Optional[dict] = None
+    execution_metadata: Optional[dict[str, np.ndarray]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -1842,15 +1849,6 @@ def _resolve_freeze_confirmed_legs(trade_filter_config: Any) -> int:
 #  §15.7, §16, §17.1, §17.7..§17.14)
 # ---------------------------------------------------------------------------
 
-class _ApplyResetEvents(NamedTuple):
-    daily_reset_enabled: bool
-    daily_reset_event: np.ndarray
-    time_filter_enabled: bool
-    time_filter_in_window: np.ndarray
-    time_filter_reset_event: np.ndarray
-    combined_reset_event: np.ndarray
-
-
 class _ApplyVolumeRuntimeArrays(NamedTuple):
     condition_allowed: Optional[np.ndarray]
     condition_block_reason: Optional[np.ndarray]
@@ -1884,78 +1882,14 @@ def _resolve_apply_reset_events(
     n: int,
     daily_reset_event: "Optional[np.ndarray]",
     time_filter_events: "Optional[tuple[np.ndarray, np.ndarray]]",
-) -> _ApplyResetEvents:
-    _zz_cfg = _extract_zigzag_field(trade_filter_config, "zigzag")
-    _vol_cfg = getattr(trade_filter_config, "volume", None)
-    daily_reset_enabled = bool(
-        _extract_zigzag_field(_zz_cfg, "daily_reset", False)
-    ) if _zz_cfg is not None else False
-    daily_reset_enabled = daily_reset_enabled or bool(
-        getattr(_vol_cfg, "daily_reset", False)
-    )
-
-    if daily_reset_event is None:
-        daily_reset_event_out = _infer_daily_reset_event(
-            index, n, enabled=daily_reset_enabled
-        )
-    else:
-        daily_reset_event_out = np.asarray(daily_reset_event, dtype=bool)
-        if daily_reset_event_out.ndim != 1:
-            raise ConfigError(
-                f"apply() daily_reset_event must be 1-D, "
-                f"got ndim={daily_reset_event_out.ndim}"
-            )
-        if daily_reset_event_out.shape[0] != n:
-            raise ConfigError(
-                f"apply() daily_reset_event length "
-                f"{daily_reset_event_out.shape[0]} != n={n}"
-            )
-
-    _tfl_cfg = getattr(trade_filter_config, "time_filter", None)
-    _tfl_enabled = (
-        bool(getattr(_tfl_cfg, "enabled", False)) if _tfl_cfg is not None else False
-    )
-
-    if time_filter_events is None:
-        _tfl_sh = getattr(_tfl_cfg, "_start_hour", None) if _tfl_cfg is not None else None
-        _tfl_sm = getattr(_tfl_cfg, "_start_minute", None) if _tfl_cfg is not None else None
-        _tfl_eh = getattr(_tfl_cfg, "_end_hour", None) if _tfl_cfg is not None else None
-        _tfl_em = getattr(_tfl_cfg, "_end_minute", None) if _tfl_cfg is not None else None
-        if _tfl_enabled and any(x is None for x in (_tfl_sh, _tfl_sm, _tfl_eh, _tfl_em)):
-            raise ConfigError(
-                "apply(): time_filter.enabled=True but resolver fields are None; "
-                "ensure resolve_time_filter_in_place() is called before apply()"
-            )
-        time_filter_in_window, time_filter_reset_event_out = _infer_time_filter_events(
-            index, n,
-            enabled=_tfl_enabled,
-            start_h=int(_tfl_sh) if _tfl_sh is not None else 0,
-            start_m=int(_tfl_sm) if _tfl_sm is not None else 0,
-            end_h=int(_tfl_eh) if _tfl_eh is not None else 0,
-            end_m=int(_tfl_em) if _tfl_em is not None else 0,
-        )
-    else:
-        _raw_in_w, _raw_reset = time_filter_events
-        time_filter_in_window = np.asarray(_raw_in_w, dtype=bool)
-        time_filter_reset_event_out = np.asarray(_raw_reset, dtype=bool)
-        if time_filter_in_window.ndim != 1 or time_filter_in_window.shape[0] != n:
-            raise ConfigError(
-                f"apply() time_filter_events[0] (in_window) must be 1-D bool "
-                f"of length n={n}"
-            )
-        if time_filter_reset_event_out.ndim != 1 or time_filter_reset_event_out.shape[0] != n:
-            raise ConfigError(
-                f"apply() time_filter_events[1] (reset_event) must be 1-D bool "
-                f"of length n={n}"
-            )
-
-    return _ApplyResetEvents(
-        daily_reset_enabled=daily_reset_enabled,
-        daily_reset_event=daily_reset_event_out,
-        time_filter_enabled=_tfl_enabled,
-        time_filter_in_window=time_filter_in_window,
-        time_filter_reset_event=time_filter_reset_event_out,
-        combined_reset_event=daily_reset_event_out | time_filter_reset_event_out,
+) -> ResetEvents:
+    return resolve_reset_events(
+        trade_filter_config=trade_filter_config,
+        index=index,
+        n=n,
+        owner="zigzag",
+        daily_reset_event=daily_reset_event,
+        time_filter_events=time_filter_events,
     )
 
 
@@ -2236,10 +2170,19 @@ def _finalize_apply_result(
     local_median_available: np.ndarray,
     cand_age_bars: np.ndarray,
     cand_leg_dir: np.ndarray,
-    reset_events: _ApplyResetEvents,
+    reset_events: ResetEvents,
     volume_runtime: "Optional[VolumeRuntime]",
     volume_arrays: _ApplyVolumeRuntimeArrays,
 ) -> "ZigZagSTFilterResult":
+    effective_mode = (
+        "zigzag_volume_and_time"
+        if volume_runtime is not None and reset_events.time_filter_enabled
+        else "zigzag_and_volume"
+        if volume_runtime is not None
+        else "zigzag_and_time"
+        if reset_events.time_filter_enabled
+        else "zigzag_only"
+    )
     filter_diagnostics_out: Dict[str, np.ndarray] = {
         "trade_filter_state": arrays["state_arr"],
         "trade_filter_state_code": arrays["state_code_arr"],
@@ -2308,6 +2251,20 @@ def _finalize_apply_result(
             "immediate_block_reason_arr"
         ],
     }
+    if reset_events.time_filter_enabled:
+        filter_diagnostics_out["trade_filter_mode"] = np.full(
+            n, effective_mode, dtype=object
+        )
+        time_forced_exit = np.zeros(n, dtype=np.int8)
+        if n >= 2:
+            time_forced_exit[:-1] = np.asarray(
+                reset_events.time_filter_reset_event[:-1]
+                & ~reset_events.daily_reset_event[:-1]
+                & (positions[:-1] != 0)
+                & (positions[1:] == 0),
+                dtype=np.int8,
+            )
+        filter_diagnostics_out["time_filter_forced_exit"] = time_forced_exit
     if volume_runtime is not None:
         filter_diagnostics_out.update(
             {
@@ -2417,6 +2374,10 @@ def _finalize_apply_result(
         internal_legs=None,
         filter_config_snapshot=(
             volume_runtime.filter_config_snapshot if volume_runtime is not None else None
+        ),
+        execution_metadata=build_filter_execution_metadata(
+            daily_reset_event=reset_events.daily_reset_event,
+            time_filter_reset_event=reset_events.time_filter_reset_event,
         ),
     )
 
@@ -2551,88 +2512,6 @@ def apply(
     time_filter_reset_event = reset_events.time_filter_reset_event
     combined_reset_event = reset_events.combined_reset_event
     _tfl_enabled = reset_events.time_filter_enabled
-
-    # ------------------------------------------------------------------
-    # 2) Resolve daily_reset_enabled из config (план v3 §6.1).
-    # ------------------------------------------------------------------
-    _zz_cfg = _extract_zigzag_field(trade_filter_config, "zigzag")
-    _vol_cfg = getattr(trade_filter_config, "volume", None)
-    daily_reset_enabled = bool(
-        _extract_zigzag_field(_zz_cfg, "daily_reset", False)
-    ) if _zz_cfg is not None else False
-    daily_reset_enabled = daily_reset_enabled or bool(
-        getattr(_vol_cfg, "daily_reset", False)
-    )
-
-    # ------------------------------------------------------------------
-    # 3) Resolve daily_reset_event (план v3 §6.1 / §0.15).
-    # ------------------------------------------------------------------
-    if daily_reset_event is None:
-        daily_reset_event = _infer_daily_reset_event(
-            index, n_pre, enabled=daily_reset_enabled
-        )
-    else:
-        # §0.15: нормализуем override через np.asarray + ndim check
-        daily_reset_event = np.asarray(daily_reset_event, dtype=bool)
-        if daily_reset_event.ndim != 1:
-            raise ConfigError(
-                f"apply() daily_reset_event must be 1-D, "
-                f"got ndim={daily_reset_event.ndim}"
-            )
-        if daily_reset_event.shape[0] != n_pre:
-            raise ConfigError(
-                f"apply() daily_reset_event length "
-                f"{daily_reset_event.shape[0]} != n={n_pre}"
-            )
-
-    # ------------------------------------------------------------------
-    # 3b) Resolve time_filter events (docs/time_filter_plan_v1_final.txt §4.1).
-    # ------------------------------------------------------------------
-    _tfl_cfg = getattr(trade_filter_config, "time_filter", None)
-    _tfl_enabled = bool(getattr(_tfl_cfg, "enabled", False)) if _tfl_cfg is not None else False
-
-    if time_filter_events is None:
-        # Production path: infer from config resolver fields.
-        _tfl_sh = getattr(_tfl_cfg, "_start_hour", None) if _tfl_cfg is not None else None
-        _tfl_sm = getattr(_tfl_cfg, "_start_minute", None) if _tfl_cfg is not None else None
-        _tfl_eh = getattr(_tfl_cfg, "_end_hour", None) if _tfl_cfg is not None else None
-        _tfl_em = getattr(_tfl_cfg, "_end_minute", None) if _tfl_cfg is not None else None
-        if _tfl_enabled and any(x is None for x in (_tfl_sh, _tfl_sm, _tfl_eh, _tfl_em)):
-            raise ConfigError(
-                "apply(): time_filter.enabled=True but resolver fields are None; "
-                "ensure resolve_time_filter_in_place() is called before apply()"
-            )
-        time_filter_in_window, time_filter_reset_event = _infer_time_filter_events(
-            index, n_pre,
-            enabled=_tfl_enabled,
-            start_h=int(_tfl_sh) if _tfl_sh is not None else 0,
-            start_m=int(_tfl_sm) if _tfl_sm is not None else 0,
-            end_h=int(_tfl_eh) if _tfl_eh is not None else 0,
-            end_m=int(_tfl_em) if _tfl_em is not None else 0,
-        )
-    else:
-        # Test-override path: normalize both arrays.
-        _raw_in_w, _raw_reset = time_filter_events
-        time_filter_in_window = np.asarray(_raw_in_w, dtype=bool)
-        time_filter_reset_event = np.asarray(_raw_reset, dtype=bool)
-        if time_filter_in_window.ndim != 1 or time_filter_in_window.shape[0] != n_pre:
-            raise ConfigError(
-                f"apply() time_filter_events[0] (in_window) must be 1-D bool "
-                f"of length n={n_pre}"
-            )
-        if time_filter_reset_event.ndim != 1 or time_filter_reset_event.shape[0] != n_pre:
-            raise ConfigError(
-                f"apply() time_filter_events[1] (reset_event) must be 1-D bool "
-                f"of length n={n_pre}"
-            )
-
-    # ------------------------------------------------------------------
-    # 3c) Combined reset mask (docs/time_filter_plan_v1_final.txt §4.2).
-    # Priority: daily_reset > time_filter_reset > all others.
-    # ZigZag passes receive combined_reset_event so candidate-state is
-    # correctly wiped on both reset sources (§4.3 — critical correctness fix).
-    # ------------------------------------------------------------------
-    combined_reset_event: np.ndarray = daily_reset_event | time_filter_reset_event
 
     if per_bar is None:
         trend_probe = np.asarray(trend)
@@ -3311,10 +3190,42 @@ def apply(
         # ------------------------------------------------------------------
         immediate_used_this_bar = False
         volume_blocked_lifecycle_start = False
+        time_entry_attempt = False
+        if state_at_bar_start == ZigZagFSMState.OFF and not is_reset:
+            if mode_d_enabled:
+                time_entry_attempt = wakeup_entry_all_ok
+            else:
+                time_entry_attempt = (
+                    _try_lifecycle_start_from_off(
+                        t=t,
+                        state=state_at_bar_start,
+                        resolved_mode=resolved_mode,
+                        candidate_component_ok=candidate_component_ok,
+                        b_component_ok=b_component_ok,
+                        immediate_allowed=immediate_allowed,
+                        is_exit_b=is_exit_b,
+                        cand_dir_t=cand_dir_t,
+                        volume_allowed=True,
+                    )
+                    is not None
+                )
+        shared_time_decision = decide_trade_filter_entry(
+            entry_attempt_event=time_entry_attempt,
+            time_filter_in_window=bool(time_filter_in_window[t]),
+            combined_reset_event=bool(combined_reset_event[t]),
+            daily_reset_event=bool(daily_reset_event[t]),
+            time_filter_reset_event=bool(time_filter_reset_event[t]),
+        )
+        time_filter_blocked_lifecycle_start = (
+            shared_time_decision.entry_blocked_outside
+        )
         # §4.6: entry allowed only when FSM is OFF, not on reset bar, AND
         # inside the time_filter window. When time_filter is disabled,
         # in_window is all-ones (short-circuit), so no behaviour change.
-        if state_at_bar_start == ZigZagFSMState.OFF and not is_reset and bool(time_filter_in_window[t]):
+        if (
+            state_at_bar_start == ZigZagFSMState.OFF
+            and shared_time_decision.entry_allowed
+        ):
             if mode_d_enabled:
                 if wakeup_entry_all_ok:
                     state = ZigZagFSMState.ST_ACTIVE_FREEZE
@@ -3981,6 +3892,9 @@ def apply(
                 volume_condition_block_reason_labels[t],
             )
 
+        elif diag_enabled and time_filter_blocked_lifecycle_start:
+            filter_block_reason_arr[t] = "time_filter_out_of_window"
+
         # Priority 3-5: flip-based reasons (only when not already set
         # above and a flip event occurred on this bar).
         elif diag_enabled and flip_dir != 0:
@@ -4023,6 +3937,10 @@ def apply(
             filter_config_snapshot=(
                 volume_runtime.filter_config_snapshot
                 if volume_runtime is not None else None
+            ),
+            execution_metadata=build_filter_execution_metadata(
+                daily_reset_event=reset_events.daily_reset_event,
+                time_filter_reset_event=reset_events.time_filter_reset_event,
             ),
         )
 

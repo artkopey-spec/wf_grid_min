@@ -37,11 +37,17 @@ from supertrend_optimizer.core._fsm_state_names import (
     STANDALONE_VOLUME_STATE_NAMES as _VOLUME_STATES,
 )
 from supertrend_optimizer.core.backtest import generate_positions
+from supertrend_optimizer.core._reset_events import (
+    TimeFilterRuntime,
+    resolve_time_filter_runtime,
+)
 from supertrend_optimizer.core.metrics import calculate_all_metrics
 from supertrend_optimizer.core.trade_filter_config import (
     is_trade_filter_enabled,
+    is_time_filter_enabled,
     is_volume_enabled,
     is_zigzag_enabled,
+    resolve_trade_filter_mode,
     resolve_trade_filter_mode_in_place,
 )
 from supertrend_optimizer.core.volume_metrics import VolumeRuntime
@@ -193,7 +199,9 @@ def _bars_in_state_histogram(
 
     Plan reference: §3.3.2 (bars_in_state; sanity invariant 6).
     """
-    state_arr = filter_diagnostics["trade_filter_state"]
+    state_arr = filter_diagnostics.get("trade_filter_state")
+    if state_arr is None:
+        return {}
     states = list(_FSM_STATES)
     if any(np.any(state_arr == s) for s in _VOLUME_STATES if s != "OFF"):
         states.extend(s for s in _VOLUME_STATES if s not in states)
@@ -223,9 +231,11 @@ def _compute_summary_counters(
 
     # passed / blocked from bar-level arrays
     passed_entry_signals = int(
-        np.sum(filter_diagnostics["filter_allowed_entry"])
+        np.sum(filter_diagnostics.get("filter_allowed_entry", np.array([], dtype=np.int8)))
     )
-    block_reason = filter_diagnostics["filter_block_reason"]
+    block_reason = np.asarray(
+        filter_diagnostics.get("filter_block_reason", []), dtype=object
+    )
 
     blocked_filter_off = int(np.sum(block_reason == "filter_off"))
     blocked_waiting_first = int(
@@ -259,7 +269,9 @@ def _compute_summary_counters(
 
     # lifecycle_starts: transitions from inactive states into lifecycle-active
     # states.  Uses shared ACTIVE_LIFECYCLE_STATES (plan §7.4).
-    state_arr = filter_diagnostics["trade_filter_state"]
+    state_arr = np.asarray(
+        filter_diagnostics.get("trade_filter_state", []), dtype=object
+    )
     lifecycle_active = np.zeros(len(state_arr), dtype=bool)
     for _s in _ACTIVE_LIFECYCLE_STATES:
         lifecycle_active |= (state_arr == _s)
@@ -273,7 +285,7 @@ def _compute_summary_counters(
 
     # median_stop_triggered: cross-source from bar-level int8 mask
     median_stop_triggered = int(
-        np.sum(filter_diagnostics["median_stop_triggered"])
+        np.sum(filter_diagnostics.get("median_stop_triggered", np.array([], dtype=np.int8)))
     )
     zz_leg_t = filter_diagnostics.get("zz_leg_stop_triggered")
     zz_leg_stop_triggered = (
@@ -306,13 +318,20 @@ def _compute_summary_counters(
         if time_filter_enabled_arr is not None and len(time_filter_enabled_arr) > 0
         else False
     )
+    time_filter_blocked_entry_count = int(
+        np.sum(block_reason == "time_filter_out_of_window")
+    )
 
     # exits_opposite_flip: from trade-level diagnostics
     exits_opposite_flip = 0
+    time_filter_forced_exit_count = 0
     if trades_df is not None and not trades_df.empty:
         if "exit_reason" in trades_df.columns:
             exits_opposite_flip = int(
                 (trades_df["exit_reason"] == "filter_stopping_opposite_flip").sum()
+            )
+            time_filter_forced_exit_count = int(
+                (trades_df["exit_reason"] == "filter_time_reset").sum()
             )
 
     immediate_used = filter_diagnostics.get("immediate_candidate_entry_used")
@@ -354,6 +373,8 @@ def _compute_summary_counters(
         "time_filter_reset_count": time_filter_reset_count,
         "time_filter_bars_in_window": time_filter_bars_in_window,
         "time_filter_bars_out_window": time_filter_bars_out_window,
+        "time_filter_blocked_entry_count": time_filter_blocked_entry_count,
+        "time_filter_forced_exit_count": time_filter_forced_exit_count,
     }
 
 
@@ -581,11 +602,35 @@ def _build_filter_diagnostics_summary(
         _compute_volume_summary_counters(result.filter_diagnostics)
         if "volume_regime" in result.filter_diagnostics else {}
     )
+    effective_mode = resolve_trade_filter_mode(trade_filter_config)
     if not is_zigzag_enabled(trade_filter_config):
+        positions_raw = generate_positions(
+            result.trend,
+            result.trade_mode,
+            ExecutionModel.OPEN_TO_OPEN,
+        )
+        counters = _compute_summary_counters(
+            positions_raw=positions_raw,
+            positions_filtered=result.positions,
+            filter_diagnostics=result.filter_diagnostics,
+            trades_df=result.trades_df,
+        )
+        counters.update(volume_counters)
         return {
-            "mode": "volume_only",
+            "mode": effective_mode,
+            "trade_filter_enabled": True,
+            "time_filter_enabled": counters["time_filter_enabled"],
+            "time_filter_reset_count": counters["time_filter_reset_count"],
+            "time_filter_bars_in_window": counters["time_filter_bars_in_window"],
+            "time_filter_bars_out_window": counters["time_filter_bars_out_window"],
+            "time_filter_blocked_entry_count": counters[
+                "time_filter_blocked_entry_count"
+            ],
+            "time_filter_forced_exit_count": counters[
+                "time_filter_forced_exit_count"
+            ],
             "global_offset": global_offset,
-            "counters": volume_counters,
+            "counters": counters,
             "bars_in_state": _bars_in_state_histogram(result.filter_diagnostics),
             **volume_counters,
         }
@@ -646,7 +691,18 @@ def _build_filter_diagnostics_summary(
         )
 
     return {
-        "mode": "zigzag_st_mode",
+        "mode": effective_mode,
+        "trade_filter_enabled": True,
+        "time_filter_enabled": counters["time_filter_enabled"],
+        "time_filter_reset_count": counters["time_filter_reset_count"],
+        "time_filter_bars_in_window": counters["time_filter_bars_in_window"],
+        "time_filter_bars_out_window": counters["time_filter_bars_out_window"],
+        "time_filter_blocked_entry_count": counters[
+            "time_filter_blocked_entry_count"
+        ],
+        "time_filter_forced_exit_count": counters[
+            "time_filter_forced_exit_count"
+        ],
         "zigzag_mode": zigzag_mode,
         "candidate_duration_gate_enabled": gate_enabled,
         "candidate_duration_max_bars": gate_max_bars_out,
@@ -704,6 +760,7 @@ def run_period(
     trade_filter_config: Any = None,
     zigzag_global_stats: Any = None,
     volume_runtime: Optional[VolumeRuntime] = None,
+    time_filter_runtime: Optional[TimeFilterRuntime] = None,
     global_offset: int = 0,
     *,
     collect_filter_diagnostics: bool = True,
@@ -748,7 +805,7 @@ def run_period(
     # WP-T4 fail-fast: enabled filter requires pre-materialised stats (plan §7.2).
     zigzag_enabled = is_zigzag_enabled(trade_filter_config)
     volume_enabled = is_volume_enabled(trade_filter_config)
-    filter_enabled = zigzag_enabled or volume_enabled
+    filter_enabled = is_trade_filter_enabled(trade_filter_config)
     if zigzag_enabled and zigzag_global_stats is None:
         raise ConfigError(
             "zigzag_global_stats required when trade_filter is enabled; "
@@ -769,6 +826,11 @@ def run_period(
         volume_runtime,
         global_offset=global_offset,
         n_bars=n_bars,
+    )
+    period_time_filter_runtime = (
+        time_filter_runtime
+        if time_filter_runtime is None or time_filter_runtime.reference_length == n_bars
+        else time_filter_runtime.slice(global_offset, global_offset + n_bars)
     )
 
     # Run backtest using unified engine (no early exit for tester)
@@ -797,6 +859,7 @@ def run_period(
         trade_filter_config=trade_filter_config if filter_enabled else None,
         zigzag_global_stats=zigzag_global_stats if zigzag_enabled else None,
         volume_runtime=period_volume_runtime,
+        time_filter_runtime=period_time_filter_runtime,
         global_offset=global_offset if filter_enabled else 0,
         volume=volume,
         collect_filter_diagnostics=collect_filter_diagnostics,
@@ -843,6 +906,7 @@ def run_all_periods(
     trade_filter_config: Any = None,
     zigzag_global_stats: Any = None,
     volume_runtime: Optional[VolumeRuntime] = None,
+    time_filter_runtime: Optional[TimeFilterRuntime] = None,
     include_period_splits: bool = True,
     *,
     collect_filter_diagnostics: bool = True,
@@ -890,7 +954,7 @@ def run_all_periods(
 
     # WP-T4 §7.3 — materialise stats once from the full df when not supplied.
     zigzag_enabled = is_zigzag_enabled(trade_filter_config)
-    filter_enabled = zigzag_enabled or is_volume_enabled(trade_filter_config)
+    filter_enabled = is_trade_filter_enabled(trade_filter_config)
     if zigzag_enabled and zigzag_global_stats is None:
         triggers_marker = getattr(trade_filter_config, "_raw_triggers_present", None)
         raw_user_keys = (
@@ -901,6 +965,13 @@ def run_all_periods(
         zigzag_global_stats = build_zigzag_global_stats(
             close=df["close"].values,
             trade_filter_config=trade_filter_config,
+        )
+    if is_time_filter_enabled(trade_filter_config):
+        time_filter_runtime = resolve_time_filter_runtime(
+            trade_filter_config=trade_filter_config,
+            index=df.index,
+            n=n_total,
+            runtime=time_filter_runtime,
         )
 
     results = []
@@ -921,6 +992,11 @@ def run_all_periods(
             if volume_runtime is not None
             else None
         )
+        period_time_filter_runtime = (
+            time_filter_runtime.slice(period_global_offset, n_total)
+            if time_filter_runtime is not None
+            else None
+        )
 
         # Run period
         result = run_period(
@@ -938,6 +1014,7 @@ def run_all_periods(
             trade_filter_config=trade_filter_config,
             zigzag_global_stats=zigzag_global_stats,
             volume_runtime=period_volume_runtime,
+            time_filter_runtime=period_time_filter_runtime,
             global_offset=period_global_offset,
             collect_filter_diagnostics=collect_filter_diagnostics,
         )

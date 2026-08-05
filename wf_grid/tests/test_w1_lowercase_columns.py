@@ -25,6 +25,7 @@ def _write_grid_yaml(tmp_path: Path, csv_path: Path) -> str:
             f"""\
             data:
               file_path: {csv_path.as_posix()}
+              periods_per_year: 365
             validation:
               walk_forward:
                 train_size: "90D"
@@ -133,6 +134,22 @@ def test_loader_accepts_angle_bracket_semicolon_export(tmp_path):
     assert loaded.index[0] == pd.Timestamp("2025-01-03 10:00:00")
     assert loaded.index[1] == pd.Timestamp("2025-01-03 10:01:00")
     assert loaded.iloc[0]["open"] == 4012.5
+
+
+def test_loader_zero_pads_morning_finam_time_after_int_inference(tmp_path):
+    """Leading-zero HHMMSS must survive pandas reading TIME as int64."""
+    csv_path = tmp_path / "morning_finam.csv"
+    csv_path.write_text(
+        "<DATE>;<TIME>;<OPEN>;<HIGH>;<LOW>;<CLOSE>;<VOL>\n"
+        "20260306;092400;284900;284925;284900;284925;40\n"
+        "20260306;100000;285000;285100;284900;285050;100\n",
+        encoding="utf-8",
+    )
+
+    loaded = load_ohlc_csv(str(csv_path), sep=";")
+
+    assert loaded.index[0] == pd.Timestamp("2026-03-06 09:24:00")
+    assert loaded.index[1] == pd.Timestamp("2026-03-06 10:00:00")
 
 
 def test_ohlc_only_data_remains_valid_without_volume() -> None:

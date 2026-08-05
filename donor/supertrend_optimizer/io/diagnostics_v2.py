@@ -13,10 +13,16 @@ import numpy as np
 import pandas as pd
 
 from supertrend_optimizer.utils.exceptions import ConfigError
+from supertrend_optimizer.core.trade_filter_config import (
+    is_volume_enabled,
+    is_zigzag_enabled,
+)
 
 
 
-STATUS_VALUES = frozenset({"PASS", "WARN", "FAIL", "SKIP", "INFO"})
+STATUS_VALUES = frozenset(
+    {"PASS", "WARN", "FAIL", "SKIP", "INFO", "applicable", "not_applicable"}
+)
 
 V2_SHEET_ORDER: tuple[str, ...] = (
     "Index",
@@ -205,9 +211,12 @@ def _cycle_mode_from_config(trade_filter_config: Any, explicit_mode: str | None)
 
 
 def _diagnostics_mode(ctx: DiagnosticsV2Context) -> str:
-    mode = _cycle_mode_from_config(ctx.trade_filter_config, None)
-    if mode == "volume_only":
-        return mode
+    fd = ctx.fd_100 or {}
+    if "trade_filter_state" not in fd:
+        return "time_only"
+    capability_mode = _cycle_mode_from_config(ctx.trade_filter_config, None)
+    if capability_mode in {"time_only", "volume_only"}:
+        return capability_mode
     zigzag = getattr(ctx.trade_filter_config, "zigzag", None)
     zigzag_mode = str(getattr(zigzag, "mode", "") or "").upper()
     return "zigzag_d" if zigzag_mode == "D" else "zigzag"
@@ -950,6 +959,23 @@ def _build_equity_drawdown_sheet(ctx: DiagnosticsV2Context) -> DiagnosticsV2Shee
 
 
 def _build_cycle_summary_sheet(ctx: DiagnosticsV2Context) -> DiagnosticsV2Sheet:
+    if ctx.fd_100 is not None and "trade_filter_state" not in ctx.fd_100:
+        result = pd.DataFrame(
+            [{
+                "Block": "Cycle overview",
+                "Metric": "Status",
+                "Value": "not_applicable",
+                "Notes": "time-only has no ZigZag/Volume lifecycle cycles",
+            }],
+            columns=["Block", "Metric", "Value", "Notes"],
+        )
+        return _sheet(
+            "Cycle_Summary",
+            phase="A2",
+            df=result,
+            status="not_applicable",
+            primary_source="trade_filter capabilities",
+        )
     if len(ctx.cycle_map) == 0:
         result = pd.DataFrame(
             [{"Block": "Cycle overview", "Metric": "Status", "Value": "SKIP", "Notes": "cycle_map empty"}],
@@ -1091,6 +1117,11 @@ def _non_empty_text_mask(values: np.ndarray) -> np.ndarray:
 
 def _build_filter_funnel_sheet(ctx: DiagnosticsV2Context) -> DiagnosticsV2Sheet:
     mode = _diagnostics_mode(ctx)
+    has_zigzag = mode in {"zigzag", "zigzag_d"}
+    has_volume = bool(
+        is_volume_enabled(ctx.trade_filter_config)
+        or (ctx.fd_100 is not None and "volume_condition_allowed" in ctx.fd_100)
+    )
     gate_specs = [
         ("filter_allowed_entry", "filter_allowed_entry"),
         ("candidate_threshold_ok", "candidate_threshold_ok"),
@@ -1120,7 +1151,7 @@ def _build_filter_funnel_sheet(ctx: DiagnosticsV2Context) -> DiagnosticsV2Sheet:
                 }
             )
             continue
-        if source_column in {"volume_condition_allowed", "cycle_direction_gate_passed"} and mode != "volume_only":
+        if source_column in {"volume_condition_allowed", "cycle_direction_gate_passed"} and not has_volume:
             rows.append(
                 {
                     "gate": gate,
@@ -1134,7 +1165,7 @@ def _build_filter_funnel_sheet(ctx: DiagnosticsV2Context) -> DiagnosticsV2Sheet:
                 }
             )
             continue
-        if source_column in {"candidate_threshold_ok", "confirmed_median_ok", "immediate_allowed"} and mode == "volume_only":
+        if source_column in {"candidate_threshold_ok", "confirmed_median_ok", "immediate_allowed"} and not has_zigzag:
             rows.append(
                 {
                     "gate": gate,
@@ -1564,7 +1595,11 @@ def build_diagnostics_v2_context(
         trades_100 = pd.DataFrame()
     fd_100 = getattr(pr_100, "filter_diagnostics", None)
     summary = getattr(pr_100, "filter_diagnostics_summary", None)
-    cycle_mode = _cycle_mode_from_config(trade_filter_config, None)
+    cycle_mode = (
+        "time_only"
+        if fd_100 is not None and "trade_filter_state" not in fd_100
+        else _cycle_mode_from_config(trade_filter_config, None)
+    )
     cycle_map = derive_trade_cycle_map(
         fd_100,
         trades_100,

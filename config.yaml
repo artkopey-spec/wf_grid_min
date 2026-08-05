@@ -1,7 +1,7 @@
 schema_version: 1
 # WF Grid profile for the current data.csv.
-# Data snapshot: 422725 MIX 1m bars, 2024-10-10 10:00 to 2026-08-05 12:46 MSK.
-# 541 active days; median 860 bars/day. QUIK columns include OHLC and volume.
+# Data snapshot: 105681 MIX 1m bars, 2026-03-06 09:24 to 2026-08-05 12:46 MSK.
+# QUIK columns include OHLC and volume.
 # WF windows: 63000 train bars / 21000 test bars / 21000 step bars (3:1, anchor=end).
 # Run: python run.py --config config.yaml
 
@@ -83,54 +83,19 @@ export:
   retain_per_bar_filter_diagnostics: false
 
 trade_filter:
-  enabled: false
-  # type: "zigzag_st_mode"  # uncomment when enabling zigzag
+  enabled: true
 
   zigzag:
     enabled: false
-    # global_stats_source: "full_dataset"
-    # leg_height_mode: "pct"
-    # reversal_threshold: 0.0005
-    # candidate_trigger_threshold: auto
-    # candidate_trigger_quantile: 0.80
-    # global_median: "auto"
-    # local_window: 5
-    # daily_reset: true
-    # mode: "A+B"
-    # candidate_duration_gate:
-    #   enabled: false
-    #   max_bars: 30
-
-  # lifecycle:                        # needed only when zigzag.enabled: true
-  #   freeze_confirmed_legs: 3
-  #   stop_check: "confirm_bar_only"
-  #   stopping_exit: "opposite_st_flip"
-  #   exit_off_mode: "exit A"
-  #   exit_off_zz_leg_count: 5
-  #   exit_b_immediate_off: false
-
-  # diagnostics:                      # needed only when zigzag.enabled: true
-  #   export_state_columns: true
-  #   export_trigger_columns: true
 
   time_filter:
     enabled: true
-    window: "09:00-19:00"
+    windows:
+      - "09:00-12:00"
+      - "16:00-18:00"
 
   volume:
     enabled: false
-    mode: "volume_A"
-    aggregation: median
-    daily_reset: true
-    cycle_direction_gate: false
-    short_window: 25
-    baseline_window: 500
-    threshold_ratio: 1.6
-    exit_hysteresis_ratio: 1.6
-    exit_freeze_bars: 5
-    regime_low_ratio: 0.8
-    regime_high_ratio: 1.2
-    direction_lookback_bars: 10
-    baseline_session:
-      enabled: false
-      window: "09:00-19:00"
+
+  wakeup_regime:
+    enabled: false

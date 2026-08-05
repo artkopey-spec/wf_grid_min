@@ -67,6 +67,7 @@ def run_single_backtest(
     global_offset: int = 0,
     volume: Optional[np.ndarray] = None,
     *,
+    time_filter_runtime: Any = None,
     collect_filter_diagnostics: bool = True,
 ) -> BacktestResult:
     """
@@ -236,6 +237,7 @@ def run_single_backtest(
         global_offset=global_offset,
         index=index,                          # NEW: for daily_reset
         volume=volume,
+        time_filter_runtime=time_filter_runtime,
         collect_filter_diagnostics=collect_filter_diagnostics,
     )
     returns = _artifacts.returns
@@ -322,13 +324,14 @@ def run_single_backtest(
         # Step 4.2: Attach trade-level filter diagnostics (WP7 / §8.3, §8.4).
         # Called on extended-slice indices BEFORE any OOS trim/rebase.
         # Adds entry_filter_state, entry_trigger_source, exit_reason columns.
-        if (
-            _artifacts.filter_diagnostics is not None
-            and trades_df is not None
-            and len(trades_df) > 0
-        ):
+        trade_filter_diagnostics = (
+            _artifacts.filter_diagnostics
+            if _artifacts.filter_diagnostics is not None
+            else _artifacts.filter_execution_metadata
+        )
+        if trade_filter_diagnostics is not None and trades_df is not None and len(trades_df) > 0:
             trades_df = attach_trade_filter_diagnostics(
-                trades_df, _artifacts.filter_diagnostics
+                trades_df, trade_filter_diagnostics
             )
 
         # Step 4.5: Recalculate trade-based metrics from trades_df.

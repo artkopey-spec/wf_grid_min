@@ -59,8 +59,16 @@ from wf_grid.logging_.diagnostics import (
 from wf_grid.ranking.ranker import rank_candidates
 from wf_grid.ranking.scoring import calculate_seed_score, compute_score_discrimination
 from wf_grid.wf.runner import run_wf_for_grid_point, run_wf_train_for_grid_point, compute_prepend_bars
+from supertrend_optimizer.core._reset_events import (
+    TimeWindowSchedule,
+    build_time_filter_runtime,
+)
 from supertrend_optimizer.core.zigzag_st_filter import build_zigzag_global_stats
-from supertrend_optimizer.core.trade_filter_config import is_zigzag_enabled, is_volume_enabled
+from supertrend_optimizer.core.trade_filter_config import (
+    is_time_filter_enabled,
+    is_volume_enabled,
+    is_zigzag_enabled,
+)
 from supertrend_optimizer.core.volume_metrics import (
     _warn_if_volume_baseline_window_large,
     build_volume_global_metrics,
@@ -79,7 +87,7 @@ logger = logging.getLogger(__name__)
 
 
 def _read_ohlc_csv(path: str | Path) -> pd.DataFrame:
-    data = load_ohlc_csv(str(path))
+    data = load_ohlc_csv(str(path), duplicate_lowercase_mode="raise")
     if "vol" in data.columns and "volume" not in data.columns:
         data = data.rename(columns={"vol": "volume"})
     return data
@@ -276,6 +284,7 @@ def run_grid_pipeline(
         t0 = time.time()
         zigzag_global_stats = None
         volume_runtime = None
+        time_filter_runtime = None
         _tf = config.trade_filter
         if is_zigzag_enabled(_tf):
             full_close = data["close"].values
@@ -296,6 +305,16 @@ def run_grid_pipeline(
                 data["close"].to_numpy(),
                 _tf.volume,
                 index=data.index,
+            )
+        if is_time_filter_enabled(_tf):
+            schedule = TimeWindowSchedule(
+                tuple(_tf.time_filter._windows_minutes)
+            )
+            time_filter_runtime = build_time_filter_runtime(
+                data.index,
+                len(data),
+                enabled=True,
+                schedule=schedule,
             )
         timer.record("zigzag_global_stats", time.time() - t0)
 
@@ -352,6 +371,7 @@ def run_grid_pipeline(
             prepend_bars=prepend_bars,
             zigzag_global_stats=zigzag_global_stats,
             volume_runtime=volume_runtime,
+            time_filter_runtime=time_filter_runtime,
             _result=result,
         )
         timer.record("wf_grid_execution", time.time() - t0)
@@ -527,6 +547,7 @@ def _execute_wf_grid(
     prepend_bars,
     zigzag_global_stats,
     volume_runtime,
+    time_filter_runtime=None,
     *,
     _result: "PipelineResult",
 ):
@@ -555,6 +576,7 @@ def _execute_wf_grid(
         return _execute_wf_grid_sequential(
             grid_points, wf_slices, data, config,
             prepend_bars, zigzag_global_stats, volume_runtime,
+            time_filter_runtime,
         )
 
     # C3-1 enter-then-mark: once this line runs, a later failure must still
@@ -566,6 +588,7 @@ def _execute_wf_grid(
         return _execute_wf_grid_parallel(
             grid_points, wf_slices, data, config,
             prepend_bars, zigzag_global_stats, volume_runtime, n_workers,
+            time_filter_runtime,
         )
     except _PARALLEL_INFRA_FAILURES as exc:
         if not config.execution.fallback_to_sequential:
@@ -579,6 +602,7 @@ def _execute_wf_grid(
         out = _execute_wf_grid_sequential(
             grid_points, wf_slices, data, config,
             prepend_bars, zigzag_global_stats, volume_runtime,
+            time_filter_runtime,
         )
         _result.execution_mode = "parallel_then_fallback"
         return out
@@ -593,6 +617,7 @@ def _execute_wf_grid_parallel(
     zigzag_global_stats,
     volume_runtime,
     n_workers,
+    time_filter_runtime=None,
 ):
     """Parallel OOS+Train execution via ProcessPoolExecutor (plan §3.8).
 
@@ -637,6 +662,7 @@ def _execute_wf_grid_parallel(
                 prepend_bars,
                 zigzag_global_stats,
                 volume_runtime,
+                time_filter_runtime,
                 config.export.retain_per_bar_filter_diagnostics,
             ),
         )
@@ -690,6 +716,7 @@ def _execute_wf_grid_sequential(
     prepend_bars,
     zigzag_global_stats,
     volume_runtime,
+    time_filter_runtime=None,
 ):
     """Sequential OOS + Train WF execution over all grid points.
 
@@ -713,6 +740,7 @@ def _execute_wf_grid_sequential(
             prepend_bars_requested=prepend_bars,
             zigzag_global_stats=zigzag_global_stats,
             volume_runtime=volume_runtime,
+            time_filter_runtime=time_filter_runtime,
         )
         _strip_filter_diagnostics_arrays(
             step_results,
@@ -729,6 +757,7 @@ def _execute_wf_grid_sequential(
             config=config,
             zigzag_global_stats=zigzag_global_stats,
             volume_runtime=volume_runtime,
+            time_filter_runtime=time_filter_runtime,
         )
         _strip_filter_diagnostics_arrays(
             train_results,

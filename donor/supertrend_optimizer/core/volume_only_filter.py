@@ -11,9 +11,12 @@ import pandas as pd
 
 from supertrend_optimizer.core._fsm_state_names import STANDALONE_VOLUME_STATE_NAMES
 from supertrend_optimizer.core._reset_events import (
-    _infer_daily_reset_event,
-    _infer_time_filter_events,
     detect_st_flip,
+    resolve_reset_events,
+)
+from supertrend_optimizer.core.trade_filter_decision import (
+    build_filter_execution_metadata,
+    decide_trade_filter_entry,
 )
 from supertrend_optimizer.core.volume_metrics import (
     VolumeRuntime,
@@ -47,6 +50,7 @@ class VolumeOnlyFilterResult:
     positions: np.ndarray
     filter_diagnostics: Optional[dict]
     filter_config_snapshot: dict
+    execution_metadata: dict[str, np.ndarray]
 
 
 def apply(
@@ -105,20 +109,24 @@ def apply(
         if arr.ndim != 1 or len(arr) != n:
             raise ValueError(f"volume_runtime.{name} must be 1-D with length {n}")
 
-    daily_reset_enabled, daily_reset_event = _resolve_daily_reset_event(
+    reset_events = resolve_reset_events(
+        trade_filter_config=trade_filter_config,
+        index=index,
+        n=n,
+        owner="volume",
         daily_reset_event=daily_reset_event,
-        index=index,
-        n=n,
-        trade_filter_config=trade_filter_config,
-    )
-    time_filter_in_window, time_filter_reset_event = _resolve_time_filter_events(
         time_filter_events=time_filter_events,
-        index=index,
-        n=n,
-        trade_filter_config=trade_filter_config,
     )
-    time_filter_cfg = getattr(trade_filter_config, "time_filter", None)
-    time_filter_enabled = bool(getattr(time_filter_cfg, "enabled", False))
+    daily_reset_enabled = reset_events.daily_reset_enabled
+    daily_reset_event = reset_events.daily_reset_event
+    time_filter_enabled = reset_events.time_filter_enabled
+    time_filter_in_window = reset_events.time_filter_in_window
+    time_filter_reset_event = reset_events.time_filter_reset_event
+    effective_mode = "volume_and_time" if time_filter_enabled else "volume_only"
+    execution_metadata = build_filter_execution_metadata(
+        daily_reset_event=daily_reset_event,
+        time_filter_reset_event=time_filter_reset_event,
+    )
 
     diag_enabled = bool(collect_filter_diagnostics)
     volume_block_reason_labels = (
@@ -187,6 +195,14 @@ def apply(
     active_age_bars = 0
     cycle_initial_direction = 0
     for t in range(n):
+        state_at_bar_start = state
+        shared_decision = decide_trade_filter_entry(
+            entry_attempt_event=state_at_bar_start == VolumeOnlyState.OFF,
+            time_filter_in_window=bool(time_filter_in_window[t]),
+            combined_reset_event=bool(reset_events.combined_reset_event[t]),
+            daily_reset_event=bool(daily_reset_event[t]),
+            time_filter_reset_event=bool(time_filter_reset_event[t]),
+        )
         if daily_reset_event[t]:
             state = VolumeOnlyState.OFF
             cycle_initial_direction = 0
@@ -236,7 +252,7 @@ def apply(
             else:
                 direction = int(volume_direction_codes[t])
                 global_t = t + int(volume_runtime.absolute_offset)
-                if not bool(time_filter_in_window[t]):
+                if shared_decision.entry_blocked_outside:
                     if diag_enabled:
                         block_reason_arr[t] = "time_filter_out_of_window"
                 elif direction == 0 and global_t < lookback:
@@ -286,6 +302,7 @@ def apply(
             positions=positions,
             filter_diagnostics=None,
             filter_config_snapshot=volume_runtime.filter_config_snapshot,
+            execution_metadata=execution_metadata,
         )
 
     diagnostics = {
@@ -309,77 +326,39 @@ def apply(
         "time_filter_in_window": np.asarray(time_filter_in_window, dtype=np.int8),
         "time_filter_reset_event": np.asarray(time_filter_reset_event, dtype=np.int8),
     }
+    if time_filter_enabled:
+        diagnostics.update(
+            {
+                "trade_filter_enabled": np.ones(n, dtype=np.int8),
+                "trade_filter_mode": np.full(n, effective_mode, dtype=object),
+                "filter_allowed_entry": np.concatenate(
+                    (
+                        np.asarray(
+                            (positions[1:] != 0)
+                            & (positions[1:] != positions[:-1]),
+                            dtype=np.int8,
+                        ),
+                        np.zeros(1, dtype=np.int8),
+                    )
+                ),
+            }
+        )
+        time_forced_exit = np.zeros(n, dtype=np.int8)
+        if n >= 2:
+            time_forced_exit[:-1] = np.asarray(
+                time_filter_reset_event[:-1]
+                & ~daily_reset_event[:-1]
+                & (positions[:-1] != 0)
+                & (positions[1:] == 0),
+                dtype=np.int8,
+            )
+        diagnostics["time_filter_forced_exit"] = time_forced_exit
     return VolumeOnlyFilterResult(
         positions=positions,
         filter_diagnostics=diagnostics,
         filter_config_snapshot=volume_runtime.filter_config_snapshot,
+        execution_metadata=execution_metadata,
     )
-
-
-def _resolve_daily_reset_event(
-    *,
-    daily_reset_event: Optional[np.ndarray],
-    index: Optional[pd.Index],
-    n: int,
-    trade_filter_config,
-) -> tuple[bool, np.ndarray]:
-    if daily_reset_event is None:
-        volume_cfg = getattr(trade_filter_config, "volume", None)
-        if bool(getattr(volume_cfg, "daily_reset", False)):
-            return True, _infer_daily_reset_event(
-                index,
-                n,
-                enabled=True,
-                source="trade_filter.volume.daily_reset",
-            )
-        zigzag_cfg = getattr(trade_filter_config, "zigzag", None)
-        enabled = bool(getattr(zigzag_cfg, "daily_reset", False))
-        return enabled, _infer_daily_reset_event(index, n, enabled=enabled)
-    arr = np.asarray(daily_reset_event, dtype=bool)
-    if arr.ndim != 1 or len(arr) != n:
-        raise ConfigError(
-            f"apply() daily_reset_event must be 1-D bool of length n={n}"
-        )
-    volume_cfg = getattr(trade_filter_config, "volume", None)
-    zigzag_cfg = getattr(trade_filter_config, "zigzag", None)
-    enabled = bool(getattr(volume_cfg, "daily_reset", False)) or bool(
-        getattr(zigzag_cfg, "daily_reset", False)
-    )
-    return enabled, arr
-
-
-def _resolve_time_filter_events(
-    *,
-    time_filter_events: Optional[tuple[np.ndarray, np.ndarray]],
-    index: Optional[pd.Index],
-    n: int,
-    trade_filter_config,
-) -> tuple[np.ndarray, np.ndarray]:
-    if time_filter_events is None:
-        time_filter_cfg = getattr(trade_filter_config, "time_filter", None)
-        enabled = bool(getattr(time_filter_cfg, "enabled", False))
-        return _infer_time_filter_events(
-            index,
-            n,
-            enabled=enabled,
-            start_h=int(getattr(time_filter_cfg, "_start_hour", 0) or 0),
-            start_m=int(getattr(time_filter_cfg, "_start_minute", 0) or 0),
-            end_h=int(getattr(time_filter_cfg, "_end_hour", 0) or 0),
-            end_m=int(getattr(time_filter_cfg, "_end_minute", 0) or 0),
-        )
-
-    in_window_raw, reset_raw = time_filter_events
-    in_window = np.asarray(in_window_raw, dtype=bool)
-    reset = np.asarray(reset_raw, dtype=bool)
-    if in_window.ndim != 1 or len(in_window) != n:
-        raise ConfigError(
-            f"apply() time_filter_events[0] must be 1-D bool of length n={n}"
-        )
-    if reset.ndim != 1 or len(reset) != n:
-        raise ConfigError(
-            f"apply() time_filter_events[1] must be 1-D bool of length n={n}"
-        )
-    return in_window, reset
 
 
 def _trade_mode_allows_direction(direction: int, trade_mode: str) -> bool:

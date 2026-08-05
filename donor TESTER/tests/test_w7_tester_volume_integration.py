@@ -46,13 +46,13 @@ def test_run_batch_tester_passes_index_to_volume_metrics():
     assert all(any(keyword.arg == "index" for keyword in call.keywords) for call in calls)
 
 
-def test_repo_config_tester_yaml_loads_active_mode_d_wakeup_volume_profile():
+def test_repo_config_tester_yaml_loads_production_time_only_profile():
     path = Path(__file__).resolve().parents[2] / "config_tester.yaml"
 
     cfg = load_tester_config(str(path))
 
-    assert cfg["supertrend"]["atr_period"] == 50
-    assert cfg["supertrend"]["multiplier"] == 2.5
+    assert cfg["supertrend"]["atr_period"] == 19
+    assert cfg["supertrend"]["multiplier"] == 4.0
     assert cfg["commission"] >= 0.0
     assert cfg["export"]["diagnostics"] is True
     assert cfg["export"]["signals"] is True
@@ -66,38 +66,16 @@ def test_repo_config_tester_yaml_loads_active_mode_d_wakeup_volume_profile():
 
     tf_cfg = cfg["trade_filter"]
     assert tf_cfg.enabled is True
-    assert tf_cfg.zigzag.mode == "D"
-    assert tf_cfg.zigzag.local_window == 5
-    assert tf_cfg.lifecycle.exit_off_mode == "exit C"
+    assert tf_cfg.type is None
+    assert tf_cfg.zigzag.enabled is False
+    assert tf_cfg.time_filter.enabled is True
+    assert tf_cfg.time_filter.window is None
+    assert tf_cfg.time_filter.windows == ["09:00-12:00", "16:00-18:00"]
+    assert tf_cfg.time_filter._windows_minutes == ((540, 720), (960, 1080))
 
     volume = cfg["trade_filter"].volume
     assert volume.enabled is False
-    assert volume.aggregation == "mean"
-    assert volume.baseline_session.enabled is False
-    assert volume.baseline_session.window == "09:00-19:00"
-
-    candidate_height = tf_cfg.wakeup_regime.entry.candidate_height
-    assert candidate_height.enabled is True
-    assert candidate_height.quantile == 0.4
-
-    wakeup_volume = tf_cfg.wakeup_regime.entry.volume_expansion
-    assert wakeup_volume.enabled is False
-    assert isinstance(wakeup_volume.short_window, int)
-    assert isinstance(wakeup_volume.baseline_window, int)
-    assert wakeup_volume.short_window >= 1
-    assert wakeup_volume.baseline_window >= wakeup_volume.short_window
-    assert isinstance(wakeup_volume.min_ratio, (int, float))
-    assert wakeup_volume.min_ratio > 0
-
-    max_trades = tf_cfg.wakeup_regime.exit.max_trades_per_cycle
-    assert max_trades.enabled is True
-    assert max_trades.max_trades == 1
-
-    position_freeze = tf_cfg.wakeup_regime.position_freeze
-    assert position_freeze.enabled is True
-    assert position_freeze.min_hold_bars == 1
-    assert position_freeze.apply_to == "internal_opposite_st_flip"
-    assert position_freeze.release_action == "apply_if_still_opposite"
+    assert tf_cfg.wakeup_regime.enabled is False
 
 
 def _df(n: int = 80) -> pd.DataFrame:

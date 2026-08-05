@@ -310,7 +310,7 @@ class TestFilterDiagnosticsSummaryStructure:
         )
 
     def test_mode_value(self, period_result_enabled) -> None:
-        assert period_result_enabled.filter_diagnostics_summary["mode"] == "zigzag_st_mode"
+        assert period_result_enabled.filter_diagnostics_summary["mode"] == "zigzag_only"
 
     def test_global_offset_zero_for_full_slice(self, period_result_enabled) -> None:
         assert period_result_enabled.filter_diagnostics_summary["global_offset"] == 0

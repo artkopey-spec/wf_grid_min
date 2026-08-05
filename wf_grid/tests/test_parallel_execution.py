@@ -428,8 +428,9 @@ class TestPackDataRoundTrip:
         data_path = _REPO_ROOT / "data.csv"
         if not data_path.exists():
             pytest.skip("data.csv not present in workspace")
+        from supertrend_optimizer.data.loader import load_ohlc_csv
         from supertrend_optimizer.data.validator import validate_ohlc_data
-        df = pd.read_csv(data_path, parse_dates=True, index_col=0)
+        df = load_ohlc_csv(str(data_path))
         df = validate_ohlc_data(df, strict=True)
         round_trip = mph.unpack_data(mph.pack_data(df))
         pd.testing.assert_frame_equal(
@@ -508,6 +509,7 @@ class TestWorkerSingleGridPointParity:
         data_path = _REPO_ROOT / "data.csv"
         if not data_path.exists():
             pytest.skip("data.csv not present in workspace")
+        from supertrend_optimizer.data.loader import load_ohlc_csv
         from supertrend_optimizer.data.validator import validate_ohlc_data
         from supertrend_optimizer.utils.time_utils import make_walk_forward_slices
         from wf_grid.config.loader import resolve_periods_per_year
@@ -522,7 +524,7 @@ class TestWorkerSingleGridPointParity:
         from wf_grid.grid.enumeration import GridPoint
         from wf_grid.wf.runner import compute_prepend_bars
 
-        df = pd.read_csv(data_path, parse_dates=True, index_col=0)
+        df = load_ohlc_csv(str(data_path))
         df = validate_ohlc_data(df, strict=True)
         # Cap to keep test fast.
         df = df.iloc[:1500].copy()
@@ -2078,8 +2080,8 @@ class TestWorkerSideImmutability:
         if not data_path.exists():
             pytest.skip("data.csv not present in workspace")
 
-        import pandas as _pd
-        df = _pd.read_csv(data_path, parse_dates=True, index_col=0).iloc[:500].copy()
+        from supertrend_optimizer.data.loader import load_ohlc_csv
+        df = load_ohlc_csv(str(data_path)).iloc[:500].copy()
 
         cfg = GridConfig(
             data=DataConfig(file_path=str(data_path)),
@@ -2179,6 +2181,7 @@ class TestWorkerLoggingViaStepResult:
         if not data_path.exists():
             pytest.skip("data.csv not present in workspace")
 
+        from supertrend_optimizer.data.loader import load_ohlc_csv
         from supertrend_optimizer.data.validator import validate_ohlc_data
         from supertrend_optimizer.utils.time_utils import make_walk_forward_slices
         from wf_grid.config.loader import resolve_periods_per_year
@@ -2190,7 +2193,7 @@ class TestWorkerLoggingViaStepResult:
         from wf_grid.wf.runner import compute_prepend_bars
         import dataclasses
 
-        df = pd.read_csv(data_path, parse_dates=True, index_col=0)
+        df = load_ohlc_csv(str(data_path))
         df = validate_ohlc_data(df, strict=True)
         df = df.iloc[:1500].copy()
 
@@ -2332,6 +2335,7 @@ class TestWorkerLoggingViaStepResult:
         if not data_path.exists():
             pytest.skip("data.csv not present in workspace")
 
+        from supertrend_optimizer.data.loader import load_ohlc_csv
         from supertrend_optimizer.data.validator import validate_ohlc_data
         from supertrend_optimizer.utils.time_utils import make_walk_forward_slices
         from wf_grid.config.schema import (
@@ -2342,7 +2346,7 @@ class TestWorkerLoggingViaStepResult:
         from wf_grid.pipeline.orchestrator import _execute_wf_grid_parallel
         from wf_grid.wf.runner import run_wf_for_grid_point
 
-        df = pd.read_csv(data_path, parse_dates=True, index_col=0)
+        df = load_ohlc_csv(str(data_path))
         df = validate_ohlc_data(df, strict=True)
         df = df.iloc[:1500].copy()
 

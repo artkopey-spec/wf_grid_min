@@ -191,6 +191,7 @@ def _init_worker(
     prepend_bars: int,
     zigzag_global_stats: Any,
     volume_runtime: Any = None,
+    time_filter_runtime: Any = None,
     retain_per_bar_filter_diagnostics: bool = False,
 ) -> None:
     """ProcessPoolExecutor initializer (plan §2.4).
@@ -253,6 +254,7 @@ def _init_worker(
         "prepend_bars": prepend_bars,
         "zigzag_global_stats": zigzag_global_stats,
         "volume_runtime": volume_runtime,
+        "time_filter_runtime": time_filter_runtime,
         "retain_per_bar_filter_diagnostics": retain_per_bar_filter_diagnostics,
     })
 
@@ -303,6 +305,7 @@ def _run_grid_point_both(grid_point: Any) -> tuple[str, list, list]:
         prepend_bars_requested=state["prepend_bars"],
         zigzag_global_stats=state["zigzag_global_stats"],
         volume_runtime=state["volume_runtime"],
+        time_filter_runtime=state["time_filter_runtime"],
     )
     train_results = run_wf_train_for_grid_point(
         grid_point=grid_point,
@@ -311,6 +314,7 @@ def _run_grid_point_both(grid_point: Any) -> tuple[str, list, list]:
         config=state["config"],
         zigzag_global_stats=state["zigzag_global_stats"],
         volume_runtime=state["volume_runtime"],
+        time_filter_runtime=state["time_filter_runtime"],
     )
     _strip_filter_diagnostics_arrays(
         oos_results,

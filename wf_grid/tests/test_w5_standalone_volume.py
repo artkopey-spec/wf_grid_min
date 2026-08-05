@@ -52,6 +52,7 @@ class _Lifecycle:
 @dataclass
 class _TimeFilter:
     enabled: bool = False
+    _windows_minutes: tuple[tuple[int, int], ...] = ()
 
 
 @dataclass
@@ -774,6 +775,37 @@ def test_volume_only_collect_filter_diagnostics_false_returns_none_and_same_posi
     assert enabled.filter_diagnostics is not None
 
 
+def test_volume_and_time_common_mode_and_lite_reset_metadata():
+    n = 6
+    cfg = _TradeFilter(time_filter=_TimeFilter(enabled=True))
+    time_reset = np.array([0, 0, 1, 0, 0, 0], dtype=bool)
+    events = (np.ones(n, dtype=bool), time_reset)
+
+    full = _run(cfg=cfg, time_filter_events=events)
+    lite = _run(
+        cfg=cfg,
+        time_filter_events=events,
+        collect_filter_diagnostics=False,
+    )
+
+    assert set(full.filter_diagnostics["trade_filter_mode"]) == {
+        "volume_and_time"
+    }
+    for key in (
+        "trade_filter_enabled",
+        "filter_allowed_entry",
+        "filter_block_reason",
+        "daily_reset_event",
+        "time_filter_reset_event",
+    ):
+        assert key in full.filter_diagnostics
+    assert lite.filter_diagnostics is None
+    np.testing.assert_array_equal(
+        lite.execution_metadata["time_filter_reset_event"],
+        time_reset.astype(np.int8),
+    )
+
+
 def test_volume_condition_fail_blocks_start():
     result = _run(
         runtime=_runtime(
@@ -940,6 +972,39 @@ def test_dispatcher_volume_only_collect_filter_diagnostics_false():
     assert disabled.filter_diagnostics is None
     assert disabled.filter_config_snapshot is runtime.filter_config_snapshot
     assert enabled.filter_diagnostics is not None
+
+
+def test_dispatcher_volume_and_time_lite_keeps_reset_execution_metadata():
+    open_, high, low, close = _ohlc()
+    n = len(close)
+    index = pd.date_range("2026-03-06 09:00", periods=n, freq="min")
+    cfg = _TradeFilter(
+        time_filter=_TimeFilter(
+            enabled=True,
+            _windows_minutes=((9 * 60, 9 * 60 + 5), (9 * 60 + 10, 9 * 60 + 15)),
+        )
+    )
+    result = run_backtest_fast(
+        open_,
+        high,
+        low,
+        close,
+        atr_period=5,
+        multiplier=1.8,
+        trade_mode="both",
+        commission=0.001,
+        early_exit_enabled=False,
+        early_exit_max_drawdown=0.5,
+        early_exit_check_bars=0,
+        trade_filter_config=cfg,
+        volume_runtime=_runtime(n=n, direction=DIR_LONG),
+        index=index,
+        collect_filter_diagnostics=False,
+    )
+
+    assert result.filter_diagnostics is None
+    assert result.filter_execution_metadata is not None
+    assert result.filter_execution_metadata["time_filter_reset_event"].sum() == 2
 
 
 def test_volume_only_filter_does_not_import_zigzag_filter_module():

@@ -21,7 +21,8 @@ R7. Anti-drift gate: no module-level mutable state in zigzag_st_filter (FSM).
 R8. Force-flat does not modify filter_diagnostics (WP8 contract re-confirmed).
 R9. StepResult defensive_fallback produces filter_diagnostics_oos=None,
     filter_diagnostics_summary=None.
-R10. config.yaml production config has trade_filter.enabled=false (safe default).
+R10. config.yaml production config matches the approved Time-only rollout;
+rollback remains a one-line trade_filter.enabled=false switch.
 
 Anti-drift (WP11)
 -----------------
@@ -614,14 +615,13 @@ class TestDefensiveFallbackFilterFields:
 
 
 # ===========================================================================
-# R10. config.yaml production default has trade_filter disabled
+# R10. config.yaml production Time-only rollout profile
 # ===========================================================================
 
 class TestProductionConfigDefault:
-    """config.yaml must have trade_filter.enabled=false (safe rollout default)."""
+    """Production config must match the approved Time-only rollout."""
 
-    def test_config_yaml_trade_filter_disabled(self):
-        """Plan §WP11 step 1: enabled=false stays default in production config."""
+    def test_config_yaml_trade_filter_time_only(self):
         try:
             import yaml  # type: ignore[import]
         except ImportError:
@@ -634,12 +634,14 @@ class TestProductionConfigDefault:
         with open(config_path, encoding="utf-8") as f:
             cfg = yaml.safe_load(f)
 
-        trade_filter = cfg.get("trade_filter")
-        if trade_filter is None:
-            # Absent trade_filter = disabled (spec §11.1)
-            return
-        assert trade_filter.get("enabled") is False, (
-            "config.yaml trade_filter.enabled must be false (safe rollout default); "
-            "enabling in production config without explicit experiment intent "
-            "violates WP11 rollback contract."
-        )
+        trade_filter = cfg["trade_filter"]
+        assert trade_filter == {
+            "enabled": True,
+            "zigzag": {"enabled": False},
+            "time_filter": {
+                "enabled": True,
+                "windows": ["09:00-12:00", "16:00-18:00"],
+            },
+            "volume": {"enabled": False},
+            "wakeup_regime": {"enabled": False},
+        }

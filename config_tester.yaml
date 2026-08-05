@@ -1,8 +1,7 @@
-# Full diagnostics config for mass-run config #0551:
-# lite_atr010_mult10_ch_q060_ttl090_hold03_lw13_rev005
+# Canonical legacy-period tester profile for the production Time-only schedule.
 #
 # Run example:
-#   python -m supertrend_optimizer.cli.tester --csv data.csv --config config_tester.yaml --out result_lite_atr010_mult10_ch_q060_ttl090_hold03_lw13_rev005_full_diagnostics.xlsx
+#   python -m supertrend_optimizer.cli.tester --csv data.csv --config config_tester.yaml --out result_time_only.xlsx
 
 supertrend:
   atr_period: 19
@@ -65,113 +64,18 @@ export:
 
 trade_filter:
   enabled: true
-  type: zigzag_st_mode
-
-  diagnostics:
-    export_state_columns: true
-    export_trigger_columns: true
 
   zigzag:
-    enabled: true
-    mode: D
-    global_stats_source: full_dataset
-    leg_height_mode: pct
-    reversal_threshold: 0.001
-    candidate_trigger_threshold: 0.012
-    global_median: auto
-    local_window: 8
-    daily_reset: false
-    # Supported only with candidate_trigger_threshold: auto.
-    # candidate_trigger_quantile: 0.60
-    # Deprecated by validator; kept here only as a schema note.
-    # candidate_entry: false
-    candidate_duration_gate:
-      enabled: false
-      # Valid only when enabled: true; validator rejects max_bars when disabled.
-      # max_bars: 30
-
-  # Legacy triggers are supported by the schema, but rejected with exit_off_mode: "exit C".
-  # triggers:
-  #   candidate_threshold:
-  #     enabled: true
-  #   confirmed_median:
-  #     enabled: true
-
-  lifecycle:
-    freeze_confirmed_legs: 3
-    stop_check: confirm_bar_only
-    stopping_exit: opposite_st_flip
-    exit_off_mode: "exit C"
-    # Valid only with exit_off_mode: "exit B"; rejected with exit C.
-    # exit_off_zz_leg_count: 2
-    # exit_b_immediate_off: false
+    enabled: false
 
   time_filter:
-    enabled: true 
-    window: "09:00-19:00"
+    enabled: true
+    windows:
+      - "09:00-12:00"
+      - "16:00-18:00"
 
   volume:
     enabled: false
-    mode: volume_A
-    aggregation: mean
-    daily_reset: true
-    cycle_direction_gate: false
-    short_window: 10
-    baseline_window: 1000
-    threshold_ratio: 1.6
-    exit_hysteresis_ratio: 1.6
-    exit_freeze_bars: 5
-    regime_low_ratio: 0.8
-    regime_high_ratio: 1.2
-    direction_lookback_bars: 5
-    baseline_session:
-      enabled: true
-      window: "09:00-19:00"
 
   wakeup_regime:
-    enabled: true
-    lock_cycle_direction: false
-    entry:
-      direction_mode: inverse
-      candidate_height:
-        enabled: false
-        quantile: 0.4
-      candidate_age:
-        enabled: false
-        max_bars: 10
-      atr_expansion:
-        enabled: false
-        short_window: 30
-        long_window: 400
-        min_ratio: 1.6
-      volume_expansion:
-        enabled: true
-        short_window: 10
-        baseline_window: 1000
-        min_ratio: 0.5
-
-    exit:
-      ttl:
-        enabled: true
-        bars: 90
-      no_fresh_candidate:
-        enabled: false
-        quantile: 0.60
-        max_age_bars: 15
-        timeout_bars: 20
-      max_trades_per_cycle:
-        enabled: false
-        max_trades: 1
-      cycle_take_profit:
-        enabled: false
-        pnl_pct: 0.01
-      local_median_stop:
-        enabled: false
-      action:
-        mode: close_position
-
-    position_freeze:
-      enabled: false
-      min_hold_bars: 1
-      apply_to: internal_opposite_st_flip
-      release_action: apply_if_still_opposite
+    enabled: false

@@ -136,10 +136,10 @@ class TestTimeFilterValidationErrors:
         assert "time_filter_enabled_invalid_type" in keys
 
     def test_time_filter_window_missing(self):
-        """enabled=true без window → time_filter_window_missing."""
+        """enabled=true без window/windows → time_filter_windows_missing."""
         raw = _raw_with_time_filter({"enabled": True})
         keys = _validate(raw)
-        assert "time_filter_window_missing" in keys
+        assert "time_filter_windows_missing" in keys
 
     @pytest.mark.parametrize("bad_window", [
         "9:00-19:00",        # неполные часы
@@ -293,10 +293,10 @@ class TestTimeFilterStrictSchema:
 
 
 class TestTimeFilterTradeFilterDisabledGlobal:
-    """При trade_filter.enabled=false блок time_filter игнорируется валидатором."""
+    """При root=false структура проверяется, deep schedule — нет."""
 
     def test_trade_filter_disabled_ignores_time_filter_content(self):
-        """trade_filter.enabled=false: validator не смотрит на time_filter.enabled."""
+        """Неверный тип switch отклоняется даже при root=false."""
         raw_disabled = {
             "enabled": False,
             "type": "zigzag_st_mode",
@@ -309,8 +309,7 @@ class TestTimeFilterTradeFilterDisabledGlobal:
         validate_trade_filter(
             tf, errors, ruk, caller_pipeline="wf_grid", error_keys=error_keys
         )
-        # При trade_filter.enabled=false возвращается рано — time_filter не проверяется
-        assert not any(k.startswith("time_filter_") for k in error_keys)
+        assert error_keys == ["time_filter_enabled_invalid_type"]
 
 
 class TestTimeFilterViaLoader:
@@ -381,10 +380,24 @@ class TestTimeFilterInV3FailureKeysRegistry:
         "time_filter_window_invalid_minutes",
         "time_filter_window_zero_length",
         "time_filter_window_cross_midnight",
+        "time_filter_window_and_windows_conflict",
+        "time_filter_windows_missing",
+        "time_filter_windows_invalid_type",
+        "time_filter_windows_empty",
+        "time_filter_windows_item_invalid_type",
+        "time_filter_windows_item_invalid_format",
+        "time_filter_windows_item_invalid_hours",
+        "time_filter_windows_item_invalid_minutes",
+        "time_filter_windows_item_zero_length",
+        "time_filter_windows_item_cross_midnight",
+        "time_filter_windows_duplicate",
+        "time_filter_windows_overlap",
+        "time_filter_windows_touching",
+        "trade_filter_all_subfilters_disabled",
     })
 
     def test_all_seven_keys_in_registry(self):
-        """Все 7 time_filter ключей должны быть в _V3_INIT_FAILURE_KEYS."""
+        """Все утверждённые time_filter ключи присутствуют в registry."""
         missing = self._NEW_KEYS - _V3_INIT_FAILURE_KEYS
         assert not missing, (
             f"time_filter keys missing from _V3_INIT_FAILURE_KEYS: {sorted(missing)}"
@@ -840,6 +853,10 @@ class TestApplyTimeFilterReset:
         # Все позиции должны оставаться 0
         assert np.all(result.positions == 0), (
             f"Вне окна позиции должны быть 0, got {result.positions}"
+        )
+        assert (
+            "time_filter_out_of_window"
+            in set(result.filter_diagnostics["filter_block_reason"])
         )
 
     def test_no_entry_on_bar_return_to_window_without_trigger(self):

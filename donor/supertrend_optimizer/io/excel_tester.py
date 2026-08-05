@@ -16,8 +16,11 @@ import numpy as np
 import pandas as pd
 
 from supertrend_optimizer.core.trade_filter_config import (
+    is_trade_filter_enabled,
     is_volume_enabled,
     is_zigzag_enabled,
+    trade_filter_effective_snapshot,
+    trade_filter_public_snapshot,
 )
 
 from supertrend_optimizer.testing.runner import PeriodResult, SegmentResult
@@ -230,29 +233,29 @@ _TRIGGER_EVENTS_COLUMNS = (
 # Cycle sheet contract (plan_xlsx_cycle_sheet_implementation В§4, В§11).
 CYCLE_SHEET_NAME = "cycle"
 CYCLE_SHEET_COLUMNS: Tuple[str, ...] = (
-    "РќР°С‡Р°Р»Рѕ С†РёРєР»Р°",
-    "РљРѕРЅРµС† С†РёРєР»Р°",
-    "РќР°РїСЂР°РІР»РµРЅРёРµ С†РёРєР»Р°",
-    "Р‘Р°СЂРѕРІ РІ С†РёРєР»Рµ",
-    "РќРѕРі ZigZag РІ С†РёРєР»Рµ",
-    "РњРµРґРёР°РЅР° РЅРѕРі",
-    "РќРѕРі РІС‹С€Рµ РїРѕСЂРѕРіР° С‚СЂРёРіРіРµСЂР° РєР°РЅРґРёРґР°С‚Р°",
-    "Р Р°Р·РјРµСЂ С†РёРєР»Р°, %",
-    "ID С†РёРєР»Р°",
+    "Начало цикла",
+    "Конец цикла",
+    "Направление цикла",
+    "Баров в цикле",
+    "Ног ZigZag в цикле",
+    "Медиана ног",
+    "Ног выше порога триггера кандидата",
+    "Размер цикла, %",
+    "ID цикла",
     "Start bar index",
     "End bar index",
-    "Р¦РµРЅР° РЅР°С‡Р°Р»Р°",
-    "Р¦РµРЅР° РєРѕРЅС†Р°",
-    "High С†РёРєР»Р°",
-    "Low С†РёРєР»Р°",
-    "РњР°РєСЃ. РґРІРёР¶РµРЅРёРµ РїРѕ С†РёРєР»Сѓ, %",
-    "РњР°РєСЃ. РїСЂРѕСЃР°РґРєР° РІРЅСѓС‚СЂРё С†РёРєР»Р°, %",
-    "РџСЂРёС‡РёРЅР° Р·Р°РІРµСЂС€РµРЅРёСЏ",
-    "РњР°РєСЃ. РІС‹СЃРѕС‚Р° РЅРѕРіРё",
-    "Р”РѕР»СЏ РЅРѕРі РІС‹С€Рµ РїРѕСЂРѕРіР°, %",
-    "РЎРґРµР»РѕРє РІ С†РёРєР»Рµ",
-    "Р¤РёРЅ СЂРµР·СѓР»СЊС‚Р°С‚ С†РёРєР»Р°, %",
-    "% СЃРґРµР»РѕРє СЃ РїРѕР»РѕР¶РёС‚РµР»СЊРЅС‹Рј С„РёРЅ СЂРµР·СѓР»СЊС‚Р°С‚РѕРј РІ С†РёРєР»Рµ",
+    "Цена начала",
+    "Цена конца",
+    "High цикла",
+    "Low цикла",
+    "Макс. движение по циклу, %",
+    "Макс. просадка внутри цикла, %",
+    "Причина завершения",
+    "Макс. высота ноги",
+    "Доля ног выше порога, %",
+    "Сделок в цикле",
+    "Фин результат цикла, %",
+    "% сделок с положительным фин результатом в цикле",
 )
 
 _EXIT_C_REASONS = frozenset({
@@ -266,26 +269,26 @@ _EXIT_C_REASONS = frozenset({
 # Cycle sheet contract for volume-only mode (volume_enabled=True, zigzag_enabled=False).
 # ZigZag-specific fields (legs, medians, thresholds) are intentionally excluded.
 VOLUME_CYCLE_SHEET_COLUMNS: Tuple[str, ...] = (
-    "РќР°С‡Р°Р»Рѕ С†РёРєР»Р°",
-    "РљРѕРЅРµС† С†РёРєР»Р°",
-    "РќР°РїСЂР°РІР»РµРЅРёРµ С†РёРєР»Р°",
-    "Р‘Р°СЂРѕРІ РІ С†РёРєР»Рµ",
-    "Р Р°Р·РјРµСЂ С†РёРєР»Р°, %",
-    "ID С†РёРєР»Р°",
+    "Начало цикла",
+    "Конец цикла",
+    "Направление цикла",
+    "Баров в цикле",
+    "Размер цикла, %",
+    "ID цикла",
     "Start bar index",
     "End bar index",
-    "Р¦РµРЅР° РЅР°С‡Р°Р»Р°",
-    "Р¦РµРЅР° РєРѕРЅС†Р°",
-    "High С†РёРєР»Р°",
-    "Low С†РёРєР»Р°",
-    "РњР°РєСЃ. РґРІРёР¶РµРЅРёРµ РїРѕ С†РёРєР»Сѓ, %",
-    "РњР°РєСЃ. РїСЂРѕСЃР°РґРєР° РІРЅСѓС‚СЂРё С†РёРєР»Р°, %",
-    "РџСЂРёС‡РёРЅР° Р·Р°РІРµСЂС€РµРЅРёСЏ",
-    "Р РµР¶РёРј РѕР±СЉС‘РјР° (СЃС‚Р°СЂС‚)",
-    "РЎСЂ. РјРµРґРёР°РЅР° РѕР±СЉС‘РјР°",
-    "РЎРґРµР»РѕРє РІ С†РёРєР»Рµ",
-    "Р¤РёРЅ СЂРµР·СѓР»СЊС‚Р°С‚ С†РёРєР»Р°, %",
-    "% СЃРґРµР»РѕРє СЃ РїРѕР»РѕР¶РёС‚РµР»СЊРЅС‹Рј С„РёРЅ СЂРµР·СѓР»СЊС‚Р°С‚РѕРј РІ С†РёРєР»Рµ",
+    "Цена начала",
+    "Цена конца",
+    "High цикла",
+    "Low цикла",
+    "Макс. движение по циклу, %",
+    "Макс. просадка внутри цикла, %",
+    "Причина завершения",
+    "Режим объёма (старт)",
+    "Ср. медиана объёма",
+    "Сделок в цикле",
+    "Фин результат цикла, %",
+    "% сделок с положительным фин результатом в цикле",
     "Cycle Initial Direction",
     "Cycle Trade Allowed",
     "Cycle Suppressed Reason",
@@ -887,31 +890,31 @@ def _build_cycle_sheet_df(
             _cycle_pos_pct = _cycle_positive_trades_pct(trades_df, cycle_trades)
 
         rows.append({
-            "РќР°С‡Р°Р»Рѕ С†РёРєР»Р°": _excel_safe_datetime_value(index[start_bar]),
-            "РљРѕРЅРµС† С†РёРєР»Р°": _excel_safe_datetime_value(index[end_bar]),
-            "РќР°РїСЂР°РІР»РµРЅРёРµ С†РёРєР»Р°": direction,
-            "Р‘Р°СЂРѕРІ РІ С†РёРєР»Рµ": end_bar - start_bar + 1,
-            "РќРѕРі ZigZag РІ С†РёРєР»Рµ": legs_count,
-            "РњРµРґРёР°РЅР° РЅРѕРі": median_legs,
-            "РќРѕРі РІС‹С€Рµ РїРѕСЂРѕРіР° С‚СЂРёРіРіРµСЂР° РєР°РЅРґРёРґР°С‚Р°": legs_above_threshold,
-            "Р Р°Р·РјРµСЂ С†РёРєР»Р°, %": cycle_size_pct,
-            "ID С†РёРєР»Р°": 0,
+            "Начало цикла": _excel_safe_datetime_value(index[start_bar]),
+            "Конец цикла": _excel_safe_datetime_value(index[end_bar]),
+            "Направление цикла": direction,
+            "Баров в цикле": end_bar - start_bar + 1,
+            "Ног ZigZag в цикле": legs_count,
+            "Медиана ног": median_legs,
+            "Ног выше порога триггера кандидата": legs_above_threshold,
+            "Размер цикла, %": cycle_size_pct,
+            "ID цикла": 0,
             "Start bar index": start_bar,
             "End bar index": end_bar,
-            "Р¦РµРЅР° РЅР°С‡Р°Р»Р°": close_start,
-            "Р¦РµРЅР° РєРѕРЅС†Р°": close_end,
-            "High С†РёРєР»Р°": high_cycle,
-            "Low С†РёРєР»Р°": low_cycle,
-            "РњР°РєСЃ. РґРІРёР¶РµРЅРёРµ РїРѕ С†РёРєР»Сѓ, %": max_move_pct,
-            "РњР°РєСЃ. РїСЂРѕСЃР°РґРєР° РІРЅСѓС‚СЂРё С†РёРєР»Р°, %": max_drawdown_pct,
-            "РџСЂРёС‡РёРЅР° Р·Р°РІРµСЂС€РµРЅРёСЏ": end_reason,
-            "РњР°РєСЃ. РІС‹СЃРѕС‚Р° РЅРѕРіРё": max_leg_height,
-            "Р”РѕР»СЏ РЅРѕРі РІС‹С€Рµ РїРѕСЂРѕРіР°, %": share_above_threshold,
-            "РЎРґРµР»РѕРє РІ С†РёРєР»Рµ": len(cycle_trades),
-            "Р¤РёРЅ СЂРµР·СѓР»СЊС‚Р°С‚ С†РёРєР»Р°, %": (
+            "Цена начала": close_start,
+            "Цена конца": close_end,
+            "High цикла": high_cycle,
+            "Low цикла": low_cycle,
+            "Макс. движение по циклу, %": max_move_pct,
+            "Макс. просадка внутри цикла, %": max_drawdown_pct,
+            "Причина завершения": end_reason,
+            "Макс. высота ноги": max_leg_height,
+            "Доля ног выше порога, %": share_above_threshold,
+            "Сделок в цикле": len(cycle_trades),
+            "Фин результат цикла, %": (
                 _cycle_sum_pnl
             ),
-            "% СЃРґРµР»РѕРє СЃ РїРѕР»РѕР¶РёС‚РµР»СЊРЅС‹Рј С„РёРЅ СЂРµР·СѓР»СЊС‚Р°С‚РѕРј РІ С†РёРєР»Рµ": (
+            "% сделок с положительным фин результатом в цикле": (
                 _cycle_pos_pct
             ),
         })
@@ -920,7 +923,7 @@ def _build_cycle_sheet_df(
 
     result = pd.DataFrame(rows, columns=CYCLE_SHEET_COLUMNS)
     result = result.sort_values("Start bar index", kind="stable").reset_index(drop=True)
-    result["ID С†РёРєР»Р°"] = np.arange(1, len(result) + 1, dtype=np.int64)
+    result["ID цикла"] = np.arange(1, len(result) + 1, dtype=np.int64)
     return result.loc[:, list(CYCLE_SHEET_COLUMNS)]
 
 
@@ -1169,26 +1172,26 @@ def _build_volume_cycle_sheet_df(
         )
 
         rows.append({
-            "РќР°С‡Р°Р»Рѕ С†РёРєР»Р°": _excel_safe_datetime_value(index[start_bar]),
-            "РљРѕРЅРµС† С†РёРєР»Р°": _excel_safe_datetime_value(index[end_bar]),
-            "РќР°РїСЂР°РІР»РµРЅРёРµ С†РёРєР»Р°": direction,
-            "Р‘Р°СЂРѕРІ РІ С†РёРєР»Рµ": end_bar - start_bar + 1,
-            "Р Р°Р·РјРµСЂ С†РёРєР»Р°, %": cycle_size_pct,
-            "ID С†РёРєР»Р°": 0,
+            "Начало цикла": _excel_safe_datetime_value(index[start_bar]),
+            "Конец цикла": _excel_safe_datetime_value(index[end_bar]),
+            "Направление цикла": direction,
+            "Баров в цикле": end_bar - start_bar + 1,
+            "Размер цикла, %": cycle_size_pct,
+            "ID цикла": 0,
             "Start bar index": start_bar,
             "End bar index": end_bar,
-            "Р¦РµРЅР° РЅР°С‡Р°Р»Р°": close_start,
-            "Р¦РµРЅР° РєРѕРЅС†Р°": close_end,
-            "High С†РёРєР»Р°": high_cycle,
-            "Low С†РёРєР»Р°": low_cycle,
-            "РњР°РєСЃ. РґРІРёР¶РµРЅРёРµ РїРѕ С†РёРєР»Сѓ, %": max_move_pct,
-            "РњР°РєСЃ. РїСЂРѕСЃР°РґРєР° РІРЅСѓС‚СЂРё С†РёРєР»Р°, %": max_drawdown_pct,
-            "РџСЂРёС‡РёРЅР° Р·Р°РІРµСЂС€РµРЅРёСЏ": end_reason,
-            "Р РµР¶РёРј РѕР±СЉС‘РјР° (СЃС‚Р°СЂС‚)": vol_regime_start,
-            "РЎСЂ. РјРµРґРёР°РЅР° РѕР±СЉС‘РјР°": avg_median_vol,
-            "РЎРґРµР»РѕРє РІ С†РёРєР»Рµ": len(cycle_trades),
-            "Р¤РёРЅ СЂРµР·СѓР»СЊС‚Р°С‚ С†РёРєР»Р°, %": _cycle_final_result_pct(trades_df, cycle_trades),
-            "% СЃРґРµР»РѕРє СЃ РїРѕР»РѕР¶РёС‚РµР»СЊРЅС‹Рј С„РёРЅ СЂРµР·СѓР»СЊС‚Р°С‚РѕРј РІ С†РёРєР»Рµ": (
+            "Цена начала": close_start,
+            "Цена конца": close_end,
+            "High цикла": high_cycle,
+            "Low цикла": low_cycle,
+            "Макс. движение по циклу, %": max_move_pct,
+            "Макс. просадка внутри цикла, %": max_drawdown_pct,
+            "Причина завершения": end_reason,
+            "Режим объёма (старт)": vol_regime_start,
+            "Ср. медиана объёма": avg_median_vol,
+            "Сделок в цикле": len(cycle_trades),
+            "Фин результат цикла, %": _cycle_final_result_pct(trades_df, cycle_trades),
+            "% сделок с положительным фин результатом в цикле": (
                 _cycle_positive_trades_pct(trades_df, cycle_trades)
             ),
         })
@@ -1203,7 +1206,7 @@ def _build_volume_cycle_sheet_df(
 
     result = pd.DataFrame(rows, columns=VOLUME_CYCLE_SHEET_COLUMNS)
     result = result.sort_values("Start bar index", kind="stable").reset_index(drop=True)
-    result["ID С†РёРєР»Р°"] = np.arange(1, len(result) + 1, dtype=np.int64)
+    result["ID цикла"] = np.arange(1, len(result) + 1, dtype=np.int64)
     return result.loc[:, list(VOLUME_CYCLE_SHEET_COLUMNS)]
 
 
@@ -1271,7 +1274,7 @@ def _write_cycle_sheet(writer: pd.ExcelWriter, cycle_df: pd.DataFrame) -> None:
         writer,
         ws,
         cycle_df,
-        ("РќР°С‡Р°Р»Рѕ С†РёРєР»Р°", "РљРѕРЅРµС† С†РёРєР»Р°"),
+        ("Начало цикла", "Конец цикла"),
     )
 
 
@@ -1601,7 +1604,7 @@ def _build_filter_summary_block_df(period_results: List[PeriodResult]) -> Option
     rows = []
     has_zigzag = any(
         pr.filter_diagnostics_summary is not None
-        and pr.filter_diagnostics_summary.get("mode") != "volume_only"
+        and "candidate_trigger_threshold" in (pr.filter_diagnostics or {})
         for pr in period_results
     )
     has_volume = any(
@@ -1610,6 +1613,11 @@ def _build_filter_summary_block_df(period_results: List[PeriodResult]) -> Option
             "n_volume_blocked_start_attempts" in pr.filter_diagnostics_summary
             or "volume_regime" in (pr.filter_diagnostics or {})
         )
+        for pr in period_results
+    )
+    has_time = any(
+        pr.filter_diagnostics_summary is not None
+        and bool(pr.filter_diagnostics_summary.get("time_filter_enabled"))
         for pr in period_results
     )
     for pr in period_results:
@@ -1621,6 +1629,7 @@ def _build_filter_summary_block_df(period_results: List[PeriodResult]) -> Option
         row = {
             "Period":              pr.period_label,
             "Bars OFF":            bis.get("OFF", 0),
+            "Filter Mode":         s.get("mode", ""),
         }
         if has_zigzag:
             row.update({
@@ -1700,6 +1709,29 @@ def _build_filter_summary_block_df(period_results: List[PeriodResult]) -> Option
                 "Avg Median Relative Volume": ctr.get(
                     "avg_median_relative_volume",
                     s.get("avg_median_relative_volume", None),
+                ),
+            })
+        if has_time:
+            row.update({
+                "Time Filter Reset Count": s.get(
+                    "time_filter_reset_count",
+                    ctr.get("time_filter_reset_count", 0),
+                ),
+                "Time Filter Bars In Window": s.get(
+                    "time_filter_bars_in_window",
+                    ctr.get("time_filter_bars_in_window", 0),
+                ),
+                "Time Filter Bars Out Window": s.get(
+                    "time_filter_bars_out_window",
+                    ctr.get("time_filter_bars_out_window", 0),
+                ),
+                "Time Filter Blocked Entries": s.get(
+                    "time_filter_blocked_entry_count",
+                    ctr.get("time_filter_blocked_entry_count", 0),
+                ),
+                "Time Filter Forced Exits": s.get(
+                    "time_filter_forced_exit_count",
+                    ctr.get("time_filter_forced_exit_count", 0),
                 ),
             })
         rows.append(row)
@@ -2234,6 +2266,7 @@ def _prepare_legacy_trades_df(
     trades_df: Optional[pd.DataFrame],
     filter_enabled: bool,
     filter_diagnostics_available: bool,
+    filter_diagnostics: Optional[Mapping[str, Any]] = None,
 ) -> pd.DataFrame:
     """Rename and prepare trades_df for the legacy export, handling filter columns.
 
@@ -2253,6 +2286,16 @@ def _prepare_legacy_trades_df(
     else:
         # Empty trades вЂ” choose header set based on filter state (plan В§9.4)
         if filter_enabled and filter_diagnostics_available:
+            if (
+                filter_diagnostics is not None
+                and "trade_filter_state" not in filter_diagnostics
+            ):
+                return pd.DataFrame(
+                    columns=[
+                        *_CANONICAL_TRADE_DISPLAY_COLS,
+                        TRADES_DISPLAY_NAMES["exit_reason"],
+                    ]
+                )
             return pd.DataFrame(columns=list(TRADES_DISPLAY_NAMES.values()))
         else:
             return pd.DataFrame(columns=_CANONICAL_TRADE_DISPLAY_COLS)
@@ -2484,7 +2527,7 @@ def export_tester_results(
     # Determine filter mode (plan В§9.1)
     zigzag_enabled = is_zigzag_enabled(trade_filter_config)
     volume_enabled = is_volume_enabled(trade_filter_config)
-    filter_enabled = zigzag_enabled or volume_enabled
+    filter_enabled = is_trade_filter_enabled(trade_filter_config)
     snapshot = next(
         (
             pr.filter_config_snapshot
@@ -2495,6 +2538,15 @@ def export_tester_results(
     )
     if volume_enabled and snapshot is not None:
         run_metadata_payload.setdefault("filter_config_snapshot", snapshot)
+    if filter_enabled:
+        run_metadata_payload.setdefault(
+            "trade_filter_public_snapshot",
+            trade_filter_public_snapshot(trade_filter_config),
+        )
+        run_metadata_payload.setdefault(
+            "trade_filter_effective_snapshot",
+            trade_filter_effective_snapshot(trade_filter_config),
+        )
     export_state_cols = (
         volume_enabled
         or (
@@ -2603,6 +2655,7 @@ def export_tester_results(
                     pr.trades_df,
                     filter_enabled=filter_enabled,
                     filter_diagnostics_available=(pr.filter_diagnostics is not None),
+                    filter_diagnostics=pr.filter_diagnostics,
                 )
                 trades_df.to_excel(writer, sheet_name=trades_sheet, index=False)
                 if len(trades_df) > 0:

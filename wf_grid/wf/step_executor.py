@@ -162,9 +162,20 @@ def _compute_filter_diagnostics_summary(
     # §10.6.4 n_filter_blocked_entries
     block_arr = filter_diagnostics.get("filter_block_reason")
     if block_arr is not None:
+        block_np = np.asarray(block_arr)
         summary["n_filter_blocked_entries"] = int(
-            np.sum(np.asarray(block_arr) != "none")
+            np.sum(block_np != "none")
         )
+        time_enabled_for_summary = filter_diagnostics.get(
+            "time_filter_enabled"
+        )
+        if (
+            time_enabled_for_summary is not None
+            and np.any(np.asarray(time_enabled_for_summary) == 1)
+        ):
+            summary["time_filter_blocked_entry_count"] = int(
+                np.sum(block_np == "time_filter_out_of_window")
+            )
 
     # §10.6.4 median_stop_triggered_count
     median_stop_arr = filter_diagnostics.get("median_stop_triggered")
@@ -242,6 +253,15 @@ def _compute_filter_diagnostics_summary(
         _tf_w = np.asarray(tf_in_w_arr)
         summary["time_filter_bars_in_window"] = int(np.sum(_tf_w == 1))
         summary["time_filter_bars_out_window"] = int(np.sum(_tf_w == 0))
+    tf_forced_exit_arr = filter_diagnostics.get("time_filter_forced_exit")
+    if tf_forced_exit_arr is not None:
+        summary["time_filter_forced_exit_count"] = int(
+            np.sum(np.asarray(tf_forced_exit_arr) == 1)
+        )
+    mode_arr = filter_diagnostics.get("trade_filter_mode")
+    if mode_arr is not None:
+        _mode = np.asarray(mode_arr)
+        summary["mode"] = str(_mode[0]) if len(_mode) else ""
 
     # ------------------------------------------------------------------
     # WP-V3-8: immediate entries counts (§11.3)
@@ -386,6 +406,7 @@ def execute_oos_step(
     prepend_bars_requested: int,
     zigzag_global_stats: Any = None,
     volume_runtime: "Optional[VolumeRuntime]" = None,
+    time_filter_runtime: Any = None,
 ) -> StepResult:
     """
     Execute one OOS WF step with canonical prepend path (§W.4.2).
@@ -415,6 +436,11 @@ def execute_oos_step(
     sliced_volume_runtime = (
         volume_runtime.slice(ext_start, test_end)
         if volume_runtime is not None
+        else None
+    )
+    sliced_time_filter_runtime = (
+        time_filter_runtime.slice(ext_start, test_end)
+        if time_filter_runtime is not None
         else None
     )
 
@@ -449,6 +475,7 @@ def execute_oos_step(
         trade_filter_config=trade_filter_config,
         zigzag_global_stats=zigzag_global_stats,
         volume_runtime=sliced_volume_runtime,
+        time_filter_runtime=sliced_time_filter_runtime,
         global_offset=ext_start,
     )
     if ext_result.early_exit:
@@ -582,6 +609,7 @@ def execute_train_step(
     config: "GridConfig",
     zigzag_global_stats: Any = None,
     volume_runtime: "Optional[VolumeRuntime]" = None,
+    time_filter_runtime: Any = None,
 ) -> StepResult:
     """Execute one train WF step (§W.6). No prepend."""
     train_start = wf_slice.train_start_idx
@@ -601,6 +629,11 @@ def execute_train_step(
     sliced_volume_runtime = (
         volume_runtime.slice(train_start, train_end)
         if volume_runtime is not None
+        else None
+    )
+    sliced_time_filter_runtime = (
+        time_filter_runtime.slice(train_start, train_end)
+        if time_filter_runtime is not None
         else None
     )
 
@@ -625,6 +658,7 @@ def execute_train_step(
         trade_filter_config=trade_filter_config,
         zigzag_global_stats=zigzag_global_stats,
         volume_runtime=sliced_volume_runtime,
+        time_filter_runtime=sliced_time_filter_runtime,
         global_offset=train_start,
     )
 

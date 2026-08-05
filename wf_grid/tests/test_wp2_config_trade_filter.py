@@ -1117,7 +1117,7 @@ class TestWakeupWhitelistPhase0Schema:
         assert "direction_mode" in wf_allowed["trade_filter.wakeup_regime.entry"]
         assert "direction_mode" in shared_allowed["trade_filter.wakeup_regime.entry"]
 
-    def test_disabled_filter_known_wakeup_keys_reach_shared_wf_grid_reject(self, tmp_path):
+    def test_disabled_filter_known_wakeup_keys_are_inert_template(self, tmp_path):
         yaml = _MINIMAL_BASE + """\
 trade_filter:
   enabled: false
@@ -1160,7 +1160,8 @@ trade_filter:
       apply_to: internal_opposite_st_flip
       release_action: apply_if_still_opposite
 """
-        _assert_error(tmp_path, yaml, "wakeup_regime is not supported by wf_grid")
+        cfg = _assert_ok(tmp_path, yaml)
+        assert cfg.trade_filter.enabled is False
 
     def test_unknown_wakeup_subkey_rejects(self, tmp_path):
         yaml = _MINIMAL_BASE + """\
@@ -2533,6 +2534,20 @@ class TestExitBImmediateOffFailureKeysRegistry:
         "time_filter_window_invalid_minutes",
         "time_filter_window_zero_length",
         "time_filter_window_cross_midnight",
+        "time_filter_window_and_windows_conflict",
+        "time_filter_windows_missing",
+        "time_filter_windows_invalid_type",
+        "time_filter_windows_empty",
+        "time_filter_windows_item_invalid_type",
+        "time_filter_windows_item_invalid_format",
+        "time_filter_windows_item_invalid_hours",
+        "time_filter_windows_item_invalid_minutes",
+        "time_filter_windows_item_zero_length",
+        "time_filter_windows_item_cross_midnight",
+        "time_filter_windows_duplicate",
+        "time_filter_windows_overlap",
+        "time_filter_windows_touching",
+        "trade_filter_all_subfilters_disabled",
     })
 
     def test_three_new_keys_in_failure_registry(self):

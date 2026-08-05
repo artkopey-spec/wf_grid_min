@@ -1020,6 +1020,7 @@ class TestExitBImmediateOffFailureKeysRegistryTester:
         "position_freeze_release_action_invalid",
         "wakeup_regime_requires_mode_d",
         "wakeup_enabled_requires_mode_d",
+        "wakeup_direction_mode_invalid",
         # docs/time_filter_plan_v1_final.txt §2
         "time_filter_enabled_invalid_type",
         "time_filter_window_missing",
@@ -1028,6 +1029,20 @@ class TestExitBImmediateOffFailureKeysRegistryTester:
         "time_filter_window_invalid_minutes",
         "time_filter_window_zero_length",
         "time_filter_window_cross_midnight",
+        "time_filter_window_and_windows_conflict",
+        "time_filter_windows_missing",
+        "time_filter_windows_invalid_type",
+        "time_filter_windows_empty",
+        "time_filter_windows_item_invalid_type",
+        "time_filter_windows_item_invalid_format",
+        "time_filter_windows_item_invalid_hours",
+        "time_filter_windows_item_invalid_minutes",
+        "time_filter_windows_item_zero_length",
+        "time_filter_windows_item_cross_midnight",
+        "time_filter_windows_duplicate",
+        "time_filter_windows_overlap",
+        "time_filter_windows_touching",
+        "trade_filter_all_subfilters_disabled",
     })
 
     def test_three_new_keys_in_registry(self) -> None:

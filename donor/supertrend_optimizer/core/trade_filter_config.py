@@ -25,6 +25,8 @@ from dataclasses import dataclass, field
 from contextvars import ContextVar
 from typing import Optional, Union
 
+from supertrend_optimizer.utils.exceptions import ConfigError
+
 
 # ---------------------------------------------------------------------------
 # Lifecycle / type literal whitelists (Appendix A v1.1 §11)
@@ -65,6 +67,20 @@ _V3_INIT_FAILURE_KEYS = frozenset({
     "time_filter_window_invalid_minutes",
     "time_filter_window_zero_length",
     "time_filter_window_cross_midnight",
+    "time_filter_window_and_windows_conflict",
+    "time_filter_windows_missing",
+    "time_filter_windows_invalid_type",
+    "time_filter_windows_empty",
+    "time_filter_windows_item_invalid_type",
+    "time_filter_windows_item_invalid_format",
+    "time_filter_windows_item_invalid_hours",
+    "time_filter_windows_item_invalid_minutes",
+    "time_filter_windows_item_zero_length",
+    "time_filter_windows_item_cross_midnight",
+    "time_filter_windows_duplicate",
+    "time_filter_windows_overlap",
+    "time_filter_windows_touching",
+    "trade_filter_all_subfilters_disabled",
     "cycle_direction_gate_requires_volume_only",
     # wakeup_regime / Phase 0 Mode D
     "mode_d_unsupported_pipeline",
@@ -146,6 +162,10 @@ class TradeFilterTimeFilterConfig:
     """
     enabled: object = False     # expected bool; validation enforces type
     window: Optional[str] = None
+    windows: Optional[list[str]] = None
+    _windows_minutes: tuple[tuple[int, int], ...] = field(
+        default=(), repr=False
+    )
     # Populated by resolve_time_filter_in_place after validation.
     # Named with leading underscore to signal "internal / resolver-owned".
     _start_hour: Optional[int] = field(default=None, repr=False)
@@ -443,6 +463,103 @@ def is_volume_enabled(tf: object) -> bool:
     return volume is not None and getattr(volume, "enabled", None) is True
 
 
+def is_time_filter_enabled(tf: object) -> bool:
+    """Return True when the root and Time subfilter are explicitly enabled."""
+    if not is_trade_filter_enabled(tf):
+        return False
+    time_filter = getattr(tf, "time_filter", None)
+    return (
+        time_filter is not None
+        and getattr(time_filter, "enabled", None) is True
+    )
+
+
+def is_any_trade_subfilter_enabled(tf: object) -> bool:
+    """Return whether any lifecycle-owning or gating subfilter is active."""
+    return (
+        is_zigzag_enabled(tf)
+        or is_volume_enabled(tf)
+        or is_time_filter_enabled(tf)
+    )
+
+
+def resolve_trade_filter_mode(tf: object) -> str:
+    """Resolve the canonical effective trade-filter mode."""
+    if not is_trade_filter_enabled(tf):
+        return "disabled"
+
+    zigzag = is_zigzag_enabled(tf)
+    volume = is_volume_enabled(tf)
+    time_filter = is_time_filter_enabled(tf)
+    modes = {
+        (False, False, True): "time_only",
+        (False, True, False): "volume_only",
+        (False, True, True): "volume_and_time",
+        (True, False, False): "zigzag_only",
+        (True, False, True): "zigzag_and_time",
+        (True, True, False): "zigzag_and_volume",
+        (True, True, True): "zigzag_volume_and_time",
+    }
+    try:
+        return modes[(zigzag, volume, time_filter)]
+    except KeyError as exc:
+        raise ValueError(
+            "at least one trade subfilter must be enabled when "
+            "trade_filter.enabled=true: zigzag, volume, or time_filter"
+        ) from exc
+
+
+def trade_filter_public_snapshot(tf: object) -> dict:
+    """Return the small user-facing trade-filter configuration snapshot."""
+    time_filter = getattr(tf, "time_filter", None)
+    windows = getattr(time_filter, "windows", None)
+    return {
+        "trade_filter": {
+            "enabled": getattr(tf, "enabled", None) is True,
+            "type": getattr(tf, "type", None),
+            "zigzag": {
+                "enabled": getattr(getattr(tf, "zigzag", None), "enabled", None)
+                is True,
+            },
+            "volume": {
+                "enabled": getattr(getattr(tf, "volume", None), "enabled", None)
+                is True,
+            },
+            "time_filter": {
+                "enabled": getattr(time_filter, "enabled", None) is True,
+                "window": getattr(time_filter, "window", None),
+                "windows": list(windows) if windows is not None else None,
+            },
+        }
+    }
+
+
+def trade_filter_effective_snapshot(tf: object) -> dict:
+    """Return the canonical runtime identity of the active capabilities."""
+    active = is_trade_filter_enabled(tf)
+    time_active = is_time_filter_enabled(tf)
+    canonical_windows: list[list[int]] = []
+    if time_active:
+        time_filter = getattr(tf, "time_filter", None)
+        resolved = tuple(getattr(time_filter, "_windows_minutes", ()) or ())
+        if not resolved:
+            raise ConfigError(
+                "active time_filter effective snapshot requires resolved "
+                "canonical windows; call resolve_time_filter_in_place() first"
+            )
+        canonical_windows = [
+            [int(start), int(end)] for start, end in resolved
+        ]
+    return {
+        "effective_mode": resolve_trade_filter_mode(tf) if active else "disabled",
+        "zigzag_active": bool(is_zigzag_enabled(tf)),
+        "volume_active": bool(is_volume_enabled(tf)),
+        "time_filter_active": bool(time_active),
+        "canonical_windows_minutes": canonical_windows,
+        "time_reset_semantics": "calendar_cycle_close_reset",
+    }
+
+
 def is_wakeup_volume_enabled(tf: object) -> bool:
     """Return True when wakeup volume expansion is explicitly enabled."""
     if not is_trade_filter_enabled(tf):
@@ -528,7 +645,7 @@ TRADE_FILTER_ALLOWED_KEYS: dict[str, frozenset[str]] = {
         "enabled", "type", "zigzag", "triggers", "lifecycle", "diagnostics",
         "time_filter", "volume", "wakeup_regime",
     }),
-    "trade_filter.time_filter": frozenset({"enabled", "window"}),
+    "trade_filter.time_filter": frozenset({"enabled", "window", "windows"}),
     "trade_filter.zigzag": frozenset({
         "enabled", "global_stats_source", "leg_height_mode", "reversal_threshold",
         "candidate_trigger_threshold", "candidate_trigger_quantile",
@@ -747,6 +864,7 @@ def build_trade_filter_config_from_raw(tf_raw: dict) -> TradeFilterConfig:
     time_filter = TradeFilterTimeFilterConfig(
         enabled=tflt_raw.get("enabled", False),
         window=tflt_raw.get("window", None),
+        windows=tflt_raw.get("windows", None),
     )
 
     vol_raw: dict = tf_raw.get("volume") or {}
@@ -1707,89 +1825,222 @@ def _validate_triggers_block(tf: TradeFilterConfig, errors: list[str], raw_user_
                 )
 
 
-def _validate_time_filter_block(tf: TradeFilterConfig, errors: list[str], raw_user_keys: frozenset[tuple[str, ...]]) -> None:
-    # ------------------------------------------------------------------
-    # time_filter validation (docs/time_filter_plan_v1_final.txt §2.1)
-    # Only validated when trade_filter.enabled=true (already inside that branch).
-    # ------------------------------------------------------------------
-    tf_block_present = ("trade_filter", "time_filter") in raw_user_keys
-    tf_enabled_present = ("trade_filter", "time_filter", "enabled") in raw_user_keys
-    tf_window_present = ("trade_filter", "time_filter", "window") in raw_user_keys
+def _validate_time_filter_structure(
+    tf: TradeFilterConfig,
+    errors: list[str],
+    raw_user_keys: frozenset[tuple[str, ...]],
+) -> bool:
+    """Validate switch types and window-key conflict regardless of activation."""
+    before = len(errors)
+    window_key = ("trade_filter", "time_filter", "window")
+    windows_key = ("trade_filter", "time_filter", "windows")
+    if window_key in raw_user_keys and windows_key in raw_user_keys:
+        _append_validation_error(
+            errors,
+            "trade_filter.time_filter.window and "
+            "trade_filter.time_filter.windows cannot be used together",
+            _VALIDATION_ERROR_KEYS.get(),
+            "time_filter_window_and_windows_conflict",
+        )
 
-    if tf_block_present:
-        tfl = tf.time_filter
-        # Rule 1: enabled must be bool when block is present
-        if not isinstance(tfl.enabled, bool):
+    enabled_checks = (
+        (
+            ("trade_filter", "zigzag", "enabled"),
+            getattr(getattr(tf, "zigzag", None), "enabled", None),
+            "trade_filter.zigzag.enabled",
+            None,
+        ),
+        (
+            ("trade_filter", "volume", "enabled"),
+            getattr(getattr(tf, "volume", None), "enabled", None),
+            "trade_filter.volume.enabled",
+            None,
+        ),
+        (
+            ("trade_filter", "time_filter", "enabled"),
+            getattr(getattr(tf, "time_filter", None), "enabled", None),
+            "trade_filter.time_filter.enabled",
+            "time_filter_enabled_invalid_type",
+        ),
+    )
+    for key, value, path, error_key in enabled_checks:
+        if key in raw_user_keys and not isinstance(value, bool):
             _append_validation_error(
                 errors,
-                "trade_filter.time_filter.enabled must be bool (true/false), "
-                f"got {type(tfl.enabled).__name__!r} ({tfl.enabled!r})",
+                f"{path} must be bool (true/false), "
+                f"got {type(value).__name__!r} ({value!r})",
                 _VALIDATION_ERROR_KEYS.get(),
-                "time_filter_enabled_invalid_type",
+                error_key,
             )
-        elif tfl.enabled:
-            # Rule 2: time_filter.enabled=true — validate window
-            if not tf_window_present or tfl.window is None:
-                _append_validation_error(
-                    errors,
-                    "trade_filter.time_filter.window is required when "
-                    "trade_filter.time_filter.enabled is true",
-                    _VALIDATION_ERROR_KEYS.get(),
-                    "time_filter_window_missing",
-                )
-            else:
-                w = tfl.window
-                if not isinstance(w, str) or not _TF_WINDOW_RE.match(w):
-                    _append_validation_error(
-                        errors,
-                        f"trade_filter.time_filter.window must be in HH:MM-HH:MM format, "
-                        f"got {w!r}",
-                        _VALIDATION_ERROR_KEYS.get(),
-                        "time_filter_window_invalid_format",
-                    )
-                else:
-                    # Format valid — check numeric ranges
-                    start_str, end_str = w[:5], w[6:]
-                    sh, sm = int(start_str[:2]), int(start_str[3:])
-                    eh, em = int(end_str[:2]), int(end_str[3:])
-                    hours_ok = (0 <= sh <= 23) and (0 <= eh <= 23)
-                    mins_ok = (0 <= sm <= 59) and (0 <= em <= 59)
-                    if not hours_ok:
-                        _append_validation_error(
-                            errors,
-                            f"trade_filter.time_filter.window hours must be in 0–23, "
-                            f"got {w!r}",
-                            _VALIDATION_ERROR_KEYS.get(),
-                            "time_filter_window_invalid_hours",
-                        )
-                    elif not mins_ok:
-                        _append_validation_error(
-                            errors,
-                            f"trade_filter.time_filter.window minutes must be in 0–59, "
-                            f"got {w!r}",
-                            _VALIDATION_ERROR_KEYS.get(),
-                            "time_filter_window_invalid_minutes",
-                        )
-                    else:
-                        start_total = sh * 60 + sm
-                        end_total = eh * 60 + em
-                        if start_total == end_total:
-                            _append_validation_error(
-                                errors,
-                                f"trade_filter.time_filter.window must have non-zero length "
-                                f"(start == end is not allowed), got {w!r}",
-                                _VALIDATION_ERROR_KEYS.get(),
-                                "time_filter_window_zero_length",
-                            )
-                        elif start_total > end_total:
-                            _append_validation_error(
-                                errors,
-                                f"trade_filter.time_filter.window wrap-around (start > end) "
-                                f"is not supported in v1, got {w!r}",
-                                _VALIDATION_ERROR_KEYS.get(),
-                                "time_filter_window_cross_midnight",
-                            )
-        # Rule 3: time_filter.enabled=false -> no deep validation (disabled-path)
+    return len(errors) == before
+
+
+def _parse_time_window_value(
+    value: object,
+    *,
+    path: str,
+    key_prefix: str,
+    errors: list[str],
+) -> Optional[tuple[int, int]]:
+    """Parse one strict HH:MM-HH:MM value and append its primary error."""
+    if not isinstance(value, str):
+        error_key = (
+            "time_filter_window_invalid_format"
+            if key_prefix == "time_filter_window"
+            else f"{key_prefix}_invalid_type"
+        )
+        _append_validation_error(
+            errors,
+            f"{path} must be str, got {type(value).__name__!r}",
+            _VALIDATION_ERROR_KEYS.get(),
+            error_key,
+        )
+        return None
+    if not _TF_WINDOW_RE.match(value):
+        _append_validation_error(
+            errors,
+            f"{path} must be in HH:MM-HH:MM format, got {value!r}",
+            _VALIDATION_ERROR_KEYS.get(),
+            f"{key_prefix}_invalid_format",
+        )
+        return None
+
+    start_str, end_str = value[:5], value[6:]
+    sh, sm = int(start_str[:2]), int(start_str[3:])
+    eh, em = int(end_str[:2]), int(end_str[3:])
+    if not ((0 <= sh <= 23) and (0 <= eh <= 23)):
+        _append_validation_error(
+            errors,
+            f"{path} hours must be in 0–23, got {value!r}",
+            _VALIDATION_ERROR_KEYS.get(),
+            f"{key_prefix}_invalid_hours",
+        )
+        return None
+    if not ((0 <= sm <= 59) and (0 <= em <= 59)):
+        _append_validation_error(
+            errors,
+            f"{path} minutes must be in 0–59, got {value!r}",
+            _VALIDATION_ERROR_KEYS.get(),
+            f"{key_prefix}_invalid_minutes",
+        )
+        return None
+
+    start_total = sh * 60 + sm
+    end_total = eh * 60 + em
+    if start_total == end_total:
+        _append_validation_error(
+            errors,
+            f"{path} must have non-zero length, got {value!r}",
+            _VALIDATION_ERROR_KEYS.get(),
+            f"{key_prefix}_zero_length",
+        )
+        return None
+    if start_total > end_total:
+        _append_validation_error(
+            errors,
+            f"{path} wrap-around/cross-midnight window is not supported, "
+            f"got {value!r}",
+            _VALIDATION_ERROR_KEYS.get(),
+            f"{key_prefix}_cross_midnight",
+        )
+        return None
+    return start_total, end_total
+
+
+def _validate_time_filter_block(
+    tf: TradeFilterConfig,
+    errors: list[str],
+    raw_user_keys: frozenset[tuple[str, ...]],
+) -> None:
+    """Deep-validate the active Time schedule."""
+    if not is_time_filter_enabled(tf):
+        return
+
+    tfl = tf.time_filter
+    window_key = ("trade_filter", "time_filter", "window")
+    windows_key = ("trade_filter", "time_filter", "windows")
+    has_window = window_key in raw_user_keys
+    has_windows = windows_key in raw_user_keys
+
+    if not has_window and not has_windows:
+        _append_validation_error(
+            errors,
+            "one of trade_filter.time_filter.window or windows is required "
+            "when trade_filter.time_filter.enabled is true",
+            _VALIDATION_ERROR_KEYS.get(),
+            "time_filter_windows_missing",
+        )
+        return
+    if has_window and has_windows:
+        return  # structural phase already emitted the conflict
+
+    if has_window:
+        if tfl.window is None:
+            _append_validation_error(
+                errors,
+                "trade_filter.time_filter.window is required when "
+                "trade_filter.time_filter.enabled is true",
+                _VALIDATION_ERROR_KEYS.get(),
+                "time_filter_window_missing",
+            )
+            return
+        _parse_time_window_value(
+            tfl.window,
+            path="trade_filter.time_filter.window",
+            key_prefix="time_filter_window",
+            errors=errors,
+        )
+        return
+
+    windows = tfl.windows
+    if not isinstance(windows, list):
+        _append_validation_error(
+            errors,
+            "trade_filter.time_filter.windows must be a YAML list, "
+            f"got {type(windows).__name__!r}",
+            _VALIDATION_ERROR_KEYS.get(),
+            "time_filter_windows_invalid_type",
+        )
+        return
+    if not windows:
+        _append_validation_error(
+            errors,
+            "trade_filter.time_filter.windows must not be empty",
+            _VALIDATION_ERROR_KEYS.get(),
+            "time_filter_windows_empty",
+        )
+        return
+
+    parsed: list[tuple[int, int, int]] = []
+    for original_index, value in enumerate(windows):
+        item = _parse_time_window_value(
+            value,
+            path=f"trade_filter.time_filter.windows[{original_index}]",
+            key_prefix="time_filter_windows_item",
+            errors=errors,
+        )
+        if item is not None:
+            parsed.append((item[0], item[1], original_index))
+
+    parsed.sort(key=lambda item: (item[0], item[1]))
+    for previous, current in zip(parsed, parsed[1:]):
+        prev_start, prev_end, prev_index = previous
+        cur_start, cur_end, cur_index = current
+        if (prev_start, prev_end) == (cur_start, cur_end):
+            relation, error_key = "duplicates", "time_filter_windows_duplicate"
+        elif prev_end > cur_start:
+            relation, error_key = "overlaps", "time_filter_windows_overlap"
+        elif prev_end == cur_start:
+            relation, error_key = "touches", "time_filter_windows_touching"
+        else:
+            continue
+        _append_validation_error(
+            errors,
+            f"trade_filter.time_filter.windows[{cur_index}] {relation} "
+            f"windows[{prev_index}]",
+            _VALIDATION_ERROR_KEYS.get(),
+            error_key,
+        )
 
 
 def _validate_required_int_ge_one(
@@ -2303,7 +2554,9 @@ def _validate_caller_pipeline_gate(tf: TradeFilterConfig, errors: list[str], raw
         )
         return False
 
-    if caller_pipeline == "wf_grid":
+    if caller_pipeline == "wf_grid" and _is_zigzag_enabled_for_validation(
+        tf, raw_user_keys
+    ):
         if _is_mode_d(tf, raw_user_keys):
             _append_validation_error(
                 errors,
@@ -2443,11 +2696,9 @@ def _validate_subfilter_legality_dispatch(
     if not is_trade_filter_enabled(tf):
         return
 
-    if _has_malformed_subfilter_enabled_flags(tf, errors, raw_user_keys):
-        return
-
     zigzag_enabled = _is_zigzag_enabled_for_validation(tf, raw_user_keys)
     volume_enabled = is_volume_enabled(tf)
+    time_enabled = is_time_filter_enabled(tf)
 
     if zigzag_enabled and not volume_enabled:
         if not _validate_zigzag_required_blocks(errors, raw_user_keys):
@@ -2469,17 +2720,52 @@ def _validate_subfilter_legality_dispatch(
         _validate_wakeup_regime_block(tf, errors, raw_user_keys)
         _validate_phase0_mode_d_cross_fields(tf, errors, raw_user_keys)
     elif not zigzag_enabled and volume_enabled:
-        _validate_standalone_volume_legality(tf, errors, raw_user_keys)
-        if ("trade_filter", "lifecycle") in raw_user_keys:
-            _validate_lifecycle_block(tf, errors, raw_user_keys)
+        if (
+            ("trade_filter", "type") in raw_user_keys
+            and tf.type == "zigzag_st_mode"
+        ):
+            errors.append(
+                "trade_filter.type=zigzag_st_mode contradicts explicit "
+                "trade_filter.zigzag.enabled=false"
+            )
         _validate_time_filter_block(tf, errors, raw_user_keys)
         _validate_volume_block(tf, errors, raw_user_keys)
-        _validate_wakeup_regime_block(tf, errors, raw_user_keys)
-        _validate_phase0_mode_d_cross_fields(tf, errors, raw_user_keys)
+        wakeup = getattr(tf, "wakeup_regime", None)
+        if (
+            ("trade_filter", "wakeup_regime", "enabled") in raw_user_keys
+            and getattr(wakeup, "enabled", None) is True
+        ):
+            errors.append(
+                "trade_filter.wakeup_regime.enabled=true requires "
+                "trade_filter.zigzag.enabled=true"
+            )
+    elif time_enabled:
+        if (
+            ("trade_filter", "type") in raw_user_keys
+            and tf.type == "zigzag_st_mode"
+            and ("trade_filter", "zigzag", "enabled") in raw_user_keys
+        ):
+            errors.append(
+                "trade_filter.type=zigzag_st_mode contradicts explicit "
+                "trade_filter.zigzag.enabled=false"
+            )
+        wakeup = getattr(tf, "wakeup_regime", None)
+        if (
+            ("trade_filter", "wakeup_regime", "enabled") in raw_user_keys
+            and getattr(wakeup, "enabled", None) is True
+        ):
+            errors.append(
+                "trade_filter.wakeup_regime.enabled=true requires "
+                "trade_filter.zigzag.enabled=true"
+            )
+        _validate_time_filter_block(tf, errors, raw_user_keys)
     else:
-        errors.append(
-            "at least one subfilter must be enabled: set "
-            "trade_filter.zigzag.enabled: true or trade_filter.volume.enabled: true"
+        _append_validation_error(
+            errors,
+            "at least one trade subfilter must be enabled when "
+            "trade_filter.enabled=true: zigzag, volume, or time_filter",
+            _VALIDATION_ERROR_KEYS.get(),
+            "trade_filter_all_subfilters_disabled",
         )
 
 
@@ -2497,8 +2783,11 @@ def validate_trade_filter(
     """
     token = _VALIDATION_ERROR_KEYS.set(error_keys)
     try:
+        structure_valid = _validate_time_filter_structure(
+            tf, errors, raw_user_keys
+        )
         should_continue = _validate_root_enabled_and_type(tf, errors, raw_user_keys)
-        if should_continue:
+        if should_continue and structure_valid:
             _validate_subfilter_legality_dispatch(tf, errors, raw_user_keys)
         _validate_caller_pipeline_gate(tf, errors, raw_user_keys, caller_pipeline)
     finally:
@@ -2648,18 +2937,42 @@ def resolve_time_filter_in_place(
 
     docs/time_filter_plan_v1_final.txt §2.2
     """
-    if trade_filter_config is None or not trade_filter_config.enabled:
+    if trade_filter_config is None or trade_filter_config.enabled is not True:
         return
     tfl = trade_filter_config.time_filter
-    if not isinstance(tfl.enabled, bool) or not tfl.enabled:
+    if tfl.enabled is not True:
         return
-    # Validator guarantees window is non-None and matches HH:MM-HH:MM
-    w: str = tfl.window  # type: ignore[assignment]
-    start_str, end_str = w[:5], w[6:]
-    tfl._start_hour = int(start_str[:2])
-    tfl._start_minute = int(start_str[3:])
-    tfl._end_hour = int(end_str[:2])
-    tfl._end_minute = int(end_str[3:])
+
+    values: list[str]
+    if tfl.windows is not None:
+        values = list(tfl.windows)
+    elif tfl.window is not None:
+        values = [tfl.window]
+    else:
+        raise ConfigError(
+            "active time_filter has no resolved window/windows schedule"
+        )
+
+    parsed: list[tuple[int, int]] = []
+    for value in values:
+        start_str, end_str = value[:5], value[6:]
+        parsed.append(
+            (
+                int(start_str[:2]) * 60 + int(start_str[3:]),
+                int(end_str[:2]) * 60 + int(end_str[3:]),
+            )
+        )
+    parsed.sort()
+    tfl._windows_minutes = tuple(parsed)
+
+    tfl._start_hour = None
+    tfl._start_minute = None
+    tfl._end_hour = None
+    tfl._end_minute = None
+    if len(parsed) == 1:
+        start_total, end_total = parsed[0]
+        tfl._start_hour, tfl._start_minute = divmod(start_total, 60)
+        tfl._end_hour, tfl._end_minute = divmod(end_total, 60)
 
 
 def resolve_volume_baseline_session_in_place(
@@ -2727,6 +3040,10 @@ __all__ = [
     "is_trade_filter_enabled",
     "is_zigzag_enabled",
     "is_volume_enabled",
+    "is_time_filter_enabled",
+    "resolve_trade_filter_mode",
+    "trade_filter_public_snapshot",
+    "trade_filter_effective_snapshot",
     "is_wakeup_volume_enabled",
     "resolve_zigzag_enabled_in_place",
     "resolve_volume_enabled_in_place",

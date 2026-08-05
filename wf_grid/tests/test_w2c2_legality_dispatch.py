@@ -71,10 +71,10 @@ def test_standalone_volume_with_zigzag_type_is_invalid():
     })
 
     assert is_zigzag_enabled(cfg) is False
-    assert any("remove trade_filter.type" in error for error in errors)
+    assert any("contradicts explicit" in error for error in errors)
 
 
-def test_standalone_volume_with_triggers_block_is_invalid():
+def test_standalone_volume_allows_inert_triggers_template():
     cfg, errors = _build({
         "enabled": True,
         "triggers": {
@@ -85,7 +85,7 @@ def test_standalone_volume_with_triggers_block_is_invalid():
     })
 
     assert is_zigzag_enabled(cfg) is False
-    assert any("trade_filter.triggers is not allowed" in error for error in errors)
+    assert errors == []
 
 
 def test_both_subfilters_disabled_is_invalid_with_actionable_hint():
@@ -96,12 +96,12 @@ def test_both_subfilters_disabled_is_invalid_with_actionable_hint():
     })
 
     assert errors == [
-        "at least one subfilter must be enabled: set "
-        "trade_filter.zigzag.enabled: true or trade_filter.volume.enabled: true"
+        "at least one trade subfilter must be enabled when "
+        "trade_filter.enabled=true: zigzag, volume, or time_filter"
     ]
 
 
-def test_standalone_volume_rejects_zigzag_payload_with_migration_hint():
+def test_standalone_volume_allows_inert_zigzag_payload():
     _cfg, errors = _build({
         "enabled": True,
         "zigzag": {
@@ -111,7 +111,7 @@ def test_standalone_volume_rejects_zigzag_payload_with_migration_hint():
         "volume": _valid_volume(),
     })
 
-    assert any("remove" in error and "trade_filter.zigzag.enabled: true" in error for error in errors)
+    assert errors == []
 
 
 def test_empty_zigzag_block_without_legacy_marker_is_now_invalid():
@@ -121,7 +121,10 @@ def test_empty_zigzag_block_without_legacy_marker_is_now_invalid():
     })
 
     assert cfg.zigzag.enabled is False
-    assert any("at least one subfilter must be enabled" in error for error in errors)
+    assert any(
+        "at least one trade subfilter must be enabled" in error
+        for error in errors
+    )
 
 
 def test_zigzag_and_volume_together_are_valid():

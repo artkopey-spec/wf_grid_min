@@ -663,6 +663,7 @@ class TestOrchestratorWFSlicingPassthrough:
         yaml_text = textwrap.dedent(f"""\
             data:
               file_path: {csv_path}
+              periods_per_year: 365
             validation:
               walk_forward:
                 train_size: "90D"
@@ -839,7 +840,9 @@ class TestOrchestratorDataValidation:
         )
         assert isinstance(range_df.index, pd.RangeIndex)
 
-        monkeypatch.setattr(_orch_mod.pd, "read_csv", lambda *args, **kwargs: range_df.copy())
+        monkeypatch.setattr(
+            _orch_mod, "_read_ohlc_csv", lambda *args, **kwargs: range_df.copy()
+        )
 
         from wf_grid.pipeline.orchestrator import run_grid_pipeline
 

@@ -178,6 +178,7 @@ _ALLOWED_KEYS: dict[str, set[str]] = {
     "trade_filter.time_filter": {
         "enabled",
         "window",
+        "windows",
     },
     "trade_filter.zigzag": {
         "enabled",

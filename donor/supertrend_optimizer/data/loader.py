@@ -30,11 +30,28 @@ logger = logging.getLogger(__name__)
 _MIN_EXPECTED_COLUMNS = 4
 
 
+def _normalize_numeric_datetime_part(series: pd.Series, width: int) -> pd.Series:
+    """Normalize FINAM-style numeric date/time parts after pandas int inference.
+
+    CSV values like ``092400`` are read as ``int64`` ``92400``, and
+    ``astype(str)`` then yields ``\"92400\"`` which ``pd.to_datetime`` rejects.
+    Pure digit strings are zero-padded to ``width`` (8 for YYYYMMDD, 6 for HHMMSS).
+    Non-numeric formats (``2024-03-15``, ``14:30:00``) are left unchanged.
+    """
+    s = series.astype(str).str.strip()
+    # Float artifacts from numeric CSV inference: ``92400.0`` → ``92400``
+    s = s.str.replace(r"\.0$", "", regex=True)
+    numeric = s.str.fullmatch(r"\d+")
+    return s.where(~numeric.fillna(False), s.str.zfill(width))
+
+
 def load_ohlc_csv(
     path: str,
     tz: Optional[str] = None,
     sep: Optional[str] = None,
     date_format: Optional[str] = None,
+    *,
+    duplicate_lowercase_mode: str = "info",
 ) -> pd.DataFrame:
     """
     Load OHLC data from a CSV file.
@@ -46,8 +63,10 @@ def load_ohlc_csv(
        into a single datetime index: ``date + ' ' + time``.
     2. Otherwise the first matching column from
        ['datetime', 'date', 'time', 'timestamp'] is used.
-    3. If none of the above are found, the existing index is tried.
-    4. If the result is still not a DatetimeIndex, a ValueError is raised —
+    3. A leading unnamed, non-numeric column is accepted as the serialized
+       DatetimeIndex produced by ``DataFrame.to_csv(index=True)``.
+    4. If none of the above are found, an existing DatetimeIndex is preserved.
+    5. If the result is still not a DatetimeIndex, a ValueError is raised —
        the function never silently returns a non-datetime index.
 
     DST policy for tz_localize:
@@ -77,6 +96,10 @@ def load_ohlc_csv(
             When None, pandas infers the format. Providing an explicit
             format is faster and avoids day/month order ambiguity on
             international CSV files (e.g. ``'%d/%m/%Y'`` for DD/MM/YYYY).
+        duplicate_lowercase_mode: Collision policy for source columns which
+            become identical after lowercase normalization. ``"info"`` keeps
+            the tolerant TESTER behavior; ``"raise"`` is used by strict
+            pipelines to reject ambiguous input before normalization.
 
             **Important — combined date+time columns**: when the CSV
             has separate 'date' and 'time' columns, they are concatenated
@@ -114,7 +137,9 @@ def load_ohlc_csv(
     else:
         df = pd.read_csv(path, sep=sep)
 
-    _check_no_duplicate_lowercase_columns(list(df.columns), path, mode="info")
+    _check_no_duplicate_lowercase_columns(
+        list(df.columns), path, mode=duplicate_lowercase_mode
+    )
 
     # Normalise column names: lowercase and strip angle-bracket wrappers
     # (e.g. "<DATE>;<TIME>;<OPEN>..." exports from trading terminals).
@@ -126,7 +151,11 @@ def load_ohlc_csv(
     if "date" in cols and "time" in cols:
         # Combine separate date + time columns into a single timestamp.
         # Both columns are dropped from the DataFrame after becoming the index.
-        combined = df["date"].astype(str).str.strip() + " " + df["time"].astype(str).str.strip()
+        # Zero-pad numeric FINAM parts so morning times like 09:24 survive
+        # pandas int inference (092400 → 92400 → \"92400\").
+        date_s = _normalize_numeric_datetime_part(df["date"], width=8)
+        time_s = _normalize_numeric_datetime_part(df["time"], width=6)
+        combined = date_s + " " + time_s
         df = df.drop(columns=["date", "time"])
         df.index = pd.to_datetime(combined, format=date_format, errors="raise")
         df.index.name = "datetime"
@@ -134,6 +163,16 @@ def load_ohlc_csv(
         # Single datetime column: first match wins.
         _DATETIME_COLS = ["datetime", "date", "time", "timestamp"]
         matched_col = next((c for c in _DATETIME_COLS if c in cols), None)
+        if (
+            matched_col is None
+            and len(df.columns) > 0
+            and str(df.columns[0]).startswith("unnamed:")
+            and not pd.api.types.is_numeric_dtype(df.iloc[:, 0])
+        ):
+            # pandas writes an unnamed header for a nameless DatetimeIndex.
+            # Accept only a non-numeric leading column so an accidental row
+            # counter cannot silently become nanoseconds since epoch.
+            matched_col = df.columns[0]
 
         if matched_col is not None:
             df[matched_col] = pd.to_datetime(
@@ -141,20 +180,16 @@ def load_ohlc_csv(
             )
             df = df.set_index(matched_col)
         else:
-            # No recognised column — try the existing index
+            # pd.read_csv normally creates a RangeIndex.  Converting that
+            # integer index with pd.to_datetime would silently produce epoch
+            # nanoseconds, so only an index which is already datetime is valid.
             if not isinstance(df.index, pd.DatetimeIndex):
-                try:
-                    df.index = pd.to_datetime(
-                        df.index, format=date_format, errors="raise"
-                    )
-                except (ValueError, TypeError) as exc:
-                    available = list(df.columns)
-                    raise ValueError(
-                        f"Cannot build a DatetimeIndex from '{path}'. "
-                        f"None of {_DATETIME_COLS} found in columns {available}, "
-                        f"and the existing index is not parseable as datetime. "
-                        f"Original error: {exc}"
-                    ) from exc
+                available = list(df.columns)
+                raise ValueError(
+                    f"Cannot build a DatetimeIndex from '{path}'. "
+                    f"None of {_DATETIME_COLS} or a serialized unnamed index "
+                    f"was found in columns {available}."
+                )
 
     # Final guard: contract requires DatetimeIndex
     if not isinstance(df.index, pd.DatetimeIndex):

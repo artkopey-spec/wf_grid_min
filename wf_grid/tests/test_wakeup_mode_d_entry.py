@@ -2734,7 +2734,9 @@ def test_mode_d_trade_exit_reason_maps_wakeup_decision_bar(raw_reason, expected)
             ["OFF", "ST_ACTIVE_FREEZE", "OFF", "OFF", "OFF"], dtype=object
         ),
         "trade_filter_trigger_source": np.array(["none"] * 5, dtype=object),
-        "daily_reset_event": np.array([0, 0, 1, 0, 0], dtype=np.int8),
+        # Owner-specific wakeup mapping is tested without a competing reset.
+        # Reset priority has a dedicated collision test below.
+        "daily_reset_event": np.zeros(5, dtype=np.int8),
         "wakeup_exit_reason": np.array(
             ["none", "none", raw_reason, "none", "none"], dtype=object
         ),

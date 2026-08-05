@@ -568,15 +568,23 @@ def test_wf_grid_loader_resolves_volume_baseline_session_window_fields(tmp_path:
     assert baseline_session._end_minute == 0
 
 
-def test_repo_config_yaml_keeps_trade_filter_safe_default_disabled():
+def test_repo_config_yaml_uses_production_time_only_schedule():
     cfg = load_grid_config("config.yaml")
 
-    assert cfg.trade_filter.enabled is False
+    assert cfg.trade_filter.enabled is True
+    assert cfg.trade_filter.zigzag.enabled is False
     assert cfg.trade_filter.volume.enabled is False
-    assert cfg.trade_filter.volume.aggregation == "median"
-    assert cfg.trade_filter.volume.cycle_direction_gate is False
-    assert cfg.trade_filter.volume.baseline_session.enabled is False
-    assert cfg.trade_filter.volume.baseline_session.window is None
+    assert cfg.trade_filter.time_filter.enabled is True
+    assert cfg.trade_filter.time_filter.window is None
+    assert cfg.trade_filter.time_filter.windows == [
+        "09:00-12:00",
+        "16:00-18:00",
+    ]
+    assert cfg.trade_filter.time_filter._windows_minutes == (
+        (540, 720),
+        (960, 1080),
+    )
+    assert cfg.trade_filter.wakeup_regime.enabled is False
 
 
 def test_volume_defaults_materialize_only_after_validation():

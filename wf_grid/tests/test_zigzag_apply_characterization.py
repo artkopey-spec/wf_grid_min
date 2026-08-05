@@ -359,7 +359,7 @@ def test_zigzag_apply_characterization_matches_golden_snapshot(case_id):
 def test_zigzag_apply_diagnostics_keyset_dtypes_and_values_stable():
     digest, dtypes, shapes = _diagnostics_fingerprint_for_case("f8_time_filter_reset")
 
-    assert len(dtypes) == 46
+    assert len(dtypes) == 48
     assert set(dtypes) == {
         "b_component_ok",
         "candidate_age_bars",
@@ -397,9 +397,11 @@ def test_zigzag_apply_diagnostics_keyset_dtypes_and_values_stable():
         "state_at_bar_start",
         "stopping_started_at_index",
         "time_filter_enabled",
+        "time_filter_forced_exit",
         "time_filter_in_window",
         "time_filter_reset_event",
         "trade_filter_enabled",
+        "trade_filter_mode",
         "trade_filter_state",
         "trade_filter_state_code",
         "trade_filter_trigger_source",
@@ -409,7 +411,7 @@ def test_zigzag_apply_diagnostics_keyset_dtypes_and_values_stable():
         "zz_legs_since_lifecycle_start",
     }
     assert all(shape == (72,) for shape in shapes.values())
-    assert digest == "3934356f91e70621f688f0a2c5963425f061d87f65a357394360de6e4d50398d"
+    assert digest == "e06bd8f29da4e9f785bddc458865daba2f5c83651dcbed6ea6671f5f6ce07c24"
 
 
 def test_zigzag_apply_collect_filter_diagnostics_false_returns_none_and_same_positions():
@@ -419,6 +421,13 @@ def test_zigzag_apply_collect_filter_diagnostics_false_returns_none_and_same_pos
     assert enabled.filter_diagnostics is not None
     assert disabled.filter_diagnostics is None
     np.testing.assert_array_equal(enabled.positions, disabled.positions)
+    assert set(enabled.filter_diagnostics["trade_filter_mode"]) == {
+        "zigzag_and_time"
+    }
+    np.testing.assert_array_equal(
+        disabled.execution_metadata["time_filter_reset_event"],
+        enabled.filter_diagnostics["time_filter_reset_event"],
+    )
 
 
 def test_try_lifecycle_start_from_off_helper_exists_and_is_callable():

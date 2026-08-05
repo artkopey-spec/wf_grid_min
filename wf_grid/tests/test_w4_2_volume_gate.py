@@ -142,11 +142,14 @@ def _run(
     zigzag_signal: bool = True,
     daily_reset_event: np.ndarray | None = None,
     time_filter_events: tuple[np.ndarray, np.ndarray] | None = None,
+    time_filter_enabled: bool = False,
+    collect_filter_diagnostics: bool = True,
 ):
+    config = _TradeFilter(time_filter=_TimeFilter(enabled=time_filter_enabled))
     return apply(
         trend=np.array([1, 1, -1, -1, 1, -1, 1, -1][:n], dtype=np.int64),
         trade_mode="both",
-        trade_filter_config=_TradeFilter(),
+        trade_filter_config=config,
         zigzag_global_stats=_stats(mode),
         per_bar=_per_bar(
             mode=mode,
@@ -157,6 +160,7 @@ def _run(
         daily_reset_event=daily_reset_event,
         time_filter_events=time_filter_events,
         volume_runtime=_volume_runtime(n, blocked_bars),
+        collect_filter_diagnostics=collect_filter_diagnostics,
     )
 
 
@@ -229,6 +233,29 @@ def test_volume_blocks_start_after_time_filter_reset_returns_to_off():
     assert diag["trade_filter_state"][3] == "OFF"
     assert diag["trade_filter_state"][4] == "OFF"
     assert diag["filter_block_reason"][4] == "volume_below_baseline"
+
+
+def test_zigzag_volume_and_time_common_mode_and_lite_reset_metadata():
+    n = 6
+    in_window = np.ones(n, dtype=bool)
+    time_reset = np.array([0, 0, 0, 1, 0, 0], dtype=bool)
+    kwargs = {
+        "mode": "A",
+        "n": n,
+        "time_filter_enabled": True,
+        "time_filter_events": (in_window, time_reset),
+    }
+    full = _run(**kwargs)
+    lite = _run(**kwargs, collect_filter_diagnostics=False)
+
+    assert set(full.filter_diagnostics["trade_filter_mode"]) == {
+        "zigzag_volume_and_time"
+    }
+    assert lite.filter_diagnostics is None
+    np.testing.assert_array_equal(
+        lite.execution_metadata["time_filter_reset_event"],
+        time_reset.astype(np.int8),
+    )
 
 
 def test_volume_does_not_gate_wait_first_st_flip_to_active():

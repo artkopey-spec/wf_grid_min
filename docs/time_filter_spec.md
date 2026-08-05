@@ -1,155 +1,270 @@
-# time_filter — Specification v1
+# Time trade filter — runtime specification v2
 
-Документ описывает контракт фильтра торгового времени (`trade_filter.time_filter`).
+Документ фиксирует production-контракт `trade_filter.time_filter` после
+перехода на несколько окон, calendar-cycle reset и Time-only режим.
 
----
+## Активация и effective mode
+
+Корневой `trade_filter.enabled: true` требует хотя бы один активный подфильтр.
+Effective mode определяется только активными capabilities:
+
+| ZigZag | Volume | Time | Effective mode |
+|---|---|---|---|
+| false | false | true | `time_only` |
+| false | true | false | `volume_only` |
+| false | true | true | `volume_and_time` |
+| true | false | false | `zigzag_only` |
+| true | false | true | `zigzag_and_time` |
+| true | true | false | `zigzag_and_volume` |
+| true | true | true | `zigzag_volume_and_time` |
+
+При выключенном корне effective mode равен `disabled`. Inert ZigZag, Volume и
+wakeup templates не активируют runtime и не влияют на effective fingerprint.
 
 ## Конфигурация
+
+Новый формат:
 
 ```yaml
 trade_filter:
   enabled: true
-  ...
+  zigzag:
+    enabled: false
+  volume:
+    enabled: false
   time_filter:
-    enabled: true          # false = полный no-op
-    window: "09:00-19:00"  # HH:MM-HH:MM, обязателен при enabled=true
+    enabled: true
+    windows:
+      - "09:00-12:00"
+      - "16:00-18:00"
+  wakeup_regime:
+    enabled: false
 ```
 
-Поле `window` **обязательно** при `enabled: true`. При `enabled: false` поле
-`window` принимается (но не валидируется на range/format) для удобства хранения
-шаблона.
+Legacy-форма одного окна остаётся допустимой:
 
-### Ограничения формата `window`
-
-| Правило | Код ошибки |
-|---|---|
-| Отсутствует `window` при `enabled=true` | `time_filter_window_missing` |
-| Не соответствует `HH:MM-HH:MM` | `time_filter_window_invalid_format` |
-| `HH` вне `[00, 23]` | `time_filter_window_invalid_hours` |
-| `MM` вне `[00, 59]` | `time_filter_window_invalid_minutes` |
-| `start == end` (нулевая длина) | `time_filter_window_zero_length` |
-| `start > end` (cross-midnight) | `time_filter_window_cross_midnight` |
-| `enabled` не `bool` | `time_filter_enabled_invalid_type` |
-
-Cross-midnight окна (`"22:00-06:00"`) **запрещены в v1**. При необходимости
-нужно разделить на два сегмента на стороне data-loader'а.
-
----
-
-## Контракт окна `[start, end)`
-
-Бар включается в окно, если:
-
-```
-start_minutes <= minute_of_day(bar) < end_minutes
+```yaml
+time_filter:
+  enabled: true
+  window: "09:00-12:00"
 ```
 
-где `minute_of_day = hour * 60 + minute`. Секунды и наносекунды индекса
-**игнорируются** (`tz_localize(None)` + целочисленное деление).
+`window` и `windows` одновременно запрещены. Legacy `window` и одноэлементный
+`windows` имеют одинаковый effective snapshot.
 
-Пример для окна `"09:00-19:00"`:
+При `enabled: false` известные поля всё равно проходят schema/type validation,
+но содержимое не активирует Time runtime.
 
-| Время бара | `in_window` |
-|---|---|
-| `09:00` | `True` |
-| `18:59` | `True` |
-| `19:00` | `False` |
-| `08:59` | `False` |
+## Валидация окон
 
----
+Каждое окно имеет строгий формат `HH:MM-HH:MM` и трактуется как
+полуинтервал `[start, end)`.
+
+- часы: `00..23`;
+- минуты: `00..59`;
+- `start < end`;
+- cross-midnight не поддерживается;
+- список не может быть пустым;
+- дубликаты, overlap и touching запрещены;
+- после parsing окна сортируются по времени начала.
+
+Touching, например `09:00-12:00` и `12:00-13:00`, запрещён намеренно: граница
+между окнами является границей торговых циклов, а сливающиеся интервалы делали
+бы reset-семантику неоднозначной.
 
 ## Timezone
 
-Timezone берётся из индекса **as-is** — без тихой конвертации. Окно задаётся
-в той же временной зоне, что и данные CSV.
+Окна применяются в timezone индекса без неявной конвертации.
 
-- **МосБиржа (MSK, UTC+3, нет DST)**: tz-naive индекс в локальном времени —
-  окно `"09:00-19:00"` задаётся в MSK.
-- **tz-aware с DST**: при переводе часов возможны дубликаты/пропуски timestamp'ов.
-  Это ответственность data-loader'а — `time_filter` не выполняет DST-коррекцию.
-- **UTC-индекс**: окно задаётся в UTC. Для МосБиржи в UTC это `"06:00-16:00"`.
+- tz-naive MOEX данные должны уже содержать локальное MSK-время;
+- UTC-индекс требует окон в UTC;
+- для tz-aware индекса timezone снимается только после сохранения отображаемого
+  локального времени;
+- DST-нормализация остаётся обязанностью data loader.
 
----
+Time active требует монотонный `DatetimeIndex`. Time-only не требует `volume`,
+ZigZag stats или VolumeRuntime.
 
-## Эквивалентность с `daily_reset`
+## Membership и calendar-cycle reset
 
-`time_filter_reset` повторяет поведение `daily_reset` по всем аспектам:
+Бар находится внутри окна, если:
 
-| Аспект | Поведение |
-|---|---|
-| FSM wipe | `state → OFF`, counters → sentinel `-1` |
-| Lifecycle reset | `confirmed_legs_since_start`, `zz_legs_since_lifecycle_start` → `-1` |
-| Закрытие позиции | `positions[t+1] = 0` (open-to-open) |
-| ZigZag candidate-state | `compute_zigzag_per_bar` получает `combined_reset_event = daily_reset | time_filter_reset` |
-| `exit_reason` | `"filter_time_reset"` (см. приоритет ниже) |
+```text
+start_minute <= minute_of_day(bar) < end_minute
+```
 
-Reset-бар определяется как **первый бар вне окна** после бара внутри окна
-(или первый бар всего ряда, если он уже вне окна). Пока FSM находится вне
-окна, дополнительные reset-события не генерируются.
+Cycle identity:
 
----
+```text
+(локальная календарная дата, canonical window index)
+```
 
-## Приоритет reset-событий
+`time_filter_reset_event[t] = true`, когда предыдущий существующий бар
+принадлежал циклу, а текущий бар уже не принадлежит тому же циклу. Поэтому
+reset возникает не только на первом outside-баре, но и при:
 
-При одновременном срабатывании `daily_reset` и `time_filter_reset` приоритет
-принадлежит `daily_reset`:
+- переходе между разными окнами;
+- смене календарной даты;
+- gap, когда оба соседних существующих бара формально находятся внутри одного
+  времени окна, но относятся к разным датам.
 
-| `daily_reset_event[t]` | `time_filter_reset_event[t]` | `filter_block_reason[t]` |
+Oracle:
+
+| Предыдущий бар | Текущий бар | Reset |
 |---|---|---|
-| 1 | 0 | `"daily_reset"` |
-| 1 | 1 | `"daily_reset"` |
-| 0 | 1 | `"time_filter_reset"` |
+| outside | outside | false |
+| outside | inside | false |
+| inside, тот же date/window | inside | false |
+| inside | outside | true |
+| inside window A | inside window B | true |
+| inside day D | inside day D+1 | true |
 
-Trade-level `exit_reason` (приоритет сверху вниз):
+Первый бар полного runtime и первый бар любого slice всегда имеют
+`reset_event=false`.
 
-1. `filter_daily_reset`
-2. `filter_time_reset`
-3. `pending_open_trade_at_end`
-4. `filter_exit_b_immediate_off`
-5. `filter_stopping_opposite_flip`
-6. `st_flip`
+## Open-to-open исполнение и gap exposure
 
----
+Reset — decision event на баре `t`. При существующей позиции flatten
+исполняется на следующем доступном open:
 
-## Per-bar diagnostics
+```text
+position[t] != 0
+reset[t] = true
+position[t+1] = 0
+```
 
-Три ключа присутствуют в `filter_diagnostics` **всегда** при
-`trade_filter.enabled=true`:
+Reset-бар может ещё содержать старую позицию. Если reset находится на последнем
+баре, исполненного выхода нет и `filter_time_reset` не назначается.
 
-| Ключ | dtype | Значения |
-|---|---|---|
-| `time_filter_enabled` | `int8` | `1` broadcast (или `0` если `time_filter.enabled=false`) |
-| `time_filter_in_window` | `int8` | `1` — бар внутри окна, `0` — снаружи |
-| `time_filter_reset_event` | `int8` | `1` — бар является reset-событием, иначе `0` |
+Синтетические/pre-open исполнения не создаются. Поэтому PnL ценового gap до
+следующего существующего open сохраняется — Time filter не устраняет gap
+exposure.
 
-При `time_filter.enabled=false`: `time_filter_enabled` — все `0` (broadcast),
-`time_filter_in_window` — все `1` (как при отключённом подблоке: временное
-окно не режет вход; поведение эквивалентно полному «внутри окна»), `time_filter_reset_event`
-— все `0`.
+## Entry attempts
 
----
+Time-only создаёт entry attempt при:
 
-## Summary-счётчики
+```text
+ненулевом новом raw target
+OR открытии разрешённого cycle
+OR pending re-entry после reset
+```
 
-Добавляются в `filter_diagnostics_summary["counters"]` (WF Grid и Tester):
+Пассивные outside-бары не создают повторяющихся block reasons. После возврата в
+окно re-entry возможен без нового SuperTrend flip.
 
-| Ключ | Формула |
-|---|---|
-| `time_filter_enabled` | `bool(int(time_filter_enabled[0]))` |
-| `time_filter_reset_count` | `sum(time_filter_reset_event == 1)` |
-| `time_filter_bars_in_window` | `sum(time_filter_in_window == 1)` |
-| `time_filter_bars_out_window` | `sum(time_filter_in_window == 0)` |
+В owner modes Time gate применяется к реальным attempt events владельца:
 
-**Важно**: `time_filter_reset_count` **не входит** в `blocked_entry_signals`.
-Счётчик `blocked_entry_signals` включает только шесть `blocked_*` компонентов
-(аналогично `daily_reset_count`). Это соответствует §0.3 #10 плана.
+- ZigZag — к ZigZag lifecycle entry attempts;
+- Volume — к Volume cycle start attempts;
+- Time-only — к формуле выше.
 
----
+## Reset priority и exit attribution
 
-## Ограничения v1
+Приоритет reset reasons:
 
-- Cross-midnight окна запрещены.
-- Несколько непересекающихся окон в одном дне не поддерживаются.
-- Режим `segmentation.mode: equal_blocks` несовместим с
-  `trade_filter.enabled: true` (существующее ограничение).
-- DST-коррекция не выполняется — ответственность на data-loader'е.
+1. `daily_reset`;
+2. `time_filter_reset`;
+3. owner-specific reason.
+
+Приоритет trade exit attribution:
+
+1. `filter_daily_reset`;
+2. `filter_time_reset`;
+3. owner-specific forced exit;
+4. `pending_open_trade_at_end`;
+5. baseline/FSM exit.
+
+`filter_time_reset` означает только фактически исполненный переход
+`nonzero → zero`.
+
+## Precompute и slicing
+
+Direct, WF и Tester строят `TimeFilterRuntime` на полном датасете один раз.
+WF/tester periods получают slice готовых массивов. Slice:
+
+- не парсит schedule повторно;
+- не нормализует timestamps повторно;
+- очищает первый reset;
+- не наследует position/FSM state из предыдущего периода.
+
+В multiprocessing runtime передаётся через worker initializer, а не в каждой
+grid task.
+
+## Diagnostics capabilities
+
+Common при любом active filter:
+
+```text
+trade_filter_enabled
+trade_filter_mode
+filter_allowed_entry
+filter_block_reason
+daily_reset_event
+```
+
+Time capability:
+
+```text
+time_filter_enabled
+time_filter_in_window
+time_filter_reset_event
+```
+
+ZigZag, Volume и wakeup поля присутствуют только при соответствующей active
+capability. Time-only не создаёт фиктивные `trade_filter_state`,
+`trade_filter_trigger_source`, median/ZZ stop или Volume arrays.
+
+Summary Time-поля:
+
+```text
+time_filter_reset_count
+time_filter_bars_in_window
+time_filter_bars_out_window
+time_filter_blocked_entry_count
+time_filter_forced_exit_count
+```
+
+Cycle export для Time-only имеет metadata status `not_applicable`.
+
+## Snapshots и fingerprint
+
+`trade_filter_public_snapshot(tf)` содержит только пользовательские поля и
+сохраняет исходный порядок `windows`. Ключи, начинающиеся с `_`, запрещены.
+
+`trade_filter_effective_snapshot(tf)` содержит:
+
+```text
+effective_mode
+zigzag_active
+volume_active
+time_filter_active
+canonical_windows_minutes
+time_reset_semantics = calendar_cycle_close_reset
+```
+
+Effective snapshot используется в WF fingerprint и Tester_Config. Порядок
+окон, legacy/modern запись одного окна и inactive templates не меняют effective
+identity.
+
+## Tester batch limitation
+
+Низкоуровневый `equal_blocks` с active trade filter остаётся unsupported.
+Canonical batch не считает это общим failure: он выводит warning, записывает
+
+```text
+status = skipped_unsupported
+reason = trade_filter_equal_blocks_not_supported
+```
+
+и продолжает legacy-period run.
+
+## Migration
+
+Active Time теперь создаёт reset при переходе между календарными датами или
+разными окнами, даже когда два соседних существующих бара оба входят в
+разрешённое время. Это принятая breaking migration для Time-on результатов:
+overnight positions, returns, trades и exit reasons могут измениться.
+
+Time-off режимы сохраняют прежнее поведение. Подробный checklist и rollback:
+[time_filter_multi_window_migration.md](time_filter_multi_window_migration.md).

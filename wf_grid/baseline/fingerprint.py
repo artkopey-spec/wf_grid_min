@@ -32,7 +32,11 @@ from typing import Any, Iterable, Mapping, Optional
 import numpy as np
 import pandas as pd
 
-from supertrend_optimizer.core.trade_filter_config import is_volume_enabled
+from supertrend_optimizer.core.trade_filter_config import (
+    is_trade_filter_enabled,
+    is_volume_enabled,
+    trade_filter_effective_snapshot,
+)
 
 # Schema history:
 #   v1 — initial baseline format (frames + diagnostics only).
@@ -323,6 +327,18 @@ def _volume_snapshot_from_result_config(result: Any) -> dict[str, Any]:
     }
 
 
+def _trade_filter_effective_snapshot_from_result_config(
+    result: Any,
+) -> dict[str, Any]:
+    config = getattr(result, "config", None)
+    tf = getattr(config, "trade_filter", None)
+    if not is_trade_filter_enabled(tf):
+        return {}
+    return {
+        "trade_filter_effective_snapshot": trade_filter_effective_snapshot(tf)
+    }
+
+
 def compute_pipeline_fingerprint(
     result: Any,
     *,
@@ -355,6 +371,7 @@ def compute_pipeline_fingerprint(
     if data is not None:
         metadata["data"] = _data_fingerprint(data)
     metadata.update(_volume_snapshot_from_result_config(result))
+    metadata.update(_trade_filter_effective_snapshot_from_result_config(result))
     if extra_metadata:
         metadata.update(dict(extra_metadata))
 

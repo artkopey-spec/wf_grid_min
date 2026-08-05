@@ -28,9 +28,12 @@ import numpy as np
 
 from supertrend_optimizer.core.calculator import calculate_supertrend
 from supertrend_optimizer.core.trade_filter_config import (
+    is_any_trade_subfilter_enabled,
+    is_time_filter_enabled,
     is_trade_filter_enabled,
     is_volume_enabled,
     is_zigzag_enabled,
+    resolve_trade_filter_mode,
 )
 from supertrend_optimizer.utils.enums import ExecutionModel
 
@@ -56,6 +59,9 @@ class RawBacktestArtifacts:
     exit_bar: "Optional[int]"
     exit_drawdown: "Optional[float]"
     filter_diagnostics: "Optional[Dict[str, np.ndarray]]" = field(default=None)
+    filter_execution_metadata: "Optional[Dict[str, np.ndarray]]" = field(
+        default=None
+    )
     filter_config_snapshot: Optional[dict] = None
 
 
@@ -325,6 +331,7 @@ def run_backtest_fast(
     index: Any = None,                        # NEW: trailing optional for daily_reset
     volume: Any = None,
     *,
+    time_filter_runtime: Any = None,
     collect_filter_diagnostics: bool = True,
 ) -> RawBacktestArtifacts:
     """Run fast backtest without DataFrame overhead.
@@ -400,28 +407,57 @@ def run_backtest_fast(
 
     # Step 2: Positions — enabled path uses FSM; disabled path uses generate_positions.
     filter_diagnostics: "Optional[Dict[str, np.ndarray]]" = None
+    filter_execution_metadata: "Optional[Dict[str, np.ndarray]]" = None
     filter_config_snapshot: Optional[dict] = None
     zigzag_enabled = is_zigzag_enabled(trade_filter_config)
     volume_enabled = is_volume_enabled(trade_filter_config)
-    filter_enabled = zigzag_enabled or volume_enabled
+    time_filter_enabled = is_time_filter_enabled(trade_filter_config)
     zigzag_cfg = getattr(trade_filter_config, "zigzag", None)
-    volume_cfg = getattr(trade_filter_config, "volume", None)
-    subfilters_explicitly_disabled = (
+    legacy_zigzag_enabled = (
         is_trade_filter_enabled(trade_filter_config)
-        and getattr(zigzag_cfg, "enabled", None) is False
-        and (volume_cfg is None or getattr(volume_cfg, "enabled", None) is False)
+        and zigzag_cfg is not None
+        and not hasattr(zigzag_cfg, "enabled")
+        and getattr(trade_filter_config, "type", None) == "zigzag_st_mode"
     )
-    if subfilters_explicitly_disabled:
+    zigzag_enabled = zigzag_enabled or legacy_zigzag_enabled
+    if (
+        is_trade_filter_enabled(trade_filter_config)
+        and not is_any_trade_subfilter_enabled(trade_filter_config)
+        and not legacy_zigzag_enabled
+    ):
         raise RuntimeError(
             "at least one trade subfilter must be enabled when "
             "trade_filter.enabled=true"
         )
+    effective_mode = (
+        resolve_trade_filter_mode(trade_filter_config)
+        if not legacy_zigzag_enabled
+        else "zigzag_only"
+    )
     if zigzag_enabled and zigzag_global_stats is None:
         raise RuntimeError(
             "zigzag_global_stats required when trade_filter.zigzag.enabled=true"
         )
     if volume_enabled and volume_runtime is None:
         raise RuntimeError("volume_runtime required when trade_filter.volume.enabled=true")
+
+    resolved_time_runtime = None
+    time_filter_events = None
+    if time_filter_enabled:
+        from supertrend_optimizer.core._reset_events import (
+            resolve_time_filter_runtime,
+        )
+
+        resolved_time_runtime = resolve_time_filter_runtime(
+            trade_filter_config=trade_filter_config,
+            index=index,
+            n=len(trend),
+            runtime=time_filter_runtime,
+        )
+        time_filter_events = (
+            resolved_time_runtime.in_window,
+            resolved_time_runtime.reset_event,
+        )
 
     if zigzag_enabled:
         # Lazy import to avoid circular dependency at module load time.
@@ -441,10 +477,14 @@ def run_backtest_fast(
             volume_runtime=volume_runtime if volume_enabled else None,
             volume=volume,
             commission_rate=commission,
+            time_filter_events=time_filter_events,
             collect_filter_diagnostics=collect_filter_diagnostics,
         )
         positions = filter_result.positions
         filter_diagnostics = filter_result.filter_diagnostics
+        filter_execution_metadata = getattr(
+            filter_result, "execution_metadata", None
+        )
         filter_config_snapshot = getattr(filter_result, "filter_config_snapshot", None)
     elif volume_enabled:
         from supertrend_optimizer.core.volume_only_filter import apply as _volume_apply
@@ -458,10 +498,30 @@ def run_backtest_fast(
             volume_runtime=volume_runtime,
             execution_model=execution_model,
             index=index,
+            time_filter_events=time_filter_events,
             collect_filter_diagnostics=collect_filter_diagnostics,
         )
         positions = filter_result.positions
         filter_diagnostics = filter_result.filter_diagnostics
+        filter_execution_metadata = getattr(
+            filter_result, "execution_metadata", None
+        )
+        filter_config_snapshot = filter_result.filter_config_snapshot
+    elif effective_mode == "time_only":
+        from supertrend_optimizer.core.time_only_filter import apply as _time_apply
+
+        if resolved_time_runtime is None:
+            raise RuntimeError("time_only mode requires TimeFilterRuntime")
+        filter_result = _time_apply(
+            trend=trend,
+            trade_mode=trade_mode,
+            time_filter_runtime=resolved_time_runtime,
+            execution_model=execution_model,
+            collect_filter_diagnostics=collect_filter_diagnostics,
+        )
+        positions = filter_result.positions
+        filter_diagnostics = filter_result.filter_diagnostics
+        filter_execution_metadata = filter_result.execution_metadata
         filter_config_snapshot = filter_result.filter_config_snapshot
     else:
         # Disabled path — bit-identical to pre-WP7 baseline.
@@ -507,6 +567,11 @@ def run_backtest_fast(
                 filter_diagnostics = {
                     k: v[:exit_bar + 1] for k, v in filter_diagnostics.items()
                 }
+            if filter_execution_metadata is not None:
+                filter_execution_metadata = {
+                    k: v[:exit_bar + 1]
+                    for k, v in filter_execution_metadata.items()
+                }
 
             # Verify invariants
             if not (len(equity_curve) == len(positions) == len(trend)):
@@ -533,5 +598,6 @@ def run_backtest_fast(
         exit_bar=exit_bar,
         exit_drawdown=exit_dd,
         filter_diagnostics=filter_diagnostics,
+        filter_execution_metadata=filter_execution_metadata,
         filter_config_snapshot=filter_config_snapshot,
     )

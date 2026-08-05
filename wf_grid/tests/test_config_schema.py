@@ -1259,14 +1259,19 @@ class TestAllRepoConfigsLoad:
         found = []
         for pattern in ("**/*.yaml", "**/*.yml"):
             for p in self._REPO_ROOT.glob(pattern):
+                relative_parts = {
+                    part.casefold() for part in p.relative_to(self._REPO_ROOT).parts
+                }
                 # Skip donor/ subtree
                 try:
                     p.relative_to(donor_dir)
                     continue  # inside donor/
                 except ValueError:
                     pass
-                # Skip pytest cache
-                if ".pytest_cache" in p.parts:
+                # Skip generated test artifacts.  Pytest basetemp directories may
+                # live below repo/tmp and contain deliberately invalid YAML
+                # fixtures which are not repository configuration.
+                if ".pytest_cache" in relative_parts or "tmp" in relative_parts:
                     continue
                 # Skip local tester-config workspaces. These files use the
                 # tester CLI DSL, not the walk-forward grid config schema.

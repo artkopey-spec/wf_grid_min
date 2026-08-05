@@ -167,12 +167,19 @@ def build_signal_events(
     # WP-T6: pre-extract filter arrays for O(1) per-bar lookup inside the loop.
     filter_enabled = filter_diagnostics is not None
     if filter_enabled:
-        _fd_state = filter_diagnostics["trade_filter_state"]
+        _fd_state = filter_diagnostics.get("trade_filter_state")
         _fd_allowed = filter_diagnostics.get("filter_allowed_entry")
         if _fd_allowed is None:
             _fd_allowed = filter_diagnostics.get("volume_condition_allowed")
-        _fd_reason = filter_diagnostics["filter_block_reason"]
+        _fd_reason = filter_diagnostics.get("filter_block_reason")
+        if _fd_reason is None:
+            _fd_reason = np.full(n, "none", dtype=object)
         _fd_trigger = filter_diagnostics.get("trade_filter_trigger_source")
+        _filter_column_names = (
+            _FILTER_COLUMN_NAMES
+            if _fd_state is not None
+            else ("filter_decision", "filter_block_reason")
+        )
         _default_trigger = (
             "volume" if "volume_regime" in filter_diagnostics else "none"
         )
@@ -241,7 +248,9 @@ def build_signal_events(
                 t,
                 default_trigger=_default_trigger,
             )
-            _close_fld = _na_filter_fields()
+            _close_fld = _na_filter_fields(
+                include_capability_fields=_fd_state is not None
+            )
 
         if effective_mode == "long":
             if prev == 1:
@@ -360,7 +369,11 @@ def build_signal_events(
     _base_cols = list(_COLUMN_NAMES)
     if filter_enabled:
         _insert_at = _base_cols.index("is_reversal") + 1
-        _ordered_cols = _base_cols[:_insert_at] + list(_FILTER_COLUMN_NAMES) + _base_cols[_insert_at:]
+        _ordered_cols = (
+            _base_cols[:_insert_at]
+            + list(_filter_column_names)
+            + _base_cols[_insert_at:]
+        )
     else:
         _ordered_cols = _base_cols
 
@@ -393,18 +406,23 @@ def build_signal_events(
 # WP-T6 helpers
 # ---------------------------------------------------------------------------
 
-def _na_filter_fields() -> dict:
+def _na_filter_fields(*, include_capability_fields: bool = True) -> dict:
     """Return the N/A sentinel dict for close-rows (plan §9.1.1)."""
-    return {
-        "filter_state_at_signal": _NA_FILTER,
+    fields = {
         "filter_decision":        _NA_FILTER,
         "filter_block_reason":    _NA_FILTER,
-        "filter_trigger_source":  _NA_FILTER,
     }
+    if include_capability_fields:
+        return {
+            "filter_state_at_signal": _NA_FILTER,
+            **fields,
+            "filter_trigger_source": _NA_FILTER,
+        }
+    return fields
 
 
 def _lookup_open_filter_fields(
-    fd_state: np.ndarray,
+    fd_state: Optional[np.ndarray],
     fd_allowed: Optional[np.ndarray],
     fd_reason: np.ndarray,
     fd_trigger: Optional[np.ndarray],
@@ -418,7 +436,6 @@ def _lookup_open_filter_fields(
     ``trade_filter_trigger_source``. Standalone volume does not, so use
     ``volume_condition_allowed`` when present and a stable trigger sentinel.
     """
-    state = str(fd_state[t])
     reason = str(fd_reason[t])
     allowed = int(fd_allowed[t]) if fd_allowed is not None else int(reason == "none")
     trigger = str(fd_trigger[t]) if fd_trigger is not None else default_trigger
@@ -428,12 +445,17 @@ def _lookup_open_filter_fields(
     else:
         decision = _BLOCK_REASON_TO_DECISION.get(reason, f"entry_blocked_{reason}")
 
-    return {
-        "filter_state_at_signal": state,
+    fields = {
         "filter_decision":        decision,
         "filter_block_reason":    reason,
-        "filter_trigger_source":  trigger,
     }
+    if fd_state is not None:
+        return {
+            "filter_state_at_signal": str(fd_state[t]),
+            **fields,
+            "filter_trigger_source": trigger,
+        }
+    return fields
 
 
 # Internal column names (snake_case) — mapped to display names in excel_tester

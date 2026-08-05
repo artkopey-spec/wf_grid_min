@@ -17,6 +17,7 @@ import sys
 from textwrap import dedent
 
 from supertrend_optimizer.cli.tester import load_tester_config
+from supertrend_optimizer.core.trade_filter_config import resolve_trade_filter_mode
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -61,10 +62,11 @@ def test_root_config_loads_as_current_operator_sample() -> None:
     tf_cfg = cfg.get("trade_filter")
     assert tf_cfg is not None
     assert tf_cfg.enabled is True
-    assert tf_cfg.zigzag.mode == "D"
-    assert tf_cfg.lifecycle.exit_off_mode == "exit C"
-    assert tf_cfg.wakeup_regime is not None
-    assert tf_cfg.wakeup_regime.enabled is True
+    assert resolve_trade_filter_mode(tf_cfg) == "time_only"
+    assert tf_cfg.zigzag.enabled is False
+    assert tf_cfg.volume.enabled is False
+    assert tf_cfg.time_filter.windows == ["09:00-12:00", "16:00-18:00"]
+    assert tf_cfg.wakeup_regime.enabled is False
 
 
 def test_legacy_segmentation_accepts_zigzag_st_mode_fixture(tmp_path: Path) -> None:

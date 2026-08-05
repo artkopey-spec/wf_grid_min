@@ -898,6 +898,8 @@ def run_backtest(args: argparse.Namespace) -> str:
     validate_paths(args.csv, args.out)
 
     df = load_ohlc_csv(args.csv)
+    if "vol" in df.columns and "volume" not in df.columns:
+        df = df.rename(columns={"vol": "volume"})
     df = validate_ohlc_data(df)
 
     return run_backtest_with_df(

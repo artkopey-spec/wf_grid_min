@@ -161,6 +161,8 @@ def main() -> None:
 
     try:
         df = load_ohlc_csv(args.csv)
+        if "vol" in df.columns and "volume" not in df.columns:
+            df = df.rename(columns={"vol": "volume"})
         df = validate_ohlc_data(df)
         df = validate_volume_filter_data(df, cfg.get("trade_filter"))
     except (FileNotFoundError, DataValidationError, pd.errors.ParserError, ValueError) as e:

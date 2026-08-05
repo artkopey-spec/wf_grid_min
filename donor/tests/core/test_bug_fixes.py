@@ -529,6 +529,32 @@ class TestBug03CommissionConservation:
         actual = df['commission_pct'].sum()
         assert abs(actual - expected) < 1e-4
 
+    def test_many_tiny_commissions_do_not_trip_internal_conservation(self):
+        """
+        The internal conservation check must use unrounded commission.
+
+        commission_pct is rounded to 6 decimals per trade for reporting. With
+        many trades and a tiny fractional commission rate, summing those
+        rounded display values can drift beyond the strict invariant threshold.
+        """
+        n_trades = 1000
+        positions = np.zeros(n_trades * 2 + 1, dtype=np.int8)
+        positions[1::2] = 1
+        returns = np.zeros(len(positions) - 1)
+        prices = np.full(len(positions), 100.0)
+        index = pd.RangeIndex(len(positions))
+        commission_rate = 0.00000347826
+
+        df = extract_trades(
+            positions, returns, prices, index, commission_rate,
+            execution_model="open_to_open",
+        )
+
+        expected = self._bar_level_total_comm(positions, commission_rate)
+        rounded_trade_total = df['commission_pct'].sum()
+        assert len(df) == n_trades
+        assert abs(rounded_trade_total - expected) > 1e-4
+
 
 # ===========================================================================
 # OPEN_TO_OPEN lag invariant (regression)

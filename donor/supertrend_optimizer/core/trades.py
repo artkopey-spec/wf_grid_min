@@ -119,6 +119,41 @@ def closed_leg_trade_economics(
     }
 
 
+def _closed_leg_commission_pct_unrounded(
+    entry_idx: int,
+    exit_idx: int,
+    positions: np.ndarray,
+    commission_per_bar: np.ndarray,
+    commission_rate: float,
+) -> float:
+    """Return exact commission attribution for invariant checks."""
+    entry_idx = int(entry_idx)
+    exit_idx = int(exit_idx)
+    pos_arr = np.asarray(positions)
+    commission_pct = float(np.sum(commission_per_bar[entry_idx:exit_idx]) * 100.0)
+
+    if entry_idx > 0 and (entry_idx - 1) < len(commission_per_bar):
+        if pos_arr[entry_idx - 1] == 0:
+            commission_pct += float(commission_per_bar[entry_idx - 1] * 100.0)
+        elif (
+            pos_arr[entry_idx - 1] != 0
+            and pos_arr[entry_idx] != 0
+            and (pos_arr[entry_idx - 1] > 0) != (pos_arr[entry_idx] > 0)
+        ):
+            commission_pct += float(commission_rate * 100.0)
+
+    if (
+        exit_idx > entry_idx
+        and 0 < exit_idx < len(pos_arr)
+        and pos_arr[exit_idx - 1] != 0
+        and pos_arr[exit_idx] != 0
+        and (pos_arr[exit_idx - 1] > 0) != (pos_arr[exit_idx] > 0)
+    ):
+        commission_pct -= float(commission_rate * 100.0)
+
+    return commission_pct
+
+
 def extract_trades(
     positions: np.ndarray,
     returns: np.ndarray,
@@ -279,7 +314,16 @@ def extract_trades(
     if trades and commission_rate > 0:
         commission_per_bar = np.abs(np.diff(positions)) * commission_rate
         total_bar_comm_pct = float(np.sum(commission_per_bar) * 100.0)
-        total_trade_comm_pct = sum(t['commission_pct'] for t in trades)
+        total_trade_comm_pct = sum(
+            _closed_leg_commission_pct_unrounded(
+                t['entry_index'],
+                t['exit_index'],
+                positions,
+                commission_per_bar,
+                commission_rate,
+            )
+            for t in trades
+        )
         if not abs(total_trade_comm_pct - total_bar_comm_pct) < 1e-4:
             raise ValueError(
                 f"Commission conservation violated: "

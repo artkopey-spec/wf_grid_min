@@ -4,10 +4,11 @@ Excel export functionality for SuperTrend Tester.
 This module exports tester results to Excel format with metrics and trades.
 Phase 2 (WP-T7): Conditional filter columns in Signals/Trades, optional
 FilterDiagnostics_100 / ZigZag_Trigger_Events / filters_summary sheets,
-Summary filter block — all gated on trade_filter_config.enabled and
+Summary filter block вЂ” all gated on trade_filter_config.enabled and
 diagnostics flags.  Disabled path is bit-identical to the pre-Phase-2 baseline.
 """
 
+from bisect import bisect_left
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 from datetime import datetime
 from pathlib import Path
@@ -27,9 +28,6 @@ from supertrend_optimizer.core.zigzag_st_filter import (
     compute_zigzag_per_bar,
 )
 
-
-# Full-bar filter diagnostics sheet (333k+ rows) remains heavy for XLSX export.
-_FILTER_DIAGNOSTICS_100_MAX_ROWS = 100_000
 
 
 # ---------------------------------------------------------------------------
@@ -58,7 +56,7 @@ SIGNALS_DISPLAY_NAMES = {
     "st_color_before":                "ST Color Before",
     "st_color_after":                 "ST Color After",
     "is_reversal":                    "Is Reversal",
-    # WP-T7: 4 filter columns (plan §9.5 — after Is Reversal, before Exec Price)
+    # WP-T7: 4 filter columns (plan В§9.5 вЂ” after Is Reversal, before Exec Price)
     "filter_state_at_signal":         "Filter State at Signal",
     "filter_decision":                "Filter Decision",
     "filter_block_reason":            "Filter Block Reason",
@@ -93,7 +91,7 @@ TRADES_DISPLAY_NAMES = {
     "commission_pct":      "Commission %",
     "net_pnl_pct":         "Net PnL %",
     "supertrend_color":    "SuperTrend Color",
-    # WP-T7: filter trade diagnostics (plan §9.5 — after canonical donor columns)
+    # WP-T7: filter trade diagnostics (plan В§9.5 вЂ” after canonical donor columns)
     "entry_filter_state":         "Entry Filter State",
     "entry_trigger_source":       "Entry Trigger Source",
     "wakeup_cycle_exit_reason":   "Wakeup Cycle Exit Reason",
@@ -110,12 +108,12 @@ _FILTER_TRADE_COLUMN_KEYS: frozenset = frozenset({
     "exit_reason",
 })
 
-# Canonical trade column display names (no filter cols — for disabled-path empty header)
+# Canonical trade column display names (no filter cols вЂ” for disabled-path empty header)
 _CANONICAL_TRADE_DISPLAY_COLS: List[str] = [
     v for k, v in TRADES_DISPLAY_NAMES.items() if k not in _FILTER_TRADE_COLUMN_KEYS
 ]
 
-# Per-bar filter diagnostics display names (for FilterDiagnostics_100 sheet, plan §3.3.1)
+# Per-bar filter diagnostics display names (for FilterDiagnostics_100 sheet, plan В§3.3.1)
 FILTER_DIAGNOSTICS_100_DISPLAY_NAMES: Dict[str, str] = {
     "trade_filter_enabled":         "Filter Enabled",
     "trade_filter_state":           "Filter State",
@@ -123,7 +121,7 @@ FILTER_DIAGNOSTICS_100_DISPLAY_NAMES: Dict[str, str] = {
     "zigzag_reversal_threshold":    "Reversal Threshold",
     "candidate_height_pct":         "Candidate Height %",
     "candidate_trigger_threshold":  "Candidate Trigger Threshold",
-    # WP-V3-8: new v3 display columns (§11.1), ordered after Candidate Trigger Threshold
+    # WP-V3-8: new v3 display columns (В§11.1), ordered after Candidate Trigger Threshold
     "zigzag_mode":                              "ZigZag Mode",
     "candidate_age_bars":                       "Candidate Age Bars",
     "candidate_leg_direction":                  "Candidate Leg Direction",
@@ -150,14 +148,14 @@ FILTER_DIAGNOSTICS_100_DISPLAY_NAMES: Dict[str, str] = {
     "exit_off_zz_leg_count":        "Exit-OFF ZZ Leg Count",
     "zz_legs_since_lifecycle_start": "ZZ Legs Since Start",
     "zz_leg_stop_triggered":        "ZZ Leg Stop Triggered",
-    # Plan v3 §6.1: new per-bar columns
+    # Plan v3 В§6.1: new per-bar columns
     "exit_b_immediate_off_triggered": "Exit-B Immediate OFF Triggered",
     "exit_b_immediate_off_config":    "Exit-B Immediate OFF Config",
     "filter_allowed_entry":         "Filter Allowed Entry",
     "filter_block_reason":          "Filter Block Reason",
     "trade_filter_state_code":      "Filter State Code",
     "st_flip_dir":                  "ST Flip Direction",
-    # docs/time_filter_plan_v1_final.txt §6.4 per-bar columns
+    # docs/time_filter_plan_v1_final.txt В§6.4 per-bar columns
     "time_filter_enabled":          "Time Filter Enabled",
     "time_filter_in_window":        "Time Filter In Window",
     "time_filter_reset_event":      "Time Filter Reset Event",
@@ -207,7 +205,7 @@ FILTER_DIAGNOSTICS_100_DISPLAY_NAMES: Dict[str, str] = {
     "position_freeze_release_action":           "Wakeup Position Freeze Release Action",
 }
 
-# ZigZag_Trigger_Events sheet column order (plan §9.2, extended by WP-V3-8 §11.2)
+# ZigZag_Trigger_Events sheet column order (plan В§9.2, extended by WP-V3-8 В§11.2)
 _TRIGGER_EVENTS_COLUMNS = (
     "Trigger ID",
     "Trigger Bar",
@@ -220,7 +218,7 @@ _TRIGGER_EVENTS_COLUMNS = (
     "Candidate Height %",
     "Triggered Lifecycle Start",
     "Linked Trade ID",
-    # WP-V3-8: new §11.2 columns
+    # WP-V3-8: new В§11.2 columns
     "ZigZag Mode",
     "Immediate Candidate Entry Used",
     "Immediate Candidate Entry Block Reason",
@@ -229,32 +227,32 @@ _TRIGGER_EVENTS_COLUMNS = (
     "Candidate Duration Gate Passed",
 )
 
-# Cycle sheet contract (plan_xlsx_cycle_sheet_implementation §4, §11).
+# Cycle sheet contract (plan_xlsx_cycle_sheet_implementation В§4, В§11).
 CYCLE_SHEET_NAME = "cycle"
 CYCLE_SHEET_COLUMNS: Tuple[str, ...] = (
-    "Начало цикла",
-    "Конец цикла",
-    "Направление цикла",
-    "Баров в цикле",
-    "Ног ZigZag в цикле",
-    "Медиана ног",
-    "Ног выше порога триггера кандидата",
-    "Размер цикла, %",
-    "ID цикла",
+    "РќР°С‡Р°Р»Рѕ С†РёРєР»Р°",
+    "РљРѕРЅРµС† С†РёРєР»Р°",
+    "РќР°РїСЂР°РІР»РµРЅРёРµ С†РёРєР»Р°",
+    "Р‘Р°СЂРѕРІ РІ С†РёРєР»Рµ",
+    "РќРѕРі ZigZag РІ С†РёРєР»Рµ",
+    "РњРµРґРёР°РЅР° РЅРѕРі",
+    "РќРѕРі РІС‹С€Рµ РїРѕСЂРѕРіР° С‚СЂРёРіРіРµСЂР° РєР°РЅРґРёРґР°С‚Р°",
+    "Р Р°Р·РјРµСЂ С†РёРєР»Р°, %",
+    "ID С†РёРєР»Р°",
     "Start bar index",
     "End bar index",
-    "Цена начала",
-    "Цена конца",
-    "High цикла",
-    "Low цикла",
-    "Макс. движение по циклу, %",
-    "Макс. просадка внутри цикла, %",
-    "Причина завершения",
-    "Макс. высота ноги",
-    "Доля ног выше порога, %",
-    "Сделок в цикле",
-    "Фин результат цикла, %",
-    "% сделок с положительным фин результатом в цикле",
+    "Р¦РµРЅР° РЅР°С‡Р°Р»Р°",
+    "Р¦РµРЅР° РєРѕРЅС†Р°",
+    "High С†РёРєР»Р°",
+    "Low С†РёРєР»Р°",
+    "РњР°РєСЃ. РґРІРёР¶РµРЅРёРµ РїРѕ С†РёРєР»Сѓ, %",
+    "РњР°РєСЃ. РїСЂРѕСЃР°РґРєР° РІРЅСѓС‚СЂРё С†РёРєР»Р°, %",
+    "РџСЂРёС‡РёРЅР° Р·Р°РІРµСЂС€РµРЅРёСЏ",
+    "РњР°РєСЃ. РІС‹СЃРѕС‚Р° РЅРѕРіРё",
+    "Р”РѕР»СЏ РЅРѕРі РІС‹С€Рµ РїРѕСЂРѕРіР°, %",
+    "РЎРґРµР»РѕРє РІ С†РёРєР»Рµ",
+    "Р¤РёРЅ СЂРµР·СѓР»СЊС‚Р°С‚ С†РёРєР»Р°, %",
+    "% СЃРґРµР»РѕРє СЃ РїРѕР»РѕР¶РёС‚РµР»СЊРЅС‹Рј С„РёРЅ СЂРµР·СѓР»СЊС‚Р°С‚РѕРј РІ С†РёРєР»Рµ",
 )
 
 _EXIT_C_REASONS = frozenset({
@@ -268,26 +266,26 @@ _EXIT_C_REASONS = frozenset({
 # Cycle sheet contract for volume-only mode (volume_enabled=True, zigzag_enabled=False).
 # ZigZag-specific fields (legs, medians, thresholds) are intentionally excluded.
 VOLUME_CYCLE_SHEET_COLUMNS: Tuple[str, ...] = (
-    "Начало цикла",
-    "Конец цикла",
-    "Направление цикла",
-    "Баров в цикле",
-    "Размер цикла, %",
-    "ID цикла",
+    "РќР°С‡Р°Р»Рѕ С†РёРєР»Р°",
+    "РљРѕРЅРµС† С†РёРєР»Р°",
+    "РќР°РїСЂР°РІР»РµРЅРёРµ С†РёРєР»Р°",
+    "Р‘Р°СЂРѕРІ РІ С†РёРєР»Рµ",
+    "Р Р°Р·РјРµСЂ С†РёРєР»Р°, %",
+    "ID С†РёРєР»Р°",
     "Start bar index",
     "End bar index",
-    "Цена начала",
-    "Цена конца",
-    "High цикла",
-    "Low цикла",
-    "Макс. движение по циклу, %",
-    "Макс. просадка внутри цикла, %",
-    "Причина завершения",
-    "Режим объёма (старт)",
-    "Ср. медиана объёма",
-    "Сделок в цикле",
-    "Фин результат цикла, %",
-    "% сделок с положительным фин результатом в цикле",
+    "Р¦РµРЅР° РЅР°С‡Р°Р»Р°",
+    "Р¦РµРЅР° РєРѕРЅС†Р°",
+    "High С†РёРєР»Р°",
+    "Low С†РёРєР»Р°",
+    "РњР°РєСЃ. РґРІРёР¶РµРЅРёРµ РїРѕ С†РёРєР»Сѓ, %",
+    "РњР°РєСЃ. РїСЂРѕСЃР°РґРєР° РІРЅСѓС‚СЂРё С†РёРєР»Р°, %",
+    "РџСЂРёС‡РёРЅР° Р·Р°РІРµСЂС€РµРЅРёСЏ",
+    "Р РµР¶РёРј РѕР±СЉС‘РјР° (СЃС‚Р°СЂС‚)",
+    "РЎСЂ. РјРµРґРёР°РЅР° РѕР±СЉС‘РјР°",
+    "РЎРґРµР»РѕРє РІ С†РёРєР»Рµ",
+    "Р¤РёРЅ СЂРµР·СѓР»СЊС‚Р°С‚ С†РёРєР»Р°, %",
+    "% СЃРґРµР»РѕРє СЃ РїРѕР»РѕР¶РёС‚РµР»СЊРЅС‹Рј С„РёРЅ СЂРµР·СѓР»СЊС‚Р°С‚РѕРј РІ С†РёРєР»Рµ",
     "Cycle Initial Direction",
     "Cycle Trade Allowed",
     "Cycle Suppressed Reason",
@@ -680,7 +678,7 @@ def _build_cycle_sheet_df(
     trigger_source_arr = arrays["trade_filter_trigger_source"][:n]
     candidate_dir_arr = arrays["candidate_leg_direction"][:n]
     daily_reset_arr = arrays["daily_reset_event"][:n]
-    # docs/time_filter_plan_v1_final.txt §6.4: backward-compat, may be absent
+    # docs/time_filter_plan_v1_final.txt В§6.4: backward-compat, may be absent
     _tf_reset_raw = filter_diagnostics.get("time_filter_reset_event")
     time_filter_reset_arr = np.asarray(_tf_reset_raw)[:n] if _tf_reset_raw is not None else None
     exit_c_attribution_enabled = False
@@ -728,6 +726,43 @@ def _build_cycle_sheet_df(
 
     index = df.iloc[:n].index
     rows: List[Dict[str, Any]] = []
+
+    # --- Fast O(n log n) trade-index precomputation (fixes O(n^2) bottleneck) ---
+    # Build a sorted array of entry_signal_idx values so each cycle segment
+    # can be answered with two binary-search calls instead of a full scan.
+    _entry_idx_sorted: Optional[np.ndarray] = None
+    _pnl_sorted: Optional[np.ndarray] = None
+    _rows_sorted: Optional[List[Any]] = None
+    _has_net_pnl = (
+        trades_df is not None
+        and len(trades_df) > 0
+        and "entry_index" in trades_df.columns
+        and "net_pnl_pct" in trades_df.columns
+    )
+    if trades_df is not None and len(trades_df) > 0 and "entry_index" in trades_df.columns:
+        _keys: List[int] = []
+        _pnls: List[float] = []
+        _trows: List[Any] = []
+        for _row in trades_df.itertuples(index=False):
+            _ei = getattr(_row, "entry_index", np.nan)
+            try:
+                if not pd.isna(_ei):
+                    _keys.append(max(int(_ei) - 1, 0))
+                    _pnl_v = getattr(_row, "net_pnl_pct", np.nan) if _has_net_pnl else np.nan
+                    try:
+                        _pnls.append(float(_pnl_v))
+                    except (TypeError, ValueError):
+                        _pnls.append(float("nan"))
+                    _trows.append(_row)
+            except (TypeError, ValueError):
+                pass
+        if _keys:
+            _sort_order = np.argsort(_keys, kind="stable")
+            _entry_idx_sorted = np.array(_keys, dtype=np.int64)[_sort_order]
+            _pnl_sorted = np.array(_pnls, dtype=np.float64)[_sort_order]
+            _rows_sorted = [_trows[i] for i in _sort_order]
+    # --- end precompute ---
+
     for start_bar, end_bar in _completed_cycle_segments(state_arr):
         segment_interval = slice(start_bar, end_bar + 1)
         off_bar = end_bar + 1
@@ -825,35 +860,59 @@ def _build_cycle_sheet_df(
             max_move_pct = float("nan")
             max_drawdown_pct = float("nan")
 
-        cycle_trades = _cycle_trades_for_segment(trades_df, start_bar, end_bar)
+        # fast O(log n) segment lookup
+        if _entry_idx_sorted is not None and _rows_sorted is not None:
+            _lo = int(np.searchsorted(_entry_idx_sorted, start_bar, side="left"))
+            _hi = int(np.searchsorted(_entry_idx_sorted, end_bar, side="right"))
+            cycle_trades = _rows_sorted[_lo:_hi]
+            # fast PnL aggregation (avoids re-iterating cycle_trades)
+            if not cycle_trades:
+                _cycle_sum_pnl: Any = float("nan")
+                _cycle_pos_pct: Any = float("nan")
+            elif _pnl_sorted is not None:
+                _seg_pnl = _pnl_sorted[_lo:_hi]
+                if not np.all(np.isfinite(_seg_pnl)):
+                    _cycle_sum_pnl = float("nan")
+                    _cycle_pos_pct = float("nan")
+                else:
+                    _cycle_sum_pnl = float(np.sum(_seg_pnl))
+                    _n_pos = int(np.sum(_seg_pnl > 0.0))
+                    _cycle_pos_pct = _n_pos / len(_seg_pnl) * 100.0
+            else:
+                _cycle_sum_pnl = float("nan")
+                _cycle_pos_pct = float("nan")
+        else:
+            cycle_trades = _cycle_trades_for_segment(trades_df, start_bar, end_bar)
+            _cycle_sum_pnl = _cycle_final_result_pct(trades_df, cycle_trades)
+            _cycle_pos_pct = _cycle_positive_trades_pct(trades_df, cycle_trades)
 
         rows.append({
-            "Начало цикла": _excel_safe_datetime_value(index[start_bar]),
-            "Конец цикла": _excel_safe_datetime_value(index[end_bar]),
-            "Направление цикла": direction,
-            "Баров в цикле": end_bar - start_bar + 1,
-            "Ног ZigZag в цикле": legs_count,
-            "Медиана ног": median_legs,
-            "Ног выше порога триггера кандидата": legs_above_threshold,
-            "Размер цикла, %": cycle_size_pct,
-            "ID цикла": 0,
+            "РќР°С‡Р°Р»Рѕ С†РёРєР»Р°": _excel_safe_datetime_value(index[start_bar]),
+            "РљРѕРЅРµС† С†РёРєР»Р°": _excel_safe_datetime_value(index[end_bar]),
+            "РќР°РїСЂР°РІР»РµРЅРёРµ С†РёРєР»Р°": direction,
+            "Р‘Р°СЂРѕРІ РІ С†РёРєР»Рµ": end_bar - start_bar + 1,
+            "РќРѕРі ZigZag РІ С†РёРєР»Рµ": legs_count,
+            "РњРµРґРёР°РЅР° РЅРѕРі": median_legs,
+            "РќРѕРі РІС‹С€Рµ РїРѕСЂРѕРіР° С‚СЂРёРіРіРµСЂР° РєР°РЅРґРёРґР°С‚Р°": legs_above_threshold,
+            "Р Р°Р·РјРµСЂ С†РёРєР»Р°, %": cycle_size_pct,
+            "ID С†РёРєР»Р°": 0,
             "Start bar index": start_bar,
             "End bar index": end_bar,
-            "Цена начала": close_start,
-            "Цена конца": close_end,
-            "High цикла": high_cycle,
-            "Low цикла": low_cycle,
-            "Макс. движение по циклу, %": max_move_pct,
-            "Макс. просадка внутри цикла, %": max_drawdown_pct,
-            "Причина завершения": end_reason,
-            "Макс. высота ноги": max_leg_height,
-            "Доля ног выше порога, %": share_above_threshold,
-            "Сделок в цикле": len(cycle_trades),
-            "Фин результат цикла, %": (
-                _cycle_final_result_pct(trades_df, cycle_trades)
+            "Р¦РµРЅР° РЅР°С‡Р°Р»Р°": close_start,
+            "Р¦РµРЅР° РєРѕРЅС†Р°": close_end,
+            "High С†РёРєР»Р°": high_cycle,
+            "Low С†РёРєР»Р°": low_cycle,
+            "РњР°РєСЃ. РґРІРёР¶РµРЅРёРµ РїРѕ С†РёРєР»Сѓ, %": max_move_pct,
+            "РњР°РєСЃ. РїСЂРѕСЃР°РґРєР° РІРЅСѓС‚СЂРё С†РёРєР»Р°, %": max_drawdown_pct,
+            "РџСЂРёС‡РёРЅР° Р·Р°РІРµСЂС€РµРЅРёСЏ": end_reason,
+            "РњР°РєСЃ. РІС‹СЃРѕС‚Р° РЅРѕРіРё": max_leg_height,
+            "Р”РѕР»СЏ РЅРѕРі РІС‹С€Рµ РїРѕСЂРѕРіР°, %": share_above_threshold,
+            "РЎРґРµР»РѕРє РІ С†РёРєР»Рµ": len(cycle_trades),
+            "Р¤РёРЅ СЂРµР·СѓР»СЊС‚Р°С‚ С†РёРєР»Р°, %": (
+                _cycle_sum_pnl
             ),
-            "% сделок с положительным фин результатом в цикле": (
-                _cycle_positive_trades_pct(trades_df, cycle_trades)
+            "% СЃРґРµР»РѕРє СЃ РїРѕР»РѕР¶РёС‚РµР»СЊРЅС‹Рј С„РёРЅ СЂРµР·СѓР»СЊС‚Р°С‚РѕРј РІ С†РёРєР»Рµ": (
+                _cycle_pos_pct
             ),
         })
     if not rows:
@@ -861,7 +920,7 @@ def _build_cycle_sheet_df(
 
     result = pd.DataFrame(rows, columns=CYCLE_SHEET_COLUMNS)
     result = result.sort_values("Start bar index", kind="stable").reset_index(drop=True)
-    result["ID цикла"] = np.arange(1, len(result) + 1, dtype=np.int64)
+    result["ID С†РёРєР»Р°"] = np.arange(1, len(result) + 1, dtype=np.int64)
     return result.loc[:, list(CYCLE_SHEET_COLUMNS)]
 
 
@@ -872,7 +931,7 @@ def _build_volume_cycle_sheet_df(
 ) -> pd.DataFrame:
     """Build cycle sheet DataFrame for volume-only mode.
 
-    Informational artifact only — does not affect backtest results, signals,
+    Informational artifact only вЂ” does not affect backtest results, signals,
     trades, or any trading metrics.  Read-only with respect to all inputs.
 
     Direction is derived from FSM state at cycle start bar:
@@ -1110,26 +1169,26 @@ def _build_volume_cycle_sheet_df(
         )
 
         rows.append({
-            "Начало цикла": _excel_safe_datetime_value(index[start_bar]),
-            "Конец цикла": _excel_safe_datetime_value(index[end_bar]),
-            "Направление цикла": direction,
-            "Баров в цикле": end_bar - start_bar + 1,
-            "Размер цикла, %": cycle_size_pct,
-            "ID цикла": 0,
+            "РќР°С‡Р°Р»Рѕ С†РёРєР»Р°": _excel_safe_datetime_value(index[start_bar]),
+            "РљРѕРЅРµС† С†РёРєР»Р°": _excel_safe_datetime_value(index[end_bar]),
+            "РќР°РїСЂР°РІР»РµРЅРёРµ С†РёРєР»Р°": direction,
+            "Р‘Р°СЂРѕРІ РІ С†РёРєР»Рµ": end_bar - start_bar + 1,
+            "Р Р°Р·РјРµСЂ С†РёРєР»Р°, %": cycle_size_pct,
+            "ID С†РёРєР»Р°": 0,
             "Start bar index": start_bar,
             "End bar index": end_bar,
-            "Цена начала": close_start,
-            "Цена конца": close_end,
-            "High цикла": high_cycle,
-            "Low цикла": low_cycle,
-            "Макс. движение по циклу, %": max_move_pct,
-            "Макс. просадка внутри цикла, %": max_drawdown_pct,
-            "Причина завершения": end_reason,
-            "Режим объёма (старт)": vol_regime_start,
-            "Ср. медиана объёма": avg_median_vol,
-            "Сделок в цикле": len(cycle_trades),
-            "Фин результат цикла, %": _cycle_final_result_pct(trades_df, cycle_trades),
-            "% сделок с положительным фин результатом в цикле": (
+            "Р¦РµРЅР° РЅР°С‡Р°Р»Р°": close_start,
+            "Р¦РµРЅР° РєРѕРЅС†Р°": close_end,
+            "High С†РёРєР»Р°": high_cycle,
+            "Low С†РёРєР»Р°": low_cycle,
+            "РњР°РєСЃ. РґРІРёР¶РµРЅРёРµ РїРѕ С†РёРєР»Сѓ, %": max_move_pct,
+            "РњР°РєСЃ. РїСЂРѕСЃР°РґРєР° РІРЅСѓС‚СЂРё С†РёРєР»Р°, %": max_drawdown_pct,
+            "РџСЂРёС‡РёРЅР° Р·Р°РІРµСЂС€РµРЅРёСЏ": end_reason,
+            "Р РµР¶РёРј РѕР±СЉС‘РјР° (СЃС‚Р°СЂС‚)": vol_regime_start,
+            "РЎСЂ. РјРµРґРёР°РЅР° РѕР±СЉС‘РјР°": avg_median_vol,
+            "РЎРґРµР»РѕРє РІ С†РёРєР»Рµ": len(cycle_trades),
+            "Р¤РёРЅ СЂРµР·СѓР»СЊС‚Р°С‚ С†РёРєР»Р°, %": _cycle_final_result_pct(trades_df, cycle_trades),
+            "% СЃРґРµР»РѕРє СЃ РїРѕР»РѕР¶РёС‚РµР»СЊРЅС‹Рј С„РёРЅ СЂРµР·СѓР»СЊС‚Р°С‚РѕРј РІ С†РёРєР»Рµ": (
                 _cycle_positive_trades_pct(trades_df, cycle_trades)
             ),
         })
@@ -1144,7 +1203,7 @@ def _build_volume_cycle_sheet_df(
 
     result = pd.DataFrame(rows, columns=VOLUME_CYCLE_SHEET_COLUMNS)
     result = result.sort_values("Start bar index", kind="stable").reset_index(drop=True)
-    result["ID цикла"] = np.arange(1, len(result) + 1, dtype=np.int64)
+    result["ID С†РёРєР»Р°"] = np.arange(1, len(result) + 1, dtype=np.int64)
     return result.loc[:, list(VOLUME_CYCLE_SHEET_COLUMNS)]
 
 
@@ -1212,7 +1271,7 @@ def _write_cycle_sheet(writer: pd.ExcelWriter, cycle_df: pd.DataFrame) -> None:
         writer,
         ws,
         cycle_df,
-        ("Начало цикла", "Конец цикла"),
+        ("РќР°С‡Р°Р»Рѕ С†РёРєР»Р°", "РљРѕРЅРµС† С†РёРєР»Р°"),
     )
 
 
@@ -1225,56 +1284,7 @@ def _price_matches_exec_entry(exec_price: Any, entry_price: Any, rtol: float = 1
         return False
 
 
-def _match_trade_to_signal_row(
-    trade_row: pd.Series,
-    signals_prep: Optional[pd.DataFrame],
-) -> Optional[pd.Series]:
-    """
-    Deterministic trade → signal match for legacy false-start diagnostics.
-
-    1) Same Direction, signal_time <= entry_time, Exec Price matches Entry Price
-       → choose the signal with the maximum signal_time (closest preceding among price hits).
-    2) Else: same Direction, signal_time <= entry_time → nearest preceding (max signal_time).
-    3) Else: None (caller fills NaNs).
-    """
-    if signals_prep is None or len(signals_prep) == 0:
-        return None
-
-    t_dir = trade_row.get("direction")
-    if pd.isna(t_dir):
-        return None
-
-    entry_t = _normalize_timestamp_naive(trade_row.get("entry_time"))
-    if pd.isna(entry_t):
-        return None
-
-    entry_price = trade_row.get("entry_price")
-
-    same_dir = signals_prep[signals_prep["direction"] == t_dir]
-    if same_dir.empty:
-        return None
-
-    before = same_dir[same_dir["signal_time"] <= entry_t]
-    if before.empty:
-        return None
-
-    # Step 1 — exec price matches entry price
-    price_hits = before[
-        before.apply(
-            lambda r: _price_matches_exec_entry(r.get("exec_price"), entry_price),
-            axis=1,
-        )
-    ]
-    if len(price_hits) > 0:
-        best_idx = price_hits["signal_time"].idxmax()
-        return price_hits.loc[best_idx]
-
-    # Step 2 — nearest preceding (max signal_time)
-    best_idx = before["signal_time"].idxmax()
-    return before.loc[best_idx]
-
-
-def _prepare_signals_lookup(signals_df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
+def _prepare_signals_lookup(signals_df):
     """Copy signals with naive signal_time for matching (internal column names)."""
     if signals_df is None or len(signals_df) == 0:
         return None
@@ -1287,6 +1297,76 @@ def _prepare_signals_lookup(signals_df: Optional[pd.DataFrame]) -> Optional[pd.D
             st = st.dt.tz_localize(None)
     df["signal_time"] = st
     return df
+
+
+def _build_fast_signal_index(signals_prep):
+    """Pre-sort signals by direction+time for O(log n) per-trade matching.
+
+    Returns dict[direction -> {'times_ns', 'exec_prices', 'rows'}]
+    Replaces per-trade pandas boolean filtering with binary search.
+    """
+    if signals_prep is None or len(signals_prep) == 0:
+        return {}
+    index = {}
+    for direction, group in signals_prep.groupby("direction", sort=False):
+        g = group.sort_values("signal_time").reset_index(drop=True)
+        times_ns = g["signal_time"].to_numpy(dtype="int64", copy=True)
+        has_exec = "exec_price" in g.columns
+        exec_prices = (
+            pd.to_numeric(g["exec_price"], errors="coerce").to_numpy(dtype=np.float64)
+            if has_exec else np.full(len(g), np.nan, dtype=np.float64)
+        )
+        rows = g.to_dict("records")
+        index[str(direction)] = {
+            "times_ns": times_ns,
+            "exec_prices": exec_prices,
+            "rows": rows,
+        }
+    return index
+
+
+def _match_signal_fast(direction, entry_t, entry_price, index):
+    """O(log n) signal match using pre-sorted index. Returns dict or None."""
+    data = index.get(str(direction))
+    if data is None:
+        return None
+    try:
+        entry_ns = int(pd.Timestamp(entry_t).value)
+    except Exception:
+        return None
+    times_ns = data["times_ns"]
+    hi = int(np.searchsorted(times_ns, entry_ns, side="right"))
+    if hi == 0:
+        return None
+    exec_prices = data["exec_prices"][:hi]
+    try:
+        if entry_price is not None and not pd.isna(entry_price):
+            ep_f = float(entry_price)
+            if np.isfinite(ep_f):
+                valid = np.isfinite(exec_prices)
+                price_match = valid & np.isclose(exec_prices, ep_f, rtol=1e-5, atol=1e-8)
+                if price_match.any():
+                    best = int(np.flatnonzero(price_match)[-1])
+                    return data["rows"][best]
+    except (TypeError, ValueError):
+        pass
+    return data["rows"][hi - 1]
+
+
+def _match_trade_to_signal_row(trade_row, signals_prep):
+    """Legacy API shim — kept for external callers; not used in hot path."""
+    if signals_prep is None or len(signals_prep) == 0:
+        return None
+    t_dir = trade_row.get("direction")
+    if pd.isna(t_dir):
+        return None
+    entry_t = _normalize_timestamp_naive(trade_row.get("entry_time"))
+    if pd.isna(entry_t):
+        return None
+    entry_price = trade_row.get("entry_price")
+    idx = _build_fast_signal_index(signals_prep)
+    result = _match_signal_fast(t_dir, entry_t, entry_price, idx)
+    return pd.Series(result) if result is not None else None
 
 
 def _classify_false_start_type(
@@ -1333,7 +1413,7 @@ def _build_false_start_sheet_df(
     Build the false start DataFrame; may be empty with headers only.
 
     ``include_filter_block_reason=True`` adds "Filter Block Reason at Signal"
-    column after "False Start Type" (plan §9.2.2; gated on
+    column after "False Start Type" (plan В§9.2.2; gated on
     ``diagnostics.export_state_columns=True`` AND ``enabled``).
     """
     col_spec = FALSE_START_COLUMNS_WITH_FILTER if include_filter_block_reason else FALSE_START_COLUMNS
@@ -1351,13 +1431,15 @@ def _build_false_start_sheet_df(
 
     signals_lookup = _prepare_signals_lookup(signals_df)
 
+    # Build fast O(log n) signal index once before the loop
+    _fast_sig_index = _build_fast_signal_index(signals_lookup)
     rows_out: List[dict] = []
     for _, trow in short_tr.iterrows():
         gross = trow["gross_pnl_pct"] if need_gross else float("nan")
         net = trow.get("net_pnl_pct")
         bars = trow.get("bars_held")
 
-        matched = _match_trade_to_signal_row(trow, signals_lookup)
+        matched = _match_signal_fast(trow.get("direction"), trow.get("entry_time"), trow.get("entry_price"), _fast_sig_index)
 
         sig_time = matched.get("signal_time") if matched is not None else np.nan
         evt = matched.get("event_type") if matched is not None else np.nan
@@ -1512,7 +1594,7 @@ def _write_false_start_sheet(
 # ---------------------------------------------------------------------------
 
 def _build_filter_summary_block_df(period_results: List[PeriodResult]) -> Optional[pd.DataFrame]:
-    """Build the Filter Diagnostics Summary block for the Summary sheet (plan §9.2).
+    """Build the Filter Diagnostics Summary block for the Summary sheet (plan В§9.2).
 
     Returns None if no period has filter_diagnostics_summary (disabled path).
     """
@@ -1630,19 +1712,10 @@ def _write_filter_diagnostics_100_sheet(
     writer: pd.ExcelWriter,
     filter_diagnostics: Optional[Dict[str, np.ndarray]],
 ) -> None:
-    """Write FilterDiagnostics_100 sheet (plan §9.2, gated export_state_columns=True)."""
+    """Write FilterDiagnostics_100 sheet (plan В§9.2, gated export_state_columns=True)."""
     if filter_diagnostics is None:
         return
     n = len(next(iter(filter_diagnostics.values())))
-    if n > _FILTER_DIAGNOSTICS_100_MAX_ROWS:
-        print(
-            f"  [export] Skipping FilterDiagnostics_100 ({n:,} bars > "
-            f"{_FILTER_DIAGNOSTICS_100_MAX_ROWS:,} row limit). "
-            f"Set trade_filter.diagnostics.export_state_columns: false "
-            f"or use a shorter CSV for full per-bar diagnostics.",
-            flush=True,
-        )
-        return
     row_data: Dict[str, Any] = {"Bar Index": np.arange(n)}
     for key, arr in filter_diagnostics.items():
         display = FILTER_DIAGNOSTICS_100_DISPLAY_NAMES.get(key, key)
@@ -1656,34 +1729,22 @@ def _two_step_trade_trigger_link(
     state_arr: Optional[np.ndarray],
     trades_df: Optional[pd.DataFrame],
 ) -> Dict[int, Any]:
-    """Two-step trade <-> trigger linker (plan §9.5.1).
-
-    Returns dict: trigger_bar → linked_trade_id (or "N/A").
-
-    Algorithm (per-trade, then inverted to per-trigger):
-
-    Step 1 — exact match: find trigger_bar == entry_signal_bar (decision bar).
-      Covers 100% of same-bar trigger + flip cases.
-
-    Step 2 — backward search: find the last trigger_bar < entry_signal_bar
-      where no "OFF" state exists in state_arr[trigger_bar+1 : entry_signal_bar+1].
-      "No OFF" means the lifecycle that started at trigger_bar is still active when
-      the trade entered.  Covers trigger at t1, first allowed flip at t2 > t1 (freeze
-      period holds FSM in WAIT while waiting for eligible flip).
-
-    If neither step finds a match → "N/A" (unexpected for normal enabled runs;
-    test failure per plan §9.5.1).
-    """
+    """Two-step trade-to-trigger linker for the ZigZag diagnostics sheet."""
     result: Dict[int, Any] = {t: "N/A" for t in trigger_bars}
     if not trigger_bars or trades_df is None or len(trades_df) == 0:
         return result
     if "entry_index" not in trades_df.columns or "trade_id" not in trades_df.columns:
         return result
 
-    trigger_set = set(trigger_bars)
+    trigger_bars_sorted = sorted(trigger_bars)
+    trigger_set = set(trigger_bars_sorted)
 
-    # Build (entry_signal_bar, trade_id) sorted by entry_signal_bar ascending
-    # (process earlier trades first so that the first trade per lifecycle gets the link)
+    last_off_at_or_before: Optional[np.ndarray] = None
+    if state_arr is not None:
+        state_text = np.asarray(state_arr).astype(str)
+        off_indices = np.where(state_text == "OFF", np.arange(len(state_text)), -1)
+        last_off_at_or_before = np.maximum.accumulate(off_indices)
+
     trade_pairs = []
     for _, trow in trades_df.iterrows():
         ei = trow.get("entry_index")
@@ -1693,31 +1754,28 @@ def _two_step_trade_trigger_link(
     trade_pairs.sort(key=lambda x: x[0])
 
     for signal_bar, tid in trade_pairs:
-        # Step 1: exact match — trigger at the same decision bar as the entry
         if signal_bar in trigger_set:
-            if result.get(signal_bar) == "N/A":  # first trade wins for this trigger
+            if result.get(signal_bar) == "N/A":
                 result[signal_bar] = tid
             continue
 
-        # Step 2: backward search — latest trigger before signal_bar in the same lifecycle
-        candidates = sorted(
-            [t for t in trigger_bars if t < signal_bar], reverse=True
-        )
-        for t_trig in candidates:
-            # Check that no OFF state exists between trigger_bar and entry_signal_bar
-            if state_arr is not None:
-                seg_start = t_trig + 1
-                seg_end = signal_bar + 1  # inclusive of signal_bar
-                if seg_start < seg_end:
-                    segment = state_arr[seg_start:seg_end]
-                    if any(str(s) == "OFF" for s in segment):
-                        continue  # lifecycle ended between trigger and entry → wrong cycle
-            if result.get(t_trig) == "N/A":
-                result[t_trig] = tid
-            break  # closest (most recent) eligible trigger wins; move to next trade
+        # Closest trigger before signal_bar in the same lifecycle. The old
+        # implementation rebuilt and sorted all previous triggers for every
+        # trade, then scanned state slices for OFF. On large exports this is
+        # effectively quadratic.
+        pos = bisect_left(trigger_bars_sorted, signal_bar)
+        if pos <= 0:
+            continue
+        t_trig = trigger_bars_sorted[pos - 1]
+        if last_off_at_or_before is not None:
+            lookup_idx = min(signal_bar, len(last_off_at_or_before) - 1)
+            last_off_idx = int(last_off_at_or_before[lookup_idx])
+            if last_off_idx > t_trig:
+                continue
+        if result.get(t_trig) == "N/A":
+            result[t_trig] = tid
 
     return result
-
 
 def _build_zigzag_trigger_events_df(
     filter_diagnostics: Optional[Dict[str, np.ndarray]],
@@ -1725,21 +1783,21 @@ def _build_zigzag_trigger_events_df(
     df_index: Optional[Any] = None,
     trades_df: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
-    """Build ZigZag_Trigger_Events DataFrame (plan §9.2.1 reconstruction formula).
+    """Build ZigZag_Trigger_Events DataFrame (plan В§9.2.1 reconstruction formula).
 
     Reconstruction: trigger_event_rows = [t for t in range(n) if trigger_source[t] != "none"]
-    Per plan §9.2.1 audit-fix v0.5: trigger_source[t] != "none" is the exact marker;
+    Per plan В§9.2.1 audit-fix v0.5: trigger_source[t] != "none" is the exact marker;
     no heuristic via confirmed_legs_since_start delta.
 
     Triggered Lifecycle Start semantics (WP-V3-8):
     - Mode A/B/A+B: trigger bar state = WAIT; scan forward through WAIT until FREEZE.
-    - Mode C / C+B immediate entry: trigger bar state is already FREEZE (OFF→FREEZE
-      same bar); no WAIT transition — detected by checking state at t directly.
+    - Mode C / C+B immediate entry: trigger bar state is already FREEZE (OFFв†’FREEZE
+      same bar); no WAIT transition вЂ” detected by checking state at t directly.
     - C+B B-rescue WAIT start: treated identically to A/B (state at t = WAIT, scan forward).
 
-    Linked Trade ID: two-step linker per plan §9.5.1 (exact match, then backward search
-    through same FSM lifecycle — no "OFF" between trigger_bar and entry_signal_bar).
-    Absence of a link for an enabled-run trade row is a test failure (plan §9.5.1).
+    Linked Trade ID: two-step linker per plan В§9.5.1 (exact match, then backward search
+    through same FSM lifecycle вЂ” no "OFF" between trigger_bar and entry_signal_bar).
+    Absence of a link for an enabled-run trade row is a test failure (plan В§9.5.1).
     """
     empty = pd.DataFrame(columns=list(_TRIGGER_EVENTS_COLUMNS))
     if filter_diagnostics is None:
@@ -1755,7 +1813,7 @@ def _build_zigzag_trigger_events_df(
     global_median_arr = filter_diagnostics.get("global_median")
     local_median_n_arr = filter_diagnostics.get("local_median_N")
     candidate_height_arr = filter_diagnostics.get("candidate_height_pct")
-    # WP-V3-8: new §11.2 arrays
+    # WP-V3-8: new В§11.2 arrays
     zigzag_mode_arr = filter_diagnostics.get("zigzag_mode")
     imm_used_arr = filter_diagnostics.get("immediate_candidate_entry_used")
     imm_reason_arr = filter_diagnostics.get("immediate_candidate_entry_block_reason")
@@ -1777,12 +1835,12 @@ def _build_zigzag_trigger_events_df(
         quantile_used = thr.get("candidate_trigger_quantile")
         wakeup_quantile_used = thr.get("wakeup_entry_candidate_height_quantile")
 
-    # Collect trigger bars in bar order (plan §9.2.1)
+    # Collect trigger bars in bar order (plan В§9.2.1)
     trigger_bars: List[int] = [
         t for t in range(n) if str(trigger_source_arr[t]) != "none"
     ]
 
-    # Two-step Linked Trade ID (plan §9.5.1)
+    # Two-step Linked Trade ID (plan В§9.5.1)
     linked_trade_map = _two_step_trade_trigger_link(trigger_bars, state_arr, trades_df)
 
     rows = []
@@ -1793,8 +1851,8 @@ def _build_zigzag_trigger_events_df(
 
         # Triggered Lifecycle Start (WP-V3-8):
         # Mode C immediate entry: state at trigger bar is already ST_ACTIVE_FREEZE
-        # (OFF→FREEZE same bar, no WAIT).  All other modes (A/B/A+B/C+B B-rescue)
-        # enter WAIT first — scan forward from t+1 through WAIT until FREEZE or other.
+        # (OFFв†’FREEZE same bar, no WAIT).  All other modes (A/B/A+B/C+B B-rescue)
+        # enter WAIT first вЂ” scan forward from t+1 through WAIT until FREEZE or other.
         triggered_lc_start = False
         if state_arr is not None:
             state_at_t = str(state_arr[t])
@@ -1858,7 +1916,7 @@ def _build_zigzag_trigger_events_df(
             "Candidate Height %":        cand_ht,
             "Triggered Lifecycle Start": triggered_lc_start,
             "Linked Trade ID":           linked_trade_map.get(t, "N/A"),
-            # WP-V3-8: new §11.2 columns
+            # WP-V3-8: new В§11.2 columns
             "ZigZag Mode":                              str(zigzag_mode_arr[t]) if zigzag_mode_arr is not None else "",
             "Immediate Candidate Entry Used":           imm_used,
             "Immediate Candidate Entry Block Reason":   imm_reason,
@@ -1877,12 +1935,12 @@ def _write_zigzag_trigger_events_sheet(
     writer: pd.ExcelWriter,
     trigger_events_df: pd.DataFrame,
 ) -> None:
-    """Write ZigZag_Trigger_Events sheet (plan §9.2, gated export_trigger_columns=True)."""
+    """Write ZigZag_Trigger_Events sheet (plan В§9.2, gated export_trigger_columns=True)."""
     trigger_events_df.to_excel(writer, sheet_name="ZigZag_Trigger_Events", index=False)
 
 
 def _build_filters_summary_df(period_results: List[PeriodResult]) -> Optional[pd.DataFrame]:
-    """Build the filters_summary sheet content (plan §9.2, extended WP-V3-8 §11.3).
+    """Build the filters_summary sheet content (plan В§9.2, extended WP-V3-8 В§11.3).
 
     Returns (params_df, per_period_df) or None if disabled.
     Structure: two sections.
@@ -1920,15 +1978,15 @@ def _build_filters_summary_df(period_results: List[PeriodResult]) -> Optional[pd
         {"Parameter": "Global Median",                 "Value": thr.get("global_median", "")},
         {"Parameter": "Local Window",                  "Value": thr.get("local_window", "")},
         {"Parameter": "Freeze Confirmed Legs",         "Value": thr.get("freeze_confirmed_legs", "")},
-        # WP-V3-8: gate params (§11.3)
+        # WP-V3-8: gate params (В§11.3)
         {"Parameter": "Candidate Duration Gate Enabled",  "Value": s0.get("candidate_duration_gate_enabled", thr.get("candidate_duration_gate_enabled", ""))},
         {"Parameter": "Candidate Duration Max Bars",      "Value": s0.get("candidate_duration_max_bars", thr.get("candidate_duration_max_bars", ""))},
-        # exit-off modes (plan_exit_off_modes_v2.txt §8.2)
+        # exit-off modes (plan_exit_off_modes_v2.txt В§8.2)
         {"Parameter": "Exit-OFF Mode",         "Value": thr.get("exit_off_mode", s0.get("exit_off_mode", ""))},
         {"Parameter": "Exit-OFF ZZ Leg Count", "Value": thr.get("exit_off_zz_leg_count", s0.get("exit_off_zz_leg_count", -1))},
-        # Plan v3 §6.2: always-present (True/False, never "—")
+        # Plan v3 В§6.2: always-present (True/False, never "вЂ”")
         {"Parameter": "Exit-B Immediate OFF",  "Value": thr.get("exit_b_immediate_off", s0.get("exit_b_immediate_off", False))},
-        # docs/time_filter_plan_v1_final.txt §6.4: time_filter params
+        # docs/time_filter_plan_v1_final.txt В§6.4: time_filter params
         {"Parameter": "Time Filter Enabled",   "Value": s0.get("time_filter_enabled", False)},
     ]
     if is_wakeup_mode:
@@ -1983,10 +2041,10 @@ def _build_filters_summary_df(period_results: List[PeriodResult]) -> Optional[pd
             "Bars MONITORING":     bis.get("ST_ACTIVE_MONITORING", s.get("n_bars_in_monitoring", 0)),
             "Bars COUNTING ZZ":    bis.get("ST_COUNTING_ZZ_LEGS", s.get("n_bars_in_counting_zz_legs", 0)),
             "Bars STOPPING":       bis.get("ST_STOPPING", s.get("n_bars_in_stopping", 0)),
-            # WP-V3-8: immediate entries (§11.3)
+            # WP-V3-8: immediate entries (В§11.3)
             "Immediate Entries Count":         s.get("immediate_entries_count", ctr.get("immediate_entries_count", 0)),
             "Immediate Entries Blocked Count": s.get("immediate_entries_blocked_count", ctr.get("immediate_entries_blocked_count", 0)),
-            # docs/time_filter_plan_v1_final.txt §6.4
+            # docs/time_filter_plan_v1_final.txt В§6.4
             "Time Filter Reset Count":         s.get("time_filter_reset_count", ctr.get("time_filter_reset_count", 0)),
             "Time Filter Bars In Window":      s.get("time_filter_bars_in_window", ctr.get("time_filter_bars_in_window", 0)),
             "Time Filter Bars Out Window":     s.get("time_filter_bars_out_window", ctr.get("time_filter_bars_out_window", 0)),
@@ -2032,7 +2090,7 @@ def _write_filters_summary_sheet(
     writer: pd.ExcelWriter,
     period_results: List[PeriodResult],
 ) -> None:
-    """Write filters_summary sheet (plan §9.2, gated export_state_columns=True)."""
+    """Write filters_summary sheet (plan В§9.2, gated export_state_columns=True)."""
     result = _build_filters_summary_df(period_results)
     if result is None:
         return
@@ -2069,7 +2127,7 @@ def _write_signals_sheet(
     """Write the Signals sheet with autofilter and conditional formatting.
 
     WP-T7 fix: empty-result case preserves the incoming column structure.
-    Disabled signals_df (19 cols) → 19 display cols; enabled (23 cols) →
+    Disabled signals_df (19 cols) в†’ 19 display cols; enabled (23 cols) в†’
     23 display cols (filter cols auto-renamed via SIGNALS_DISPLAY_NAMES).
     """
     has_data = signals_df is not None and len(signals_df) > 0
@@ -2111,7 +2169,7 @@ def _write_signals_sheet(
             (SIGNALS_DISPLAY_NAMES["signal_time"],),
         )
 
-        # Conditional formatting: green→yellow→red on Signal Body/Range %
+        # Conditional formatting: greenв†’yellowв†’red on Signal Body/Range %
         first_row = 1
         last_row = n_rows
         for internal_key in ("signal_body_pct", "signal_range_pct"):
@@ -2179,9 +2237,9 @@ def _prepare_legacy_trades_df(
 ) -> pd.DataFrame:
     """Rename and prepare trades_df for the legacy export, handling filter columns.
 
-    Disabled path → canonical columns only.
-    Enabled path with data → canonical + filter columns renamed.
-    Enabled path with 0 trades → canonical + filter column headers (plan §9.4).
+    Disabled path в†’ canonical columns only.
+    Enabled path with data в†’ canonical + filter columns renamed.
+    Enabled path with 0 trades в†’ canonical + filter column headers (plan В§9.4).
     """
     if trades_df is not None and len(trades_df) > 0:
         df = trades_df.rename(columns=TRADES_DISPLAY_NAMES)
@@ -2193,7 +2251,7 @@ def _prepare_legacy_trades_df(
             ),
         )
     else:
-        # Empty trades — choose header set based on filter state (plan §9.4)
+        # Empty trades вЂ” choose header set based on filter state (plan В§9.4)
         if filter_enabled and filter_diagnostics_available:
             return pd.DataFrame(columns=list(TRADES_DISPLAY_NAMES.values()))
         else:
@@ -2386,7 +2444,7 @@ def export_tester_results(
     """
     Export tester results to Excel file.
 
-    WP-T7 additions (plan §9.2):
+    WP-T7 additions (plan В§9.2):
     - Trades_<period>: includes Entry Filter State / Entry Trigger Source,
       explicit wakeup-cycle/action fields, and Trade Close Reason
       when ``trade_filter_config.enabled=True`` and data is present.
@@ -2405,11 +2463,11 @@ def export_tester_results(
         output_path: Path to output Excel file.
         signals_df: Optional DataFrame from ``build_signal_events()``.
         false_start_max_bars: False-start threshold (bars_held < N).
-        trade_filter_config: Optional TradeFilterConfig. None → disabled path.
+        trade_filter_config: Optional TradeFilterConfig. None в†’ disabled path.
         df: Optional original OHLC DataFrame for Trigger Time in ZigZag_Trigger_Events.
         config_yaml_snapshot: Raw mapping from ``load_config`` (sheet ``Tester_Config`` / ``config_file``).
         run_metadata: Runtime fields (paths, ``resolved_periods_per_year``,
-            ``warmup_period_resolved``, ``warmup_period_effective``, …). The exporter appends ``output_path_actual``.
+            ``warmup_period_resolved``, ``warmup_period_effective``, вЂ¦). The exporter appends ``output_path_actual``.
         add_timestamp: When True, preserve legacy timestamped TEST naming.
             When False, write exactly to ``output_path``.
 
@@ -2423,7 +2481,7 @@ def export_tester_results(
     # the CLI) should pass it explicitly in run_metadata so that two independent
     # exports of the same data remain cell-identical in Tester_Config.
 
-    # Determine filter mode (plan §9.1)
+    # Determine filter mode (plan В§9.1)
     zigzag_enabled = is_zigzag_enabled(trade_filter_config)
     volume_enabled = is_volume_enabled(trade_filter_config)
     filter_enabled = zigzag_enabled or volume_enabled
@@ -2477,14 +2535,14 @@ def export_tester_results(
         )
 
     with _create_xlsx_writer(output_path) as writer:
-        # ── Tester_Config (always first) ──
+        # в”Ђв”Ђ Tester_Config (always first) в”Ђв”Ђ
         _write_tester_config_sheet(
             writer,
             config_yaml_snapshot=config_yaml_snapshot,
             run_metadata=run_metadata_payload,
         )
 
-        # ── Summary sheet ──
+        # в”Ђв”Ђ Summary sheet в”Ђв”Ђ
         summary_data = []
         for pr in period_results:
             row = {
@@ -2505,7 +2563,7 @@ def export_tester_results(
         summary_df = format_excel_export_df(summary_df)
         summary_df.to_excel(writer, sheet_name="Summary", index=False)
 
-        # WP-T7: Filter Diagnostics Summary block after standard metrics (plan §9.2, §9.4)
+        # WP-T7: Filter Diagnostics Summary block after standard metrics (plan В§9.2, В§9.4)
         if export_diagnostics and filter_enabled:
             filter_block_df = _build_filter_summary_block_df(period_results)
             if filter_block_df is not None:
@@ -2518,7 +2576,7 @@ def export_tester_results(
                     startcol=0,
                 )
 
-        # ── Metrics and Trades sheets for each period ──
+        # в”Ђв”Ђ Metrics and Trades sheets for each period в”Ђв”Ђ
         for pr in period_results:
             period_num = pr.period_label.replace("%", "")
 
@@ -2550,11 +2608,11 @@ def export_tester_results(
                 if len(trades_df) > 0:
                     _format_trades_datetime(writer, trades_df, writer.sheets[trades_sheet])
 
-        # ── Signals sheet ──
+        # в”Ђв”Ђ Signals sheet в”Ђв”Ђ
         if export_signals and signals_df is not None:
             _write_signals_sheet(writer, "Signals", signals_df)
 
-        # ── False start sheet ──
+        # в”Ђв”Ђ False start sheet в”Ђв”Ђ
         trades_100_raw = pr_100.trades_df if pr_100 is not None else None
         if export_false_start:
             signals_for_false_start = signals_df if export_signals else None
@@ -2572,7 +2630,7 @@ def export_tester_results(
             )
             _write_false_start_sheet(writer, trades_100_raw, false_start_df)
 
-        # ── Optional filter sheets (gated on enabled + diagnostics flags) ──
+   # в”Ђв”Ђ Optional filter sheets (gated on enabled + diagnostics flags) в”Ђв”Ђ
         if filter_enabled and pr_100 is not None:
             fd_100 = pr_100.filter_diagnostics
 
@@ -2600,11 +2658,11 @@ def export_tester_results(
             if export_diagnostics and zigzag_enabled and export_state_cols:
                 _write_filters_summary_sheet(writer, period_results)
 
-            # cycle — ZigZag path
+            # cycle вЂ” ZigZag path
             if export_cycle and zigzag_enabled and fd_100 is not None:
                 cycle_df = _build_cycle_sheet_df(fd_100, df, trades_100_raw)
                 _write_cycle_sheet(writer, cycle_df)
-            # cycle — volume-only path (mutually exclusive with ZigZag path above)
+            # cycle вЂ” volume-only path (mutually exclusive with ZigZag path above)
             elif export_cycle and volume_enabled and not zigzag_enabled and fd_100 is not None:
                 vol_cycle_df = _build_volume_cycle_sheet_df(fd_100, df, trades_100_raw)
                 _write_cycle_sheet(writer, vol_cycle_df)
@@ -2616,7 +2674,7 @@ def export_tester_results(
 
 
 # ---------------------------------------------------------------------------
-# Equal-blocks export (unchanged — equal_blocks enabled is rejected upstream)
+# Equal-blocks export (unchanged вЂ” equal_blocks enabled is rejected upstream)
 # ---------------------------------------------------------------------------
 
 def _add_eqblk_timestamp_to_filename(
@@ -2674,14 +2732,14 @@ def export_equal_blocks_results(
     # output_path_actual is NOT auto-injected; set it in run_metadata from the caller.
 
     with _create_xlsx_writer(output_path) as writer:
-        # ── Tester_Config (always first) ──
+        # в”Ђв”Ђ Tester_Config (always first) в”Ђв”Ђ
         _write_tester_config_sheet(
             writer,
             config_yaml_snapshot=config_yaml_snapshot,
             run_metadata=run_metadata_payload,
         )
 
-        # ── Summary Table 1: per-segment rows ──
+        # в”Ђв”Ђ Summary Table 1: per-segment rows в”Ђв”Ђ
         summary_rows = []
         for seg in segment_results:
             m = seg.segment_metrics
@@ -2713,7 +2771,7 @@ def export_equal_blocks_results(
             ("Start Date", "End Date"),
         )
 
-        # ── Summary Table 2: aggregate stats ──
+        # в”Ђв”Ђ Summary Table 2: aggregate stats в”Ђв”Ђ
         agg_rows = []
         for key in _AGGREGATE_METRIC_KEYS:
             display_name = METRICS_DISPLAY_NAMES.get(key, key)
@@ -2753,7 +2811,7 @@ def export_equal_blocks_results(
             startcol=0,
         )
 
-        # ── Per-segment sheets ──
+        # в”Ђв”Ђ Per-segment sheets в”Ђв”Ђ
         for seg in segment_results:
             label = seg.segment_label
             metrics_sheet = f"Metrics_{label}"[:31]

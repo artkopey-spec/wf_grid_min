@@ -15,6 +15,7 @@ import pandas as pd
 from supertrend_optimizer.utils.exceptions import ConfigError
 
 
+
 STATUS_VALUES = frozenset({"PASS", "WARN", "FAIL", "SKIP", "INFO"})
 
 V2_SHEET_ORDER: tuple[str, ...] = (
@@ -274,10 +275,11 @@ def derive_trade_cycle_map(
 
     segment_starts = np.asarray([segment[0] for segment in segments], dtype=np.int64)
     segment_last_active = np.asarray([segment[1] for segment in segments], dtype=np.int64)
-    signal_indices: list[int | None] = [
-        _entry_signal_index(getattr(trade, "entry_index", np.nan))[0]
-        for trade in trades.itertuples(index=False)
-    ]
+    # --- O(n log n) single-pass: build rows and cycle_id→positions index simultaneously ---
+    # The old code did a second O(n²) pass (for cycle_id in cycle_ids: scan all rows).
+    # We accumulate per-cycle position lists while building rows, then rank in one pass.
+    _cycle_positions: dict[Any, list[tuple[int, int, int]]] = {}  # cycle_id → [(pos, signal_idx, row_idx)]
+
     for idx, trade in enumerate(trades.itertuples(index=False), start=1):
         signal_idx, status = _entry_signal_index(getattr(trade, "entry_index", np.nan))
         if status is not None:
@@ -335,6 +337,7 @@ def derive_trade_cycle_map(
             continue
 
         cycle_idx, start, last_active, end = match
+        pos = len(rows)
         rows.append(
             {
                 "trade_id": _trade_id_for_row(trade, idx),
@@ -346,33 +349,20 @@ def derive_trade_cycle_map(
                 "cycle_start_index": start,
                 "cycle_end_index": end,
                 "mapping_status": "mapped",
-                "_signal_idx": signal_idx,
-                "_row_idx": idx,
             }
         )
+        # Track position for O(1) rank assignment (replaces the O(n²) scan below)
+        if cycle_idx not in _cycle_positions:
+            _cycle_positions[cycle_idx] = []
+        _cycle_positions[cycle_idx].append((pos, signal_idx, idx))
 
-    cycle_ids = sorted(
-        {
-            row["cycle_id"]
-            for row in rows
-            if row.get("mapping_status") == "mapped" and pd.notna(row.get("cycle_id"))
-        }
-    )
-    for cycle_id in cycle_ids:
-        row_positions = [
-            pos
-            for pos, row in enumerate(rows)
-            if row.get("mapping_status") == "mapped" and row.get("cycle_id") == cycle_id
-        ]
-        row_positions.sort(
-            key=lambda pos: (rows[pos].get("_signal_idx", 0), rows[pos].get("_row_idx", 0))
-        )
-        for rank, pos in enumerate(row_positions, start=1):
+    # O(n log n) rank assignment: sort per-cycle lists, assign rank in one pass
+    for cycle_id in sorted(_cycle_positions):
+        position_list = _cycle_positions[cycle_id]
+        position_list.sort(key=lambda t: (t[1], t[2]))
+        for rank, (pos, _, _) in enumerate(position_list, start=1):
             rows[pos]["trade_idx_in_cycle"] = rank
             rows[pos]["cycle_trade_count_at_entry"] = rank - 1
-    for row in rows:
-        row.pop("_signal_idx", None)
-        row.pop("_row_idx", None)
 
     return pd.DataFrame(rows, columns=CYCLE_MAP_COLUMNS)
 
@@ -555,18 +545,24 @@ def _build_run_health_sheet(ctx: DiagnosticsV2Context) -> DiagnosticsV2Sheet:
         "high",
         "low",
     }.issubset(df.columns):
+        # Vectorized price sanity — avoids per-row df.iloc (was O(n) × pandas overhead)
+        _high_arr = pd.to_numeric(df["high"], errors="coerce").to_numpy(dtype=np.float64)
+        _low_arr = pd.to_numeric(df["low"], errors="coerce").to_numpy(dtype=np.float64)
+        _n_df = len(df)
         bad_prices = 0
-        for row in trades.itertuples(index=False):
-            for idx_col, price_col in (("entry_index", "entry_price"), ("exit_index", "exit_price")):
-                idx = _safe_float(getattr(row, idx_col, np.nan))
-                price = _safe_float(getattr(row, price_col, np.nan))
-                if not np.isfinite(idx) or not np.isfinite(price):
-                    continue
-                idx_i = int(idx)
-                if idx_i < 0 or idx_i >= len(df):
-                    continue
-                if price < _safe_float(df.iloc[idx_i]["low"]) or price > _safe_float(df.iloc[idx_i]["high"]):
-                    bad_prices += 1
+        for _idx_col, _price_col in (("entry_index", "entry_price"), ("exit_index", "exit_price")):
+            _idx_s = pd.to_numeric(trades[_idx_col], errors="coerce")
+            _pr_s = pd.to_numeric(trades[_price_col], errors="coerce")
+            _valid = _idx_s.notna() & _pr_s.notna()
+            _idx_v = _idx_s[_valid].to_numpy(dtype=np.float64)
+            _pr_v = _pr_s[_valid].to_numpy(dtype=np.float64)
+            _in_range = (_idx_v >= 0) & (_idx_v < _n_df) & np.isfinite(_pr_v)
+            _idx_int = _idx_v[_in_range].astype(np.int64)
+            _pr_int = _pr_v[_in_range]
+            if len(_idx_int) > 0:
+                bad_prices += int(np.sum(
+                    (_pr_int < _low_arr[_idx_int]) | (_pr_int > _high_arr[_idx_int])
+                ))
         add("Execution price sanity", "PASS" if bad_prices == 0 else "WARN", bad_prices, 0)
     else:
         add("Execution price sanity", "SKIP", "missing price/OHLC columns")
@@ -708,6 +704,15 @@ def _build_trade_analytics_sheet(ctx: DiagnosticsV2Context) -> DiagnosticsV2Shee
         if len(ctx.cycle_map) and "trade_id" in ctx.cycle_map.columns
         else {}
     )
+    # Precompute numpy arrays once — avoids 45k per-trade df.iloc calls
+    _has_ohlc = {"high", "low"}.issubset(ctx.df.columns)
+    _has_close = "close" in ctx.df.columns
+    _n_df = len(ctx.df)
+    _high_arr = pd.to_numeric(ctx.df["high"], errors="coerce").to_numpy(dtype=np.float64) if _has_ohlc else None
+    _low_arr = pd.to_numeric(ctx.df["low"], errors="coerce").to_numpy(dtype=np.float64) if _has_ohlc else None
+    _close_arr = pd.to_numeric(ctx.df["close"], errors="coerce").to_numpy(dtype=np.float64) if _has_close else None
+    _df_index = ctx.df.index
+
     rows: list[dict[str, Any]] = []
     for idx, trade in enumerate(trades.itertuples(index=False), start=1):
         trade_id = _trade_id_for_row(trade, idx)
@@ -721,7 +726,7 @@ def _build_trade_analytics_sheet(ctx: DiagnosticsV2Context) -> DiagnosticsV2Shee
 
         if not np.isfinite(entry_idx_f):
             quality = "missing_entry_index"
-        elif entry_idx_f < 0 or entry_idx_f >= len(ctx.df):
+        elif entry_idx_f < 0 or entry_idx_f >= _n_df:
             quality = "invalid_entry_index"
         elif not np.isfinite(exit_idx_f):
             quality = "missing_exit_index"
@@ -732,29 +737,31 @@ def _build_trade_analytics_sheet(ctx: DiagnosticsV2Context) -> DiagnosticsV2Shee
         else:
             entry_idx = int(entry_idx_f)
             exit_idx = int(exit_idx_f)
-            if exit_idx >= len(ctx.df):
-                exit_idx = len(ctx.df) - 1
+            if exit_idx >= _n_df:
+                exit_idx = _n_df - 1
                 quality = "exit_clipped"
-            if {"high", "low"}.issubset(ctx.df.columns):
-                window = ctx.df.iloc[entry_idx : exit_idx + 1]
+            if _has_ohlc:
                 entry_price = _safe_float(getattr(trade, "entry_price", np.nan))
-                if not np.isfinite(entry_price) or entry_price == 0:
-                    entry_price = _safe_float(ctx.df.iloc[entry_idx].get("close", np.nan))
+                if (not np.isfinite(entry_price) or entry_price == 0) and _close_arr is not None:
+                    entry_price = float(_close_arr[entry_idx]) if np.isfinite(_close_arr[entry_idx]) else float("nan")
                 if np.isfinite(entry_price) and entry_price != 0 and direction in {"long", "short"}:
-                    high = pd.to_numeric(window["high"], errors="coerce")
-                    low = pd.to_numeric(window["low"], errors="coerce")
+                    # Numpy slice — much faster than df.iloc + pd.to_numeric per trade
+                    hi_win = _high_arr[entry_idx : exit_idx + 1]
+                    lo_win = _low_arr[entry_idx : exit_idx + 1]
+                    hi_max = float(np.nanmax(hi_win)) if len(hi_win) > 0 else float("nan")
+                    lo_min = float(np.nanmin(lo_win)) if len(lo_win) > 0 else float("nan")
                     if direction == "long":
-                        mfe = (float(high.max()) - entry_price) / entry_price * 100.0
-                        mae = (float(low.min()) - entry_price) / entry_price * 100.0
+                        mfe = (hi_max - entry_price) / entry_price * 100.0
+                        mae = (lo_min - entry_price) / entry_price * 100.0
                     else:
-                        mfe = (entry_price - float(low.min())) / entry_price * 100.0
-                        mae = (entry_price - float(high.max())) / entry_price * 100.0
+                        mfe = (entry_price - lo_min) / entry_price * 100.0
+                        mae = (entry_price - hi_max) / entry_price * 100.0
                 elif direction == "unsupported":
                     quality = "unsupported_direction"
             else:
                 quality = "missing_ohlc"
-            if len(ctx.df.index) > entry_idx:
-                ts = ctx.df.index[entry_idx]
+            if _n_df > entry_idx:
+                ts = _df_index[entry_idx]
                 entry_bucket = getattr(ts, "hour", "missing")
 
         cycle = cycle_lookup.get(trade_id, {})
@@ -1345,14 +1352,38 @@ def _build_filter_attribution_sheet(ctx: DiagnosticsV2Context) -> DiagnosticsV2S
             }
         )
     else:
+        # Vectorized forward-return computation: extract close array once,
+        # use numpy indexing per horizon instead of per-row compute_forward_returns calls.
+        _close_arr = pd.to_numeric(ctx.df["close"], errors="coerce").to_numpy(dtype=np.float64)
+        _n_bars = len(_close_arr)
         for (universe, reason), event_indices in sorted(event_groups.items()):
-            unique_indices = sorted(set(idx for idx in event_indices if 0 <= idx < len(ctx.df)))
+            unique_indices = np.array(
+                sorted(set(int(i) for i in event_indices if 0 <= int(i) < _n_bars)),
+                dtype=np.int64,
+            )
             for horizon in (1, 3, 5, 10):
-                values = [
-                    compute_forward_returns(ctx.df, idx, horizons=(horizon,))[horizon]
-                    for idx in unique_indices
-                ]
-                series = pd.Series(values, dtype="float64").dropna()
+                if len(unique_indices) == 0:
+                    rows.append(
+                        {
+                            "Universe": universe,
+                            "Reason": reason,
+                            "Horizon": horizon,
+                            "Events": 0,
+                            "Mean forward return pct": np.nan,
+                            "Median forward return pct": np.nan,
+                            "Status": "SKIP",
+                            "Notes": "fixed-horizon close-to-close proxy",
+                        }
+                    )
+                    continue
+                target_idx = unique_indices + horizon
+                valid_mask = target_idx < _n_bars
+                base_prices = _close_arr[unique_indices[valid_mask]]
+                tgt_prices = _close_arr[target_idx[valid_mask]]
+                nonzero = base_prices != 0
+                fwd = np.full(int(valid_mask.sum()), np.nan, dtype=np.float64)
+                fwd[nonzero] = (tgt_prices[nonzero] - base_prices[nonzero]) / base_prices[nonzero] * 100.0
+                series = pd.Series(fwd, dtype="float64").dropna()
                 rows.append(
                     {
                         "Universe": universe,

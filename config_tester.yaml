@@ -1,20 +1,26 @@
-# Tester config: zigzag_st_mode D + wakeup_regime (full diagnostics export)
-# Run: python run_batch_tester.py --csv data.csv --config config_tester.yaml
+# Full diagnostics config for mass-run config #0551:
+# lite_atr010_mult10_ch_q060_ttl090_hold03_lw13_rev005
+#
+# Run example:
+#   python -m supertrend_optimizer.cli.tester --csv data.csv --config config_tester.yaml --out result_lite_atr010_mult10_ch_q060_ttl090_hold03_lw13_rev005_full_diagnostics.xlsx
 
 supertrend:
-  atr_period: 50
-  multiplier: 2.5
+  atr_period: 19
+  multiplier: 4.0
 
 trade_mode: revers
 period: false
 
-commission: 0.0000
+# MXU6 / MIX-9.26 futures cost model:
+# Finam 0.45 RUB + MOEX SCALPERFEE 7.70 RUB = 8.15 RUB per side.
+# Using MXU6 LAST_RUB ~= 228275 RUB: 8.15 / 228275 = 0.0000357025 per operation.
+commission: 0.0000357025
 
 warmup_period: 0
 warmup_period_auto: true
 
-periods_per_year: 252
-annualization_factor: 252
+periods_per_year: auto
+annualization_factor: auto
 annualization_basis: trading
 market: futures
 execution_model: open_to_open
@@ -50,6 +56,7 @@ export:
     cost_sensitivity: true
     remediation: true
     filter_diagnostics_sampled: true
+    # Reserved by the schema; these sheets are not implemented yet.
     returns_calendar: false
     exit_quality: false
     false_start_2: false
@@ -72,7 +79,7 @@ trade_filter:
     reversal_threshold: 0.001
     candidate_trigger_threshold: 0.012
     global_median: auto
-    local_window: 5
+    local_window: 8
     daily_reset: false
     # Supported only with candidate_trigger_threshold: auto.
     # candidate_trigger_quantile: 0.60
@@ -100,7 +107,7 @@ trade_filter:
     # exit_b_immediate_off: false
 
   time_filter:
-    enabled: false
+    enabled: true 
     window: "09:00-19:00"
 
   volume:
@@ -118,7 +125,7 @@ trade_filter:
     regime_high_ratio: 1.2
     direction_lookback_bars: 5
     baseline_session:
-      enabled: false
+      enabled: true
       window: "09:00-19:00"
 
   wakeup_regime:
@@ -127,7 +134,7 @@ trade_filter:
     entry:
       direction_mode: inverse
       candidate_height:
-        enabled: true
+        enabled: false
         quantile: 0.4
       candidate_age:
         enabled: false
@@ -138,7 +145,7 @@ trade_filter:
         long_window: 400
         min_ratio: 1.6
       volume_expansion:
-        enabled: false
+        enabled: true
         short_window: 10
         baseline_window: 1000
         min_ratio: 0.5
@@ -153,7 +160,7 @@ trade_filter:
         max_age_bars: 15
         timeout_bars: 20
       max_trades_per_cycle:
-        enabled: true
+        enabled: false
         max_trades: 1
       cycle_take_profit:
         enabled: false
@@ -164,7 +171,7 @@ trade_filter:
         mode: close_position
 
     position_freeze:
-      enabled: true
+      enabled: false
       min_hold_bars: 1
       apply_to: internal_opposite_st_flip
       release_action: apply_if_still_opposite

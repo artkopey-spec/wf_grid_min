@@ -1,7 +1,8 @@
 schema_version: 1
 # WF Grid profile for the current data.csv.
-# Data snapshot: 333797 1m bars, 2025-05-05 07:00 to 2026-06-23 13:58 MSK (+03:00).
-# Columns: time, open, high, low, close, Volume. The loader normalizes Volume -> volume.
+# Data snapshot: 422725 MIX 1m bars, 2024-10-10 10:00 to 2026-08-05 12:46 MSK.
+# 541 active days; median 860 bars/day. QUIK columns include OHLC and volume.
+# WF windows: 63000 train bars / 21000 test bars / 21000 step bars (3:1, anchor=end).
 # Run: python run.py --config config.yaml
 
 data:
@@ -17,7 +18,8 @@ optimization:
   trade_mode: "revers"
 
 backtest:
-  commission: 0.0000
+  # MIX commission per operation: 8.15 RUB / ~228275 RUB contract value.
+  commission: 0.0000357025
   min_trades_required: 3
   early_exit_enabled: false
   early_exit_max_drawdown: 0.50
@@ -32,20 +34,20 @@ validation:
     step_size: "21000bars"
     scheme: "rolling"
     anchor: "end"
-    min_train_bars: 500
-    min_test_bars: 100
+    min_train_bars: 63000
+    min_test_bars: 21000
 
 gates:
   step:
-    min_trades: 0
-    max_drawdown_threshold: -10.0
+    min_trades: 3
+    max_drawdown_threshold: -0.50
   candidate:
-    positive_median_threshold: -1000.0
-    min_trades_median: 0.0
-    worst_segment_pnl_threshold: null
-    max_drawdown_threshold: -10.0
-    min_total_trades: 0
-    min_ok_ratio: 0.0
+    positive_median_threshold: 0.0
+    min_trades_median: 8.0
+    worst_segment_pnl_threshold: -15.0
+    max_drawdown_threshold: -0.45
+    min_total_trades: 500
+    min_ok_ratio: 0.80
 
 ranking:
   mode: "gates_score"
@@ -55,8 +57,8 @@ ranking:
 
 scoring:
   normalization_mode: "rank"
-  min_passed_for_discrimination: 1
-  low_spread_threshold: 1.0e-6
+  min_passed_for_discrimination: 10
+  low_spread_threshold: 0.25
   score_weights:
     sum_pnl_pct_Median:        0.42
     profitable_segments_count: 0.34
@@ -64,18 +66,18 @@ scoring:
     abs_max_drawdown_Min:      0.12
 
 status:
-  min_meaningful_bars: 1
+  min_meaningful_bars: 100
 
 bucket:
-  atr_bucket_step: 3
-  mult_bucket_step: 0.2
-  min_buckets_for_median: 1
+  atr_bucket_step: 9
+  mult_bucket_step: 0.6
+  min_buckets_for_median: 5
 
 execution:
   parallel_enabled: true
   max_workers: null
   chunksize: null
-  fallback_to_sequential: false
+  fallback_to_sequential: true
 
 export:
   retain_per_bar_filter_diagnostics: false
@@ -112,7 +114,7 @@ trade_filter:
   #   export_trigger_columns: true
 
   time_filter:
-    enabled: false
+    enabled: true
     window: "09:00-19:00"
 
   volume:

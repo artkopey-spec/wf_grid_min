@@ -239,6 +239,8 @@ def run_single_backtest(
         volume=volume,
         time_filter_runtime=time_filter_runtime,
         collect_filter_diagnostics=collect_filter_diagnostics,
+        caller_mode=caller_mode,
+        segmentation_mode="legacy",
     )
     returns = _artifacts.returns
     equity_curve = _artifacts.equity_curve
@@ -324,14 +326,14 @@ def run_single_backtest(
         # Step 4.2: Attach trade-level filter diagnostics (WP7 / §8.3, §8.4).
         # Called on extended-slice indices BEFORE any OOS trim/rebase.
         # Adds entry_filter_state, entry_trigger_source, exit_reason columns.
-        trade_filter_diagnostics = (
-            _artifacts.filter_diagnostics
-            if _artifacts.filter_diagnostics is not None
-            else _artifacts.filter_execution_metadata
-        )
-        if trade_filter_diagnostics is not None and trades_df is not None and len(trades_df) > 0:
+        if (
+            _artifacts.filter_diagnostics is not None
+            or _artifacts.filter_execution_metadata is not None
+        ) and trades_df is not None and len(trades_df) > 0:
             trades_df = attach_trade_filter_diagnostics(
-                trades_df, trade_filter_diagnostics
+                trades_df,
+                _artifacts.filter_diagnostics,
+                execution_metadata=_artifacts.filter_execution_metadata,
             )
 
         # Step 4.5: Recalculate trade-based metrics from trades_df.
@@ -446,6 +448,13 @@ def run_single_backtest(
         period_label="",
         filter_diagnostics=_artifacts.filter_diagnostics,
         filter_config_snapshot=filter_config_snapshot,
+        filter_execution_metadata=_artifacts.filter_execution_metadata,
+        reversal_confirmation_events=getattr(
+            _artifacts, "reversal_confirmation_events", None
+        ),
+        reversal_confirmation_summary=getattr(
+            _artifacts, "reversal_confirmation_summary", None
+        ),
     )
     
     return result

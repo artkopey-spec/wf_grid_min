@@ -93,6 +93,18 @@ class PeriodResult:
     filter_diagnostics_summary: Optional[Dict[str, Any]] = field(default=None)
     filter_config_snapshot: Optional[dict] = None
 
+    @property
+    def filter_execution_metadata(self) -> Optional[Dict[str, np.ndarray]]:
+        return self.result.filter_execution_metadata
+
+    @property
+    def reversal_confirmation_events(self) -> Optional[tuple]:
+        return self.result.reversal_confirmation_events
+
+    @property
+    def reversal_confirmation_summary(self) -> Optional[object]:
+        return self.result.reversal_confirmation_summary
+
     # Convenience accessors (delegate to result)
     @property
     def metrics(self) -> Dict[str, Any]:

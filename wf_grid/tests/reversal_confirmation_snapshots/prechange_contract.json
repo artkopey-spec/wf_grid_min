@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "trend": [0, 1, 1, -1, -1, 1, 0, -1],
+  "positions": {
+    "revers": [0, 0, 1, 1, -1, -1, 1, 0],
+    "both": [0, 0, 1, 1, -1, -1, 1, 0],
+    "long": [0, 0, 1, 1, 0, 0, 1, 0],
+    "short": [0, 0, 0, 0, -1, -1, 0, 0]
+  },
+  "position_dtype": "int8",
+  "time_only_positions": [0, 0, 1, 1, 0, -1, 0, 0],
+  "time_only_metadata": {
+    "daily_reset_event": [0, 0, 0, 0, 0, 0, 0, 0],
+    "time_filter_reset_event": [0, 0, 0, 1, 0, 1, 0, 0]
+  },
+  "inactive_trade_columns": [
+    "trade_id",
+    "direction",
+    "entry_time",
+    "entry_index",
+    "entry_price",
+    "exit_time",
+    "exit_index",
+    "exit_price",
+    "bars_held",
+    "gross_pnl_pct",
+    "commission_pct",
+    "net_pnl_pct",
+    "supertrend_color"
+  ],
+  "inactive_excel_prefix": ["Tester_Config", "Summary"]
+}

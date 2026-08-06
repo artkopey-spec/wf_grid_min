@@ -33,9 +33,13 @@ from supertrend_optimizer.core.trade_filter_config import (
     is_trade_filter_enabled,
     is_volume_enabled,
     is_zigzag_enabled,
+    is_reversal_confirmation_enabled,
+    assert_reversal_confirmation_allowed,
     resolve_trade_filter_mode,
 )
 from supertrend_optimizer.utils.enums import ExecutionModel
+from supertrend_optimizer.utils.exceptions import ConfigError
+from supertrend_optimizer.core.position_target import target_from_trend
 
 
 @dataclass
@@ -63,6 +67,8 @@ class RawBacktestArtifacts:
         default=None
     )
     filter_config_snapshot: Optional[dict] = None
+    reversal_confirmation_events: Optional[tuple] = None
+    reversal_confirmation_summary: Optional[object] = None
 
 
 def generate_positions(
@@ -111,13 +117,9 @@ def generate_positions(
             "CLOSE_TO_CLOSE was removed due to look-ahead bias."
         )
 
-    # 1-bar lag: positions[1:] = trend[:-1], positions[0] = 0 (already set)
-    if trade_mode in {"revers", "both"}:
-        positions[1:] = trend[:-1]
-    elif trade_mode == "long":
-        positions[1:] = np.where(trend[:-1] == 1, 1, 0)
-    elif trade_mode == "short":
-        positions[1:] = np.where(trend[:-1] == -1, -1, 0)
+    # 1-bar lag: positions[1:] = target[:-1], positions[0] = 0.
+    target = target_from_trend(trend, trade_mode)
+    positions[1:] = target[:-1]
 
     return positions
 
@@ -333,6 +335,8 @@ def run_backtest_fast(
     *,
     time_filter_runtime: Any = None,
     collect_filter_diagnostics: bool = True,
+    caller_mode: str = "",
+    segmentation_mode: str = "legacy",
 ) -> RawBacktestArtifacts:
     """Run fast backtest without DataFrame overhead.
 
@@ -401,6 +405,20 @@ def run_backtest_fast(
         )
 
     # Step 1: Calculate SuperTrend (F-21b: pass precomputed_atr if available)
+    reversal_enabled = is_reversal_confirmation_enabled(trade_filter_config)
+    if reversal_enabled:
+        if getattr(trade_filter_config, "_reversal_validated_for", None) != caller_mode:
+            raise ConfigError(
+                "active reversal confirmation requires a validated config "
+                "for the current caller"
+            )
+        assert_reversal_confirmation_allowed(
+            caller_mode,
+            early_exit_enabled,
+            execution_model,
+            segmentation_mode,
+        )
+
     trend, supertrend = calculate_supertrend(
         high, low, close, atr_period, multiplier, precomputed_atr=precomputed_atr
     )
@@ -409,6 +427,8 @@ def run_backtest_fast(
     filter_diagnostics: "Optional[Dict[str, np.ndarray]]" = None
     filter_execution_metadata: "Optional[Dict[str, np.ndarray]]" = None
     filter_config_snapshot: Optional[dict] = None
+    reversal_confirmation_events: Optional[tuple] = None
+    reversal_confirmation_summary: Optional[object] = None
     zigzag_enabled = is_zigzag_enabled(trade_filter_config)
     volume_enabled = is_volume_enabled(trade_filter_config)
     time_filter_enabled = is_time_filter_enabled(trade_filter_config)
@@ -507,6 +527,32 @@ def run_backtest_fast(
             filter_result, "execution_metadata", None
         )
         filter_config_snapshot = filter_result.filter_config_snapshot
+    elif reversal_enabled:
+        assert_reversal_confirmation_allowed(
+            caller_mode,
+            early_exit_enabled,
+            execution_model,
+            segmentation_mode,
+        )
+        from supertrend_optimizer.core.reversal_confirmation_filter import (
+            apply as _reversal_apply,
+        )
+
+        filter_result = _reversal_apply(
+            trend=trend,
+            trade_mode=trade_mode,
+            confirm_bars=trade_filter_config.reversal_confirmation.confirm_bars,
+            index=index,
+            time_filter_runtime=resolved_time_runtime,
+            execution_model=execution_model,
+            collect_filter_diagnostics=collect_filter_diagnostics,
+        )
+        positions = filter_result.positions
+        filter_diagnostics = filter_result.filter_diagnostics
+        filter_execution_metadata = filter_result.execution_metadata
+        filter_config_snapshot = filter_result.filter_config_snapshot
+        reversal_confirmation_events = filter_result.attempts
+        reversal_confirmation_summary = filter_result.summary
     elif effective_mode == "time_only":
         from supertrend_optimizer.core.time_only_filter import apply as _time_apply
 
@@ -600,4 +646,6 @@ def run_backtest_fast(
         filter_diagnostics=filter_diagnostics,
         filter_execution_metadata=filter_execution_metadata,
         filter_config_snapshot=filter_config_snapshot,
+        reversal_confirmation_events=reversal_confirmation_events,
+        reversal_confirmation_summary=reversal_confirmation_summary,
     )

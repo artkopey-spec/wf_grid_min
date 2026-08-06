@@ -68,6 +68,10 @@ trade_filter:
   zigzag:
     enabled: false
 
+  reversal_confirmation:
+    enabled: true
+    confirm_bars: 1
+
   time_filter:
     enabled: true
     windows:

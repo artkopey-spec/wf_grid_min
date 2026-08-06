@@ -211,6 +211,13 @@ def _cycle_mode_from_config(trade_filter_config: Any, explicit_mode: str | None)
 
 
 def _diagnostics_mode(ctx: DiagnosticsV2Context) -> str:
+    snapshot_mode = str(
+        (getattr(ctx.pr_100, "filter_config_snapshot", None) or {}).get(
+            "mode", ""
+        )
+    )
+    if snapshot_mode in {"reversal_only", "reversal_and_time"}:
+        return "reversal"
     fd = ctx.fd_100 or {}
     if "trade_filter_state" not in fd:
         return "time_only"
@@ -260,6 +267,9 @@ def derive_trade_cycle_map(
         return status_rows("missing_fd_100")
     if "entry_index" not in trades.columns:
         return status_rows("missing_entry_index")
+    resolved_mode = mode or "zigzag"
+    if resolved_mode == "reversal":
+        return status_rows("unsupported_mode")
     if "trade_filter_state" not in fd_100:
         return status_rows("missing_required_columns")
 
@@ -267,7 +277,6 @@ def derive_trade_cycle_map(
     if state_arr.ndim == 0 or len(state_arr) == 0:
         return status_rows("missing_required_columns")
 
-    resolved_mode = mode or "zigzag"
     if resolved_mode in {"zigzag", "zigzag_st_mode", "D", "A", "B", "C", "A+B", "C+B"}:
         from supertrend_optimizer.io.excel_tester import _completed_cycle_segments
 
@@ -1595,11 +1604,15 @@ def build_diagnostics_v2_context(
         trades_100 = pd.DataFrame()
     fd_100 = getattr(pr_100, "filter_diagnostics", None)
     summary = getattr(pr_100, "filter_diagnostics_summary", None)
-    cycle_mode = (
-        "time_only"
-        if fd_100 is not None and "trade_filter_state" not in fd_100
-        else _cycle_mode_from_config(trade_filter_config, None)
+    snapshot_mode = str(
+        (getattr(pr_100, "filter_config_snapshot", None) or {}).get("mode", "")
     )
+    if snapshot_mode in {"reversal_only", "reversal_and_time"}:
+        cycle_mode = "reversal"
+    elif fd_100 is not None and "trade_filter_state" not in fd_100:
+        cycle_mode = "time_only"
+    else:
+        cycle_mode = _cycle_mode_from_config(trade_filter_config, None)
     cycle_map = derive_trade_cycle_map(
         fd_100,
         trades_100,

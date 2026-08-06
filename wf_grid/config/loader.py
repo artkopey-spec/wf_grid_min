@@ -172,6 +172,7 @@ _ALLOWED_KEYS: dict[str, set[str]] = {
         "lifecycle",
         "diagnostics",
         "time_filter",
+        "reversal_confirmation",
         "volume",
         "wakeup_regime",
     },
@@ -179,6 +180,10 @@ _ALLOWED_KEYS: dict[str, set[str]] = {
         "enabled",
         "window",
         "windows",
+    },
+    "trade_filter.reversal_confirmation": {
+        "enabled",
+        "confirm_bars",
     },
     "trade_filter.zigzag": {
         "enabled",

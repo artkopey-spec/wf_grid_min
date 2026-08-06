@@ -13,17 +13,23 @@ from wf_grid.config.loader import load_grid_config
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_production_wf_and_tester_configs_share_time_only_identity() -> None:
+def test_production_profiles_share_time_windows_after_reversal_activation() -> None:
     wf_config = load_grid_config(str(ROOT / "config.yaml"))
     tester_config = load_tester_config(str(ROOT / "config_tester.yaml"))
 
     wf_filter = wf_config.trade_filter
     tester_filter = tester_config["trade_filter"]
     assert resolve_trade_filter_mode(wf_filter) == "time_only"
-    assert resolve_trade_filter_mode(tester_filter) == "time_only"
-    assert trade_filter_effective_snapshot(
-        wf_filter
-    ) == trade_filter_effective_snapshot(tester_filter)
+    assert resolve_trade_filter_mode(tester_filter) == "reversal_and_time"
+    wf_snapshot = trade_filter_effective_snapshot(wf_filter)
+    tester_snapshot = trade_filter_effective_snapshot(tester_filter)
+    assert (
+        wf_snapshot["canonical_windows_minutes"]
+        == tester_snapshot["canonical_windows_minutes"]
+    )
+    assert wf_snapshot["time_filter_active"] is True
+    assert tester_snapshot["time_filter_active"] is True
+    assert tester_snapshot["reversal_confirmation_active"] is True
 
 
 def test_runtime_spec_contains_required_migration_contracts() -> None:

@@ -10,23 +10,42 @@ from supertrend_optimizer.utils.exceptions import ConfigError
 
 def attach_trade_filter_diagnostics(
     trades_df: Any,
-    filter_diagnostics: Dict[str, np.ndarray],
+    heavy_diagnostics: Dict[str, np.ndarray] | None,
+    *,
+    execution_metadata: Dict[str, np.ndarray] | None = None,
 ) -> Any:
     """Attach filter diagnostics columns to an extracted trades DataFrame.
 
     Common reset fields are sufficient. ZigZag-specific and volume-specific
     fields are consumed only when present.
     """
-    state_arr = filter_diagnostics.get("trade_filter_state")
-    trigger_arr = filter_diagnostics.get("trade_filter_trigger_source")
-    daily_reset_arr = filter_diagnostics.get("daily_reset_event")
-    time_reset_arr = filter_diagnostics.get("time_filter_reset_event")
-    imm_triggered_arr = filter_diagnostics.get("exit_b_immediate_off_triggered")
-    volume_reason_arr = filter_diagnostics.get("volume_condition_block_reason")
-    block_reason_arr = filter_diagnostics.get("filter_block_reason")
-    wakeup_exit_reason_arr = filter_diagnostics.get("wakeup_exit_reason")
-    wakeup_position_action_arr = filter_diagnostics.get("wakeup_position_action")
-    state_at_bar_start_arr = filter_diagnostics.get("state_at_bar_start")
+    diagnostics = heavy_diagnostics or {}
+    metadata = execution_metadata or {}
+    # Backward compatibility: older callers pass compact reset metadata as the
+    # second positional argument. New callers pass the namespaces separately.
+    state_arr = diagnostics.get("trade_filter_state")
+    trigger_arr = diagnostics.get("trade_filter_trigger_source")
+    daily_reset_arr = metadata.get(
+        "daily_reset_event", diagnostics.get("daily_reset_event")
+    )
+    time_reset_arr = metadata.get(
+        "time_filter_reset_event", diagnostics.get("time_filter_reset_event")
+    )
+    reversal_event_arr = metadata.get(
+        "reversal_confirmation_execution_event_id"
+    )
+    reversal_close_arr = metadata.get(
+        "reversal_confirmation_confirmed_close"
+    )
+    reversal_open_arr = metadata.get(
+        "reversal_confirmation_confirmed_open"
+    )
+    imm_triggered_arr = diagnostics.get("exit_b_immediate_off_triggered")
+    volume_reason_arr = diagnostics.get("volume_condition_block_reason")
+    block_reason_arr = diagnostics.get("filter_block_reason")
+    wakeup_exit_reason_arr = diagnostics.get("wakeup_exit_reason")
+    wakeup_position_action_arr = diagnostics.get("wakeup_position_action")
+    state_at_bar_start_arr = diagnostics.get("state_at_bar_start")
 
     length_source = next(
         (
@@ -35,6 +54,7 @@ def attach_trade_filter_diagnostics(
                 state_arr,
                 daily_reset_arr,
                 time_reset_arr,
+                reversal_event_arr,
                 block_reason_arr,
             )
             if values is not None
@@ -54,12 +74,30 @@ def attach_trade_filter_diagnostics(
     wakeup_cycle_exit_reasons = []
     wakeup_position_actions = []
     entry_volume_block_reasons = []
+    entry_reversal_event_ids: list[int | None] = []
+    exit_reversal_event_ids: list[int | None] = []
 
     for row in trades_df.itertuples(index=False):
         entry_index = int(row.entry_index)
         exit_index = int(row.exit_index)
         entry_signal_idx = max(entry_index - 1, 0)
         exit_signal_idx = max(exit_index - 1, 0)
+        entry_event_id = _event_id_at(
+            reversal_event_arr,
+            reversal_open_arr,
+            entry_index,
+        )
+        exit_event_id = (
+            _event_id_at(
+                reversal_event_arr,
+                reversal_close_arr,
+                exit_index,
+            )
+            if exit_index > entry_index
+            else None
+        )
+        entry_reversal_event_ids.append(entry_event_id)
+        exit_reversal_event_ids.append(exit_event_id)
 
         if state_arr is not None and entry_signal_idx < len(state_arr):
             entry_filter_states.append(str(state_arr[entry_signal_idx]))
@@ -113,6 +151,8 @@ def attach_trade_filter_diagnostics(
             exit_reasons.append("filter_daily_reset")
         elif time_reset_at_exit:
             exit_reasons.append("filter_time_reset")
+        elif exit_event_id is not None:
+            exit_reasons.append("reversal_confirmation_confirmed")
         elif wakeup_exit_reason is not None:
             exit_reasons.append(wakeup_exit_reason)
         elif exit_index >= pending_exit_idx:
@@ -142,11 +182,35 @@ def attach_trade_filter_diagnostics(
     if wakeup_position_action_arr is not None:
         out["wakeup_position_action"] = wakeup_position_actions
     out["exit_reason"] = exit_reasons
+    if reversal_event_arr is not None:
+        import pandas as pd
+
+        out["entry_reversal_confirmation_event_id"] = pd.array(
+            entry_reversal_event_ids, dtype="Int64"
+        )
+        out["exit_reversal_confirmation_event_id"] = pd.array(
+            exit_reversal_event_ids, dtype="Int64"
+        )
+        out["exit_reason"] = out["exit_reason"].astype("string")
     return out
 
 
 def _flag_at(arr: Any, idx: int) -> bool:
     return arr is not None and idx < len(arr) and int(arr[idx]) == 1
+
+
+def _event_id_at(event_arr: Any, flag_arr: Any, idx: int) -> int | None:
+    if (
+        event_arr is None
+        or flag_arr is None
+        or idx < 0
+        or idx >= len(event_arr)
+        or idx >= len(flag_arr)
+        or int(flag_arr[idx]) != 1
+    ):
+        return None
+    event_id = int(event_arr[idx])
+    return event_id if event_id >= 0 else None
 
 
 def _wakeup_exit_reason_at(arr: Any, idx: int) -> str | None:

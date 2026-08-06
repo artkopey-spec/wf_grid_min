@@ -99,6 +99,10 @@ TRADES_DISPLAY_NAMES = {
     "entry_trigger_source":       "Entry Trigger Source",
     "wakeup_cycle_exit_reason":   "Wakeup Cycle Exit Reason",
     "wakeup_position_action":     "Wakeup Position Action",
+    "entry_reversal_confirmation_event_id":
+        "Entry Reversal Confirmation Event ID",
+    "exit_reversal_confirmation_event_id":
+        "Exit Reversal Confirmation Event ID",
     "exit_reason":                "Trade Close Reason",
 }
 
@@ -108,8 +112,19 @@ _FILTER_TRADE_COLUMN_KEYS: frozenset = frozenset({
     "entry_trigger_source",
     "wakeup_cycle_exit_reason",
     "wakeup_position_action",
+    "entry_reversal_confirmation_event_id",
+    "exit_reversal_confirmation_event_id",
     "exit_reason",
 })
+_REVERSAL_TRADE_COLUMN_KEYS: frozenset = frozenset({
+    "entry_reversal_confirmation_event_id",
+    "exit_reversal_confirmation_event_id",
+})
+_LEGACY_ENABLED_TRADE_DISPLAY_COLS: List[str] = [
+    value
+    for key, value in TRADES_DISPLAY_NAMES.items()
+    if key not in _REVERSAL_TRADE_COLUMN_KEYS
+]
 
 # Canonical trade column display names (no filter cols вЂ” for disabled-path empty header)
 _CANONICAL_TRADE_DISPLAY_COLS: List[str] = [
@@ -2267,6 +2282,7 @@ def _prepare_legacy_trades_df(
     filter_enabled: bool,
     filter_diagnostics_available: bool,
     filter_diagnostics: Optional[Mapping[str, Any]] = None,
+    reversal_active: bool = False,
 ) -> pd.DataFrame:
     """Rename and prepare trades_df for the legacy export, handling filter columns.
 
@@ -2286,6 +2302,19 @@ def _prepare_legacy_trades_df(
     else:
         # Empty trades вЂ” choose header set based on filter state (plan В§9.4)
         if filter_enabled and filter_diagnostics_available:
+            if reversal_active:
+                return pd.DataFrame(
+                    columns=[
+                        *_CANONICAL_TRADE_DISPLAY_COLS,
+                        TRADES_DISPLAY_NAMES[
+                            "entry_reversal_confirmation_event_id"
+                        ],
+                        TRADES_DISPLAY_NAMES[
+                            "exit_reversal_confirmation_event_id"
+                        ],
+                        TRADES_DISPLAY_NAMES["exit_reason"],
+                    ]
+                )
             if (
                 filter_diagnostics is not None
                 and "trade_filter_state" not in filter_diagnostics
@@ -2296,7 +2325,20 @@ def _prepare_legacy_trades_df(
                         TRADES_DISPLAY_NAMES["exit_reason"],
                     ]
                 )
-            return pd.DataFrame(columns=list(TRADES_DISPLAY_NAMES.values()))
+            return pd.DataFrame(columns=_LEGACY_ENABLED_TRADE_DISPLAY_COLS)
+        elif reversal_active:
+            return pd.DataFrame(
+                columns=[
+                    *_CANONICAL_TRADE_DISPLAY_COLS,
+                    TRADES_DISPLAY_NAMES[
+                        "entry_reversal_confirmation_event_id"
+                    ],
+                    TRADES_DISPLAY_NAMES[
+                        "exit_reversal_confirmation_event_id"
+                    ],
+                    TRADES_DISPLAY_NAMES["exit_reason"],
+                ]
+            )
         else:
             return pd.DataFrame(columns=_CANONICAL_TRADE_DISPLAY_COLS)
 
@@ -2561,6 +2603,68 @@ def export_tester_results(
         and trade_filter_config.diagnostics.export_trigger_columns
     )
     pr_100 = next((pr for pr in period_results if pr.period_label == "100%"), None)
+    effective_mode = (
+        str((getattr(pr_100, "filter_config_snapshot", None) or {}).get("mode", ""))
+        if pr_100 is not None
+        else ""
+    )
+    reversal_active = effective_mode in {
+        "reversal_only",
+        "reversal_and_time",
+    }
+    execution_signals_df: Optional[pd.DataFrame] = None
+    reversal_events_df: Optional[pd.DataFrame] = None
+    if reversal_active:
+        run_metadata_payload.setdefault("signals_schema_version", 1)
+        run_metadata_payload.setdefault("signals_semantics", "raw_st_analytics")
+        run_metadata_payload.setdefault("export_schema_version", 2)
+        if df is None or pr_100 is None:
+            raise ValueError("active reversal export requires df and 100% result")
+        from supertrend_optimizer.testing.reversal_confirmation_export import (
+            build_execution_signals,
+            build_reversal_confirmation_events,
+        )
+
+        open_column = "open" if "open" in df.columns else "Open"
+        execution_signals_df = build_execution_signals(
+            positions=pr_100.result.positions,
+            execution_prices=df[open_column].to_numpy(),
+            index=df.index,
+            execution_metadata=pr_100.filter_execution_metadata,
+        )
+        reversal_events_df = build_reversal_confirmation_events(
+            pr_100.reversal_confirmation_events or ()
+        )
+        from supertrend_optimizer.testing.run_identity import (
+            build_tester_run_fingerprint,
+        )
+        from supertrend_optimizer.testing.runner import PERIOD_SPLITS
+
+        split_fraction_by_label = dict(PERIOD_SPLITS)
+        actual_period_splits: list[tuple[str, float]] = []
+        for period_result in period_results:
+            label = str(period_result.period_label)
+            if label not in split_fraction_by_label:
+                raise ValueError(
+                    "active reversal export cannot fingerprint unknown "
+                    f"period split label: {label!r}"
+                )
+            actual_period_splits.append(
+                (label, float(split_fraction_by_label[label]))
+            )
+
+        run_metadata_payload.setdefault(
+            "tester_run_fingerprint",
+            build_tester_run_fingerprint(
+                df=df,
+                atr_period=pr_100.atr_period,
+                multiplier=pr_100.multiplier,
+                trade_mode=pr_100.trade_mode,
+                commission=pr_100.commission,
+                trade_filter_config=trade_filter_config,
+                period_splits=actual_period_splits,
+            ),
+        )
     diagnostics_v2_gate = (
         filter_enabled
         and export_diagnostics
@@ -2656,6 +2760,7 @@ def export_tester_results(
                     filter_enabled=filter_enabled,
                     filter_diagnostics_available=(pr.filter_diagnostics is not None),
                     filter_diagnostics=pr.filter_diagnostics,
+                    reversal_active=reversal_active,
                 )
                 trades_df.to_excel(writer, sheet_name=trades_sheet, index=False)
                 if len(trades_df) > 0:
@@ -2664,6 +2769,17 @@ def export_tester_results(
         # в”Ђв”Ђ Signals sheet в”Ђв”Ђ
         if export_signals and signals_df is not None:
             _write_signals_sheet(writer, "Signals", signals_df)
+        if export_signals and reversal_active:
+            if execution_signals_df is None or reversal_events_df is None:
+                raise RuntimeError(
+                    "active reversal export bundle was not constructed"
+                )
+            execution_signals_df.to_excel(
+                writer, sheet_name="ExecutionSignals", index=False
+            )
+            reversal_events_df.to_excel(
+                writer, sheet_name="ReversalConfirmationEvents", index=False
+            )
 
         # в”Ђв”Ђ False start sheet в”Ђв”Ђ
         trades_100_raw = pr_100.trades_df if pr_100 is not None else None

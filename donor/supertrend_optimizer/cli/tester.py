@@ -44,6 +44,7 @@ from supertrend_optimizer.core.trade_filter_config import (
     is_trade_filter_enabled,
     is_volume_enabled,
     is_zigzag_enabled,
+    is_reversal_confirmation_enabled,
     resolve_zigzag_enabled_in_place,
     resolve_volume_enabled_in_place,
     resolve_trade_filter_mode_in_place,
@@ -493,6 +494,10 @@ def load_tester_config(
             is_trade_filter_enabled(tf_cfg)
             and config["segmentation"]["mode"] == "equal_blocks"
         ):
+            if is_reversal_confirmation_enabled(tf_cfg):
+                raise ConfigError(
+                    "reversal_confirmation_equal_blocks_unsupported"
+                )
             raise ConfigError(
                 "equal_blocks segmentation is not supported with "
                 "trade_filter.enabled=true; use 'legacy' segmentation instead. "

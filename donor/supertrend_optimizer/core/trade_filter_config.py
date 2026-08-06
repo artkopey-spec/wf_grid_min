@@ -103,6 +103,20 @@ _V3_INIT_FAILURE_KEYS = frozenset({
     "position_freeze_min_hold_bars_invalid",
     "position_freeze_apply_to_invalid",
     "position_freeze_release_action_invalid",
+    "reversal_confirmation_not_mapping",
+    "reversal_confirmation_enabled_missing",
+    "reversal_confirmation_enabled_invalid_type",
+    "reversal_confirmation_confirm_bars_missing",
+    "reversal_confirmation_confirm_bars_invalid_type",
+    "reversal_confirmation_confirm_bars_out_of_range",
+    "reversal_confirmation_confirm_bars_present_when_disabled",
+    "reversal_confirmation_conflicting_capability",
+    "reversal_confirmation_wakeup_unsupported",
+    "reversal_confirmation_position_freeze_unsupported",
+    "reversal_confirmation_unsupported_pipeline",
+    "reversal_confirmation_equal_blocks_unsupported",
+    "reversal_confirmation_early_exit_unsupported",
+    "reversal_confirmation_execution_model_unsupported",
 })
 
 # WP-T3 step 6 — caller_pipeline whitelist for type=zigzag_st_mode.
@@ -172,6 +186,14 @@ class TradeFilterTimeFilterConfig:
     _start_minute: Optional[int] = field(default=None, repr=False)
     _end_hour: Optional[int] = field(default=None, repr=False)
     _end_minute: Optional[int] = field(default=None, repr=False)
+
+
+@dataclass
+class TradeFilterReversalConfirmationConfig:
+    """Raw reversal-confirmation values; validation performs no coercion."""
+
+    enabled: object = None
+    confirm_bars: object = None
 
 
 @dataclass
@@ -425,11 +447,15 @@ class TradeFilterConfig:
     time_filter: TradeFilterTimeFilterConfig = field(
         default_factory=TradeFilterTimeFilterConfig
     )
+    reversal_confirmation: Optional[
+        TradeFilterReversalConfirmationConfig
+    ] = None
     volume: Optional[TradeFilterVolumeConfig] = None
     wakeup_regime: Optional[TradeFilterWakeupRegimeConfig] = None
     # Raw YAML presence marker.  ``None`` means "unknown / hand-built config",
     # so runtime consumers fall back to the historical duck-typed behaviour.
     _raw_triggers_present: Optional[bool] = field(default=None, repr=False)
+    _reversal_validated_for: Optional[str] = field(default=None, repr=False)
 
 
 # ---------------------------------------------------------------------------
@@ -474,46 +500,102 @@ def is_time_filter_enabled(tf: object) -> bool:
     )
 
 
+def is_reversal_confirmation_enabled(tf: object) -> bool:
+    if not is_trade_filter_enabled(tf):
+        return False
+    reversal = getattr(tf, "reversal_confirmation", None)
+    return (
+        reversal is not None
+        and getattr(reversal, "enabled", None) is True
+    )
+
+
+@dataclass(frozen=True)
+class ActiveTradeFilterCapabilities:
+    root_enabled: bool
+    zigzag: bool
+    volume: bool
+    time_filter: bool
+    reversal_confirmation: bool
+    effective_mode: str
+
+
+def resolve_active_trade_filter_capabilities(
+    tf: object,
+) -> ActiveTradeFilterCapabilities:
+    root = is_trade_filter_enabled(tf)
+    if not root:
+        return ActiveTradeFilterCapabilities(
+            False, False, False, False, False, "disabled"
+        )
+    zigzag = is_zigzag_enabled(tf)
+    volume = is_volume_enabled(tf)
+    time_filter = is_time_filter_enabled(tf)
+    reversal = is_reversal_confirmation_enabled(tf)
+    if reversal and (zigzag or volume):
+        raise ConfigError("reversal_confirmation_conflicting_capability")
+    if reversal:
+        mode = "reversal_and_time" if time_filter else "reversal_only"
+    else:
+        modes = {
+            (False, False, True): "time_only",
+            (False, True, False): "volume_only",
+            (False, True, True): "volume_and_time",
+            (True, False, False): "zigzag_only",
+            (True, False, True): "zigzag_and_time",
+            (True, True, False): "zigzag_and_volume",
+            (True, True, True): "zigzag_volume_and_time",
+        }
+        try:
+            mode = modes[(zigzag, volume, time_filter)]
+        except KeyError as exc:
+            raise ValueError(
+                "at least one trade subfilter must be enabled when "
+                "trade_filter.enabled=true: zigzag, volume, time_filter, "
+                "or reversal_confirmation"
+            ) from exc
+    return ActiveTradeFilterCapabilities(
+        root, zigzag, volume, time_filter, reversal, mode
+    )
+
+
 def is_any_trade_subfilter_enabled(tf: object) -> bool:
     """Return whether any lifecycle-owning or gating subfilter is active."""
     return (
         is_zigzag_enabled(tf)
         or is_volume_enabled(tf)
         or is_time_filter_enabled(tf)
+        or is_reversal_confirmation_enabled(tf)
     )
 
 
 def resolve_trade_filter_mode(tf: object) -> str:
     """Resolve the canonical effective trade-filter mode."""
-    if not is_trade_filter_enabled(tf):
-        return "disabled"
+    return resolve_active_trade_filter_capabilities(tf).effective_mode
 
-    zigzag = is_zigzag_enabled(tf)
-    volume = is_volume_enabled(tf)
-    time_filter = is_time_filter_enabled(tf)
-    modes = {
-        (False, False, True): "time_only",
-        (False, True, False): "volume_only",
-        (False, True, True): "volume_and_time",
-        (True, False, False): "zigzag_only",
-        (True, False, True): "zigzag_and_time",
-        (True, True, False): "zigzag_and_volume",
-        (True, True, True): "zigzag_volume_and_time",
-    }
-    try:
-        return modes[(zigzag, volume, time_filter)]
-    except KeyError as exc:
-        raise ValueError(
-            "at least one trade subfilter must be enabled when "
-            "trade_filter.enabled=true: zigzag, volume, or time_filter"
-        ) from exc
+
+def assert_reversal_confirmation_allowed(
+    caller: str,
+    early_exit_enabled: bool,
+    execution_model: object,
+    segmentation_mode: str = "legacy",
+) -> None:
+    if caller not in {"single", "tester"}:
+        raise ConfigError("reversal_confirmation_unsupported_pipeline")
+    if caller == "tester" and segmentation_mode != "legacy":
+        raise ConfigError("reversal_confirmation_equal_blocks_unsupported")
+    if early_exit_enabled:
+        raise ConfigError("reversal_confirmation_early_exit_unsupported")
+    model_value = getattr(execution_model, "value", execution_model)
+    if model_value != "open_to_open":
+        raise ConfigError("reversal_confirmation_execution_model_unsupported")
 
 
 def trade_filter_public_snapshot(tf: object) -> dict:
     """Return the small user-facing trade-filter configuration snapshot."""
     time_filter = getattr(tf, "time_filter", None)
     windows = getattr(time_filter, "windows", None)
-    return {
+    snapshot = {
         "trade_filter": {
             "enabled": getattr(tf, "enabled", None) is True,
             "type": getattr(tf, "type", None),
@@ -532,6 +614,12 @@ def trade_filter_public_snapshot(tf: object) -> dict:
             },
         }
     }
+    if is_reversal_confirmation_enabled(tf):
+        snapshot["trade_filter"]["reversal_confirmation"] = {
+            "enabled": True,
+            "confirm_bars": int(tf.reversal_confirmation.confirm_bars),
+        }
+    return snapshot
 
 
 def trade_filter_effective_snapshot(tf: object) -> dict:
@@ -550,7 +638,7 @@ def trade_filter_effective_snapshot(tf: object) -> dict:
         canonical_windows = [
             [int(start), int(end)] for start, end in resolved
         ]
-    return {
+    snapshot = {
         "effective_mode": resolve_trade_filter_mode(tf) if active else "disabled",
         "zigzag_active": bool(is_zigzag_enabled(tf)),
         "volume_active": bool(is_volume_enabled(tf)),
@@ -558,6 +646,21 @@ def trade_filter_effective_snapshot(tf: object) -> dict:
         "canonical_windows_minutes": canonical_windows,
         "time_reset_semantics": "calendar_cycle_close_reset",
     }
+    if is_reversal_confirmation_enabled(tf):
+        snapshot.update(
+            {
+                "reversal_confirmation_active": True,
+                "confirm_bars": int(
+                    tf.reversal_confirmation.confirm_bars
+                ),
+                "boundary_policy": (
+                    "same_local_date_window"
+                    if time_active
+                    else "standalone"
+                ),
+            }
+        )
+    return snapshot
 
 
 def is_wakeup_volume_enabled(tf: object) -> bool:
@@ -643,9 +746,12 @@ def resolve_volume_defaults_in_place(
 TRADE_FILTER_ALLOWED_KEYS: dict[str, frozenset[str]] = {
     "trade_filter": frozenset({
         "enabled", "type", "zigzag", "triggers", "lifecycle", "diagnostics",
-        "time_filter", "volume", "wakeup_regime",
+        "time_filter", "reversal_confirmation", "volume", "wakeup_regime",
     }),
     "trade_filter.time_filter": frozenset({"enabled", "window", "windows"}),
+    "trade_filter.reversal_confirmation": frozenset(
+        {"enabled", "confirm_bars"}
+    ),
     "trade_filter.zigzag": frozenset({
         "enabled", "global_stats_source", "leg_height_mode", "reversal_threshold",
         "candidate_trigger_threshold", "candidate_trigger_quantile",
@@ -782,6 +888,8 @@ def collect_trade_filter_unknown_keys(
             child_path = f"{path}.{key}"
             if child_path in TRADE_FILTER_ALLOWED_KEYS:
                 if not isinstance(child, dict):
+                    if child_path == "trade_filter.reversal_confirmation":
+                        continue
                     errors.append(
                         f"{child_path} must be a YAML mapping, "
                         f"got {type(child).__name__!r}"
@@ -865,6 +973,16 @@ def build_trade_filter_config_from_raw(tf_raw: dict) -> TradeFilterConfig:
         enabled=tflt_raw.get("enabled", False),
         window=tflt_raw.get("window", None),
         windows=tflt_raw.get("windows", None),
+    )
+
+    reversal_raw = tf_raw.get("reversal_confirmation")
+    reversal_confirmation = (
+        TradeFilterReversalConfirmationConfig(
+            enabled=reversal_raw.get("enabled", None),
+            confirm_bars=reversal_raw.get("confirm_bars", None),
+        )
+        if isinstance(reversal_raw, dict)
+        else None
     )
 
     vol_raw: dict = tf_raw.get("volume") or {}
@@ -991,6 +1109,7 @@ def build_trade_filter_config_from_raw(tf_raw: dict) -> TradeFilterConfig:
         lifecycle=lifecycle,
         diagnostics=diagnostics,
         time_filter=time_filter,
+        reversal_confirmation=reversal_confirmation,
         volume=volume,
         wakeup_regime=wakeup_regime,
         _raw_triggers_present=("triggers" in tf_raw),
@@ -2699,6 +2818,45 @@ def _validate_subfilter_legality_dispatch(
     zigzag_enabled = _is_zigzag_enabled_for_validation(tf, raw_user_keys)
     volume_enabled = is_volume_enabled(tf)
     time_enabled = is_time_filter_enabled(tf)
+    reversal_enabled = is_reversal_confirmation_enabled(tf)
+
+    if reversal_enabled:
+        if zigzag_enabled or volume_enabled:
+            _append_validation_error(
+                errors,
+                "reversal confirmation cannot be combined with zigzag or volume",
+                _VALIDATION_ERROR_KEYS.get(),
+                "reversal_confirmation_conflicting_capability",
+            )
+        wakeup = getattr(tf, "wakeup_regime", None)
+        if wakeup is not None and getattr(wakeup, "enabled", None) is True:
+            _append_validation_error(
+                errors,
+                "reversal confirmation cannot be combined with wakeup_regime",
+                _VALIDATION_ERROR_KEYS.get(),
+                "reversal_confirmation_wakeup_unsupported",
+            )
+        position_freeze = getattr(wakeup, "position_freeze", None)
+        if (
+            position_freeze is not None
+            and getattr(position_freeze, "enabled", None) is True
+        ):
+            _append_validation_error(
+                errors,
+                "reversal confirmation cannot be combined with position_freeze",
+                _VALIDATION_ERROR_KEYS.get(),
+                "reversal_confirmation_position_freeze_unsupported",
+            )
+        if (
+            ("trade_filter", "type") in raw_user_keys
+            and tf.type == "zigzag_st_mode"
+            and not zigzag_enabled
+        ):
+            errors.append(
+                "trade_filter.type=zigzag_st_mode requires active ZigZag"
+            )
+        _validate_time_filter_block(tf, errors, raw_user_keys)
+        return
 
     if zigzag_enabled and not volume_enabled:
         if not _validate_zigzag_required_blocks(errors, raw_user_keys):
@@ -2783,6 +2941,84 @@ def validate_trade_filter(
     """
     token = _VALIDATION_ERROR_KEYS.set(error_keys)
     try:
+        reversal = getattr(tf, "reversal_confirmation", None)
+        reversal_present = (
+            ("trade_filter", "reversal_confirmation") in raw_user_keys
+            or reversal is not None
+        )
+        reversal_valid = True
+        if reversal_present:
+            if reversal is None:
+                _append_validation_error(
+                    errors,
+                    "trade_filter.reversal_confirmation must be a mapping",
+                    error_keys,
+                    "reversal_confirmation_not_mapping",
+                )
+                reversal_valid = False
+            else:
+                enabled = reversal.enabled
+                enabled_present = (
+                    ("trade_filter", "reversal_confirmation", "enabled")
+                    in raw_user_keys
+                    or enabled is not None
+                )
+                confirm_present = (
+                    ("trade_filter", "reversal_confirmation", "confirm_bars")
+                    in raw_user_keys
+                    or reversal.confirm_bars is not None
+                )
+                if not enabled_present:
+                    _append_validation_error(
+                        errors,
+                        "reversal_confirmation.enabled is required",
+                        error_keys,
+                        "reversal_confirmation_enabled_missing",
+                    )
+                    reversal_valid = False
+                elif not isinstance(enabled, bool):
+                    _append_validation_error(
+                        errors,
+                        "reversal_confirmation.enabled must be bool",
+                        error_keys,
+                        "reversal_confirmation_enabled_invalid_type",
+                    )
+                    reversal_valid = False
+                elif enabled:
+                    if not confirm_present:
+                        _append_validation_error(
+                            errors,
+                            "reversal_confirmation.confirm_bars is required",
+                            error_keys,
+                            "reversal_confirmation_confirm_bars_missing",
+                        )
+                        reversal_valid = False
+                    elif isinstance(reversal.confirm_bars, bool) or not isinstance(
+                        reversal.confirm_bars, int
+                    ):
+                        _append_validation_error(
+                            errors,
+                            "reversal_confirmation.confirm_bars must be int",
+                            error_keys,
+                            "reversal_confirmation_confirm_bars_invalid_type",
+                        )
+                        reversal_valid = False
+                    elif not 1 <= reversal.confirm_bars <= 1_000_000:
+                        _append_validation_error(
+                            errors,
+                            "reversal_confirmation.confirm_bars out of range",
+                            error_keys,
+                            "reversal_confirmation_confirm_bars_out_of_range",
+                        )
+                        reversal_valid = False
+                elif confirm_present:
+                    _append_validation_error(
+                        errors,
+                        "confirm_bars is forbidden when reversal is disabled",
+                        error_keys,
+                        "reversal_confirmation_confirm_bars_present_when_disabled",
+                    )
+                    reversal_valid = False
         structure_valid = _validate_time_filter_structure(
             tf, errors, raw_user_keys
         )
@@ -2790,6 +3026,25 @@ def validate_trade_filter(
         if should_continue and structure_valid:
             _validate_subfilter_legality_dispatch(tf, errors, raw_user_keys)
         _validate_caller_pipeline_gate(tf, errors, raw_user_keys, caller_pipeline)
+        if (
+            reversal_present
+            and is_reversal_confirmation_enabled(tf)
+            and caller_pipeline not in {"single", "tester"}
+        ):
+            _append_validation_error(
+                errors,
+                "reversal_confirmation_unsupported_pipeline",
+                error_keys,
+                "reversal_confirmation_unsupported_pipeline",
+            )
+            reversal_valid = False
+        if (
+            reversal_present
+            and reversal_valid
+            and is_reversal_confirmation_enabled(tf)
+            and not errors
+        ):
+            tf._reversal_validated_for = caller_pipeline
     finally:
         _VALIDATION_ERROR_KEYS.reset(token)
 
@@ -3017,6 +3272,8 @@ __all__ = [
     "TradeFilterLifecycleConfig",
     "TradeFilterDiagnosticsConfig",
     "TradeFilterTimeFilterConfig",
+    "TradeFilterReversalConfirmationConfig",
+    "ActiveTradeFilterCapabilities",
     "TradeFilterBaselineSessionConfig",
     "TradeFilterVolumeConfig",
     "TradeFilterWakeupRegimeConfig",
@@ -3041,6 +3298,9 @@ __all__ = [
     "is_zigzag_enabled",
     "is_volume_enabled",
     "is_time_filter_enabled",
+    "is_reversal_confirmation_enabled",
+    "resolve_active_trade_filter_capabilities",
+    "assert_reversal_confirmation_allowed",
     "resolve_trade_filter_mode",
     "trade_filter_public_snapshot",
     "trade_filter_effective_snapshot",

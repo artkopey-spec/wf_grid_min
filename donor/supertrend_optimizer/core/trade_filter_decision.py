@@ -63,8 +63,63 @@ def build_filter_execution_metadata(
     }
 
 
+_RESET_METADATA_KEYS = frozenset(
+    {"daily_reset_event", "time_filter_reset_event"}
+)
+_REVERSAL_METADATA_KEYS = frozenset(
+    {
+        "reversal_confirmation_execution_event_id",
+        "reversal_confirmation_execution_origin_bar",
+        "reversal_confirmation_execution_decision_bar",
+        "reversal_confirmation_execution_transition_kind",
+        "reversal_confirmation_confirmed_close",
+        "reversal_confirmation_confirmed_open",
+    }
+)
+
+
+def merge_filter_execution_metadata(
+    *metadata_maps: dict[str, np.ndarray] | None,
+) -> dict[str, np.ndarray]:
+    """Merge validated compact metadata without allowing key replacement."""
+    merged: dict[str, np.ndarray] = {}
+    expected_length: int | None = None
+    allowed = _RESET_METADATA_KEYS | _REVERSAL_METADATA_KEYS
+    for metadata in metadata_maps:
+        if metadata is None:
+            continue
+        for key, values in metadata.items():
+            if key not in allowed:
+                raise ValueError(f"unknown filter execution metadata key: {key}")
+            if key in merged:
+                raise ValueError(f"filter execution metadata key conflict: {key}")
+            arr = np.asarray(values)
+            if arr.ndim != 1:
+                raise ValueError(f"filter execution metadata {key} must be 1-D")
+            if expected_length is None:
+                expected_length = len(arr)
+            elif len(arr) != expected_length:
+                raise ValueError(
+                    f"filter execution metadata {key} length {len(arr)} "
+                    f"!= {expected_length}"
+                )
+            expected_dtype = (
+                np.int64
+                if key.endswith(("event_id", "origin_bar", "decision_bar"))
+                else np.int8
+            )
+            if arr.dtype != expected_dtype:
+                raise ValueError(
+                    f"filter execution metadata {key} dtype {arr.dtype} "
+                    f"!= {np.dtype(expected_dtype)}"
+                )
+            merged[key] = arr
+    return merged
+
+
 __all__ = [
     "TradeFilterDecision",
     "build_filter_execution_metadata",
     "decide_trade_filter_entry",
+    "merge_filter_execution_metadata",
 ]

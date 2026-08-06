@@ -154,6 +154,11 @@ class BacktestResult:
     # ZigZag ST filter diagnostics (WP7).  None on disabled path.
     filter_diagnostics: "Optional[Dict[str, np.ndarray]]" = field(default=None)
     filter_config_snapshot: Optional[dict] = None
+    filter_execution_metadata: "Optional[Dict[str, np.ndarray]]" = field(
+        default=None
+    )
+    reversal_confirmation_events: Optional[tuple] = None
+    reversal_confirmation_summary: Optional[object] = None
 
     def __post_init__(self) -> None:
         """Validate internal invariants after construction.
@@ -238,3 +243,55 @@ class BacktestResult:
                 raise ConfigError(
                     f"BacktestResult dtype contract violated (Plan v3 §7): {_msg}"
                 )
+        validated: Dict[str, np.ndarray] = {}
+        if self.filter_execution_metadata is not None:
+            from supertrend_optimizer.core.trade_filter_decision import (
+                merge_filter_execution_metadata,
+            )
+
+            validated = merge_filter_execution_metadata(
+                self.filter_execution_metadata
+            )
+            for key, arr in validated.items():
+                if len(arr) != pos_len:
+                    raise ValueError(
+                        f"BacktestResult invariant violated: "
+                        f"filter_execution_metadata[{key!r}] length {len(arr)} "
+                        f"!= positions length {pos_len}"
+                    )
+        execution_ids = validated.get(
+            "reversal_confirmation_execution_event_id"
+        )
+        events = tuple(self.reversal_confirmation_events or ())
+        event_ids = [int(event.event_id) for event in events]
+        if len(event_ids) != len(set(event_ids)):
+            raise ValueError("reversal confirmation attempt IDs must be unique")
+        if execution_ids is not None:
+            linked = [int(value) for value in execution_ids if int(value) >= 0]
+            if len(linked) != len(set(linked)):
+                raise ValueError(
+                    "reversal confirmation execution event IDs must be unique"
+                )
+            confirmed_ids = {
+                int(event.event_id)
+                for event in events
+                if event.confirmation_status == "confirmed"
+            }
+            if not set(linked) <= confirmed_ids:
+                raise ValueError(
+                    "reversal execution metadata references "
+                    "a non-confirmed attempt"
+                )
+        for event in events:
+            for bar in (
+                event.source_signal_bar,
+                event.confirmation_bar,
+                event.execution_bar,
+            ):
+                if bar is not None and not 0 <= int(bar) < pos_len:
+                    raise ValueError(
+                        "reversal confirmation event references bar "
+                        "outside positions"
+                    )
+        if self.reversal_confirmation_summary is not None:
+            self.reversal_confirmation_summary.validate()

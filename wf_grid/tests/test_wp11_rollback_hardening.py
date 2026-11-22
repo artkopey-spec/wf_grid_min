@@ -637,10 +637,11 @@ class TestProductionConfigDefault:
         trade_filter = cfg["trade_filter"]
         assert trade_filter == {
             "enabled": True,
+            "date_filter": {"enabled": False, "file_path": "data 1.csv"},
             "zigzag": {"enabled": False},
             "time_filter": {
                 "enabled": True,
-                "windows": ["09:00-12:00", "16:00-18:00"],
+                "windows": ["09:00-14:00"],
             },
             "volume": {"enabled": False},
             "wakeup_regime": {"enabled": False},

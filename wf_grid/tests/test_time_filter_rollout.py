@@ -20,7 +20,7 @@ def test_production_profiles_share_time_windows_after_reversal_activation() -> N
     wf_filter = wf_config.trade_filter
     tester_filter = tester_config["trade_filter"]
     assert resolve_trade_filter_mode(wf_filter) == "time_only"
-    assert resolve_trade_filter_mode(tester_filter) == "reversal_and_time"
+    assert resolve_trade_filter_mode(tester_filter) == "time_only"
     wf_snapshot = trade_filter_effective_snapshot(wf_filter)
     tester_snapshot = trade_filter_effective_snapshot(tester_filter)
     assert (
@@ -29,7 +29,7 @@ def test_production_profiles_share_time_windows_after_reversal_activation() -> N
     )
     assert wf_snapshot["time_filter_active"] is True
     assert tester_snapshot["time_filter_active"] is True
-    assert tester_snapshot["reversal_confirmation_active"] is True
+    assert "reversal_confirmation_active" not in tester_snapshot
 
 
 def test_runtime_spec_contains_required_migration_contracts() -> None:

@@ -418,6 +418,12 @@ class TradeFilterWakeupRegimeConfig:
 
 
 @dataclass
+class TradeDateFilterConfig:
+    enabled: bool = False
+    file_path: str = "data 1.csv"
+
+
+@dataclass
 class TradeFilterConfig:
     """Root trade-filter block.
 
@@ -456,6 +462,7 @@ class TradeFilterConfig:
     # so runtime consumers fall back to the historical duck-typed behaviour.
     _raw_triggers_present: Optional[bool] = field(default=None, repr=False)
     _reversal_validated_for: Optional[str] = field(default=None, repr=False)
+    date_filter: TradeDateFilterConfig = field(default_factory=TradeDateFilterConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -546,6 +553,8 @@ def resolve_active_trade_filter_capabilities(
             (True, True, False): "zigzag_and_volume",
             (True, True, True): "zigzag_volume_and_time",
         }
+        if is_date_filter_enabled(tf):
+            modes[(False, False, False)] = "date_only"
         try:
             mode = modes[(zigzag, volume, time_filter)]
         except KeyError as exc:
@@ -559,6 +568,10 @@ def resolve_active_trade_filter_capabilities(
     )
 
 
+def is_date_filter_enabled(tf: object) -> bool:
+    return is_trade_filter_enabled(tf) and getattr(getattr(tf, "date_filter", None), "enabled", False) is True
+
+
 def is_any_trade_subfilter_enabled(tf: object) -> bool:
     """Return whether any lifecycle-owning or gating subfilter is active."""
     return (
@@ -566,6 +579,7 @@ def is_any_trade_subfilter_enabled(tf: object) -> bool:
         or is_volume_enabled(tf)
         or is_time_filter_enabled(tf)
         or is_reversal_confirmation_enabled(tf)
+        or is_date_filter_enabled(tf)
     )
 
 
@@ -746,8 +760,9 @@ def resolve_volume_defaults_in_place(
 TRADE_FILTER_ALLOWED_KEYS: dict[str, frozenset[str]] = {
     "trade_filter": frozenset({
         "enabled", "type", "zigzag", "triggers", "lifecycle", "diagnostics",
-        "time_filter", "reversal_confirmation", "volume", "wakeup_regime",
+        "time_filter", "reversal_confirmation", "volume", "wakeup_regime", "date_filter",
     }),
+    "trade_filter.date_filter": frozenset({"enabled", "file_path"}),
     "trade_filter.time_filter": frozenset({"enabled", "window", "windows"}),
     "trade_filter.reversal_confirmation": frozenset(
         {"enabled", "confirm_bars"}
@@ -1109,6 +1124,7 @@ def build_trade_filter_config_from_raw(tf_raw: dict) -> TradeFilterConfig:
         lifecycle=lifecycle,
         diagnostics=diagnostics,
         time_filter=time_filter,
+        date_filter=TradeDateFilterConfig(**tf_raw.get("date_filter", {})),
         reversal_confirmation=reversal_confirmation,
         volume=volume,
         wakeup_regime=wakeup_regime,
@@ -2897,7 +2913,7 @@ def _validate_subfilter_legality_dispatch(
                 "trade_filter.wakeup_regime.enabled=true requires "
                 "trade_filter.zigzag.enabled=true"
             )
-    elif time_enabled:
+    elif time_enabled or is_date_filter_enabled(tf):
         if (
             ("trade_filter", "type") in raw_user_keys
             and tf.type == "zigzag_st_mode"

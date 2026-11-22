@@ -66,6 +66,7 @@ from supertrend_optimizer.core._reset_events import (
 from supertrend_optimizer.core.zigzag_st_filter import build_zigzag_global_stats
 from supertrend_optimizer.core.trade_filter_config import (
     is_time_filter_enabled,
+    is_date_filter_enabled,
     is_volume_enabled,
     is_zigzag_enabled,
 )
@@ -74,6 +75,7 @@ from supertrend_optimizer.core.volume_metrics import (
     build_volume_global_metrics,
 )
 from wf_grid.wf.step_executor import StepResult
+from wf_grid.wf.trade_calendar import load_trade_calendar
 
 from supertrend_optimizer.utils.time_utils import make_walk_forward_slices
 from supertrend_optimizer.data.loader import load_ohlc_csv
@@ -286,6 +288,11 @@ def run_grid_pipeline(
         volume_runtime = None
         time_filter_runtime = None
         _tf = config.trade_filter
+        if is_date_filter_enabled(_tf):
+            calendar = load_trade_calendar(_tf.date_filter.file_path, data.index)
+            data["_date_entry"] = calendar.entry
+            data["_date_boundary"] = calendar.boundary
+            config.date_filter_metadata = calendar.metadata
         if is_zigzag_enabled(_tf):
             full_close = data["close"].values
             zigzag_global_stats = build_zigzag_global_stats(
@@ -375,6 +382,13 @@ def run_grid_pipeline(
             _result=result,
         )
         timer.record("wf_grid_execution", time.time() - t0)
+        if config.date_filter_metadata is not None:
+            for sample, grid_results in (("train", all_train_results), ("oos", all_oos_results)):
+                config.date_filter_metadata[f"executed_date_closes_{sample}_all_grid_steps"] = sum(
+                    int((step.oos_trades_df["exit_phase"] == "close").sum())
+                    for steps in grid_results.values() for step in steps
+                    if step.oos_trades_df is not None and "exit_phase" in step.oos_trades_df
+                )
 
         # --- 8. Step collection (OOS + Train metrics) ---
         t0 = time.time()

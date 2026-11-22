@@ -2173,6 +2173,7 @@ def _finalize_apply_result(
     reset_events: ResetEvents,
     volume_runtime: "Optional[VolumeRuntime]",
     volume_arrays: _ApplyVolumeRuntimeArrays,
+    date_execution=None,
 ) -> "ZigZagSTFilterResult":
     effective_mode = (
         "zigzag_volume_and_time"
@@ -2264,6 +2265,8 @@ def _finalize_apply_result(
                 & (positions[1:] == 0),
                 dtype=np.int8,
             )
+        if date_execution is not None:
+            time_forced_exit[date_execution.boundary] = 0
         filter_diagnostics_out["time_filter_forced_exit"] = time_forced_exit
     if volume_runtime is not None:
         filter_diagnostics_out.update(
@@ -2432,6 +2435,7 @@ def apply(
     low: "Optional[np.ndarray]" = None,
     commission_rate: float | None = None,
     collect_filter_diagnostics: bool = True,
+    date_execution=None,
 ) -> "ZigZagSTFilterResult":
     """Run the ZigZag ST FSM and build ``filtered_positions``.
 
@@ -2994,6 +2998,8 @@ def apply(
         # same-bar mutations of ``state``/``held_pos``/``confirmed_legs_
         # since_start`` (reset, OFF→WAIT, WAIT→FREEZE, etc.) cannot leak
         # back into the snapshot views.
+        date_close = date_execution is not None and date_execution.boundary[t]
+        can_open_next = date_execution is None or (t + 1 < n and date_execution.entry[t + 1])
         state_at_bar_start = state
         held_pos_at_bar_start = held_pos
         confirmed_legs_at_bar_start = confirmed_legs_since_start
@@ -3036,6 +3042,18 @@ def apply(
                     state_at_bar_start == ZigZagFSMState.ST_ACTIVE_FREEZE
                 )
 
+        if date_close:
+            if wakeup_cycle_take_profit_enabled and trade_entry_in_cycle_scope:
+                entry_price = open_prices_for_cycle_take_profit[trade_entry_idx]
+                gross = round(100 * trade_entry_pos * (close[t] / entry_price - 1), 6)
+                net = round(gross - round(200 * commission_rate_for_cycle_take_profit, 6), 6)
+                cycle_realized_pnl_micropct += net_pnl_pct_to_micropct(net)
+            trade_entry_idx = -1
+            trade_entry_pos = 0
+            trade_entry_in_cycle_scope = False
+            held_pos = 0
+            pos_freeze_pending = False
+            pos_freeze_until = -1
         tested_cycle_pnl_micropct = cycle_realized_pnl_micropct
 
         # ----- §9 step 1: combined-reset wipe (after snapshots) ----------
@@ -3234,7 +3252,7 @@ def apply(
                     zz_legs_since_lifecycle_start = -1
                     trigger_source_this_bar = _TRIGGER_SOURCE_WAKEUP
                     wakeup_started_this_bar = True
-                    cycle_trade_count = 1
+                    cycle_trade_count = int(can_open_next)
                     cycle_realized_pnl_micropct = 0
                     tested_cycle_pnl_micropct = 0
             else:
@@ -3535,6 +3553,7 @@ def apply(
 
             if (
                 not wakeup_started_this_bar
+                and can_open_next
                 and state_at_bar_start == ZigZagFSMState.ST_ACTIVE_FREEZE
                 and state == ZigZagFSMState.ST_ACTIVE_FREEZE
                 and wakeup_position_action_this_bar
@@ -3771,7 +3790,7 @@ def apply(
 
         # ----- Compute filtered_positions[t+1] --------------------------
         # Decision at close(t), execution at open(t+1) (§5.5 / §17.13).
-        cur_pos = filtered_positions[t]  # position in effect at open(t)
+        cur_pos = 0 if date_close else filtered_positions[t]
 
         # Normalise ST_STOPPING + no open position → OFF immediately.
         # Must happen BEFORE the t+1 position-write block so that on the
@@ -3821,6 +3840,12 @@ def apply(
                 else:
                     next_pos = np.int8(cur_pos)
 
+            if date_execution is not None:
+                next_pos = date_execution.at_open(t + 1, cur_pos, next_pos)
+                if next_pos == 0:
+                    held_pos = 0
+                    pos_freeze_pending = False
+                    pos_freeze_until = -1
             filtered_positions[t + 1] = next_pos
 
             # §13 WP9: filter_allowed_entry
@@ -3946,6 +3971,7 @@ def apply(
 
     return _finalize_apply_result(
         n=n,
+        date_execution=date_execution,
         positions=filtered_positions,
         arrays=_apply_arrays,
         cand_height=cand_height,

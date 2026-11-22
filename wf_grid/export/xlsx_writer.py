@@ -39,7 +39,8 @@ import pandas as pd
 
 from wf_grid.config.schema import GridConfig
 from wf_grid.export.summary_builder import _BLOCK_A, _BLOCK_B, _BLOCK_TAIL, _parse_grid_point_id
-from supertrend_optimizer.core.trade_filter_config import is_volume_enabled
+from supertrend_optimizer.core.trade_filter_config import is_date_filter_enabled, is_volume_enabled
+from wf_grid.collect.trades_collector import _DATE_EXECUTION_COLS
 
 # Donor helpers (reuse per policy)
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "donor"))
@@ -223,10 +224,11 @@ def export_workbook(
             _write_step_sheet(writer, step_oos_long, step_idx, sheet_name)
 
         # 5. WF_Trades
-        _write_trades_sheet(writer, trades_oos, "WF_Trades")
+        active_dates = is_date_filter_enabled(config.trade_filter)
+        _write_trades_sheet(writer, trades_oos, "WF_Trades", active_dates)
 
         # 6. WF_Train_Trades
-        _write_trades_sheet(writer, trades_train, "WF_Train_Trades")
+        _write_trades_sheet(writer, trades_train, "WF_Train_Trades", active_dates)
 
         # 7. BucketMatrix_Median
         from wf_grid.export.bucket_sheet_writer import write_bucket_matrix_median_sheet
@@ -578,6 +580,7 @@ def _write_trades_sheet(
     writer: pd.ExcelWriter,
     trades_df: pd.DataFrame,
     sheet_name: str,
+    active_dates: bool = False,
 ) -> None:
     """Write WF_Trades or WF_Train_Trades with deterministic column order.
 
@@ -591,7 +594,8 @@ def _write_trades_sheet(
     )
 
     if trades_df is None or trades_df.empty:
-        pd.DataFrame(columns=column_order).to_excel(
+        headers = column_order + (["exit_reason", *_DATE_EXECUTION_COLS] if active_dates else [])
+        pd.DataFrame(columns=headers).to_excel(
             writer, sheet_name=sheet_name, index=False
         )
         _apply_autofilter(writer, sheet_name, pd.DataFrame())
@@ -1001,6 +1005,8 @@ def _config_to_dict(config: GridConfig) -> dict:
         return obj
 
     config_dict = _to_dict(config)
+    if config_dict.get("date_filter_metadata") is None:
+        config_dict.pop("date_filter_metadata", None)
     tf = getattr(config, "trade_filter", None)
     if not is_volume_enabled(tf):
         trade_filter = config_dict.get("trade_filter")

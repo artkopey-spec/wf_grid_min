@@ -155,7 +155,7 @@ def attach_trade_filter_diagnostics(
             exit_reasons.append("reversal_confirmation_confirmed")
         elif wakeup_exit_reason is not None:
             exit_reasons.append(wakeup_exit_reason)
-        elif exit_index >= pending_exit_idx:
+        elif exit_index >= pending_exit_idx and getattr(row, "exit_phase", "mark_open") == "mark_open":
             exit_reasons.append("pending_open_trade_at_end")
         elif imm_at_exit:
             exit_reasons.append("filter_exit_b_immediate_off")

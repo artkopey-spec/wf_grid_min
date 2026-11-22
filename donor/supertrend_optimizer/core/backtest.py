@@ -29,6 +29,7 @@ import numpy as np
 from supertrend_optimizer.core.calculator import calculate_supertrend
 from supertrend_optimizer.core.trade_filter_config import (
     is_any_trade_subfilter_enabled,
+    is_date_filter_enabled,
     is_time_filter_enabled,
     is_trade_filter_enabled,
     is_volume_enabled,
@@ -69,6 +70,7 @@ class RawBacktestArtifacts:
     filter_config_snapshot: Optional[dict] = None
     reversal_confirmation_events: Optional[tuple] = None
     reversal_confirmation_summary: Optional[object] = None
+    date_legs: Any = None
 
 
 def generate_positions(
@@ -335,6 +337,7 @@ def run_backtest_fast(
     *,
     time_filter_runtime: Any = None,
     collect_filter_diagnostics: bool = True,
+    date_execution=None,
     caller_mode: str = "",
     segmentation_mode: str = "legacy",
 ) -> RawBacktestArtifacts:
@@ -419,6 +422,23 @@ def run_backtest_fast(
             segmentation_mode,
         )
 
+    active_dates = is_date_filter_enabled(trade_filter_config)
+    if active_dates != (date_execution is not None):
+        raise ValueError("date_filter configuration and calendar delivery disagree")
+    if active_dates and (len(date_execution.entry) != len(close)
+                         or len(date_execution.boundary) != len(close)):
+        raise ValueError("date_filter and price lengths disagree")
+    date_args = {"date_execution": date_execution} if active_dates else {}
+    if active_dates and (len(close) == 1 or (precomputed_atr is None and len(close) < atr_period)):
+        # No earlier signal on a single bar, or insufficient data to seed ATR.
+        from supertrend_optimizer.core.date_execution import executed_legs
+        flat = np.zeros(len(close), dtype=np.int8)
+        return RawBacktestArtifacts(
+            returns=np.zeros(len(flat) - 1), equity_curve=np.ones(len(flat)), trend=flat,
+            positions=flat.copy(), early_exit=False, exit_bar=None, exit_drawdown=None,
+            date_legs=executed_legs(flat, date_execution, open_prices, close,
+                                    index, flat, global_offset, commission),
+        )
     trend, supertrend = calculate_supertrend(
         high, low, close, atr_period, multiplier, precomputed_atr=precomputed_atr
     )
@@ -498,7 +518,8 @@ def run_backtest_fast(
             volume=volume,
             commission_rate=commission,
             time_filter_events=time_filter_events,
-            collect_filter_diagnostics=collect_filter_diagnostics,
+            collect_filter_diagnostics=collect_filter_diagnostics or active_dates,
+            **date_args,
         )
         positions = filter_result.positions
         filter_diagnostics = filter_result.filter_diagnostics
@@ -519,7 +540,8 @@ def run_backtest_fast(
             execution_model=execution_model,
             index=index,
             time_filter_events=time_filter_events,
-            collect_filter_diagnostics=collect_filter_diagnostics,
+            collect_filter_diagnostics=collect_filter_diagnostics or active_dates,
+            **date_args,
         )
         positions = filter_result.positions
         filter_diagnostics = filter_result.filter_diagnostics
@@ -545,7 +567,8 @@ def run_backtest_fast(
             index=index,
             time_filter_runtime=resolved_time_runtime,
             execution_model=execution_model,
-            collect_filter_diagnostics=collect_filter_diagnostics,
+            collect_filter_diagnostics=collect_filter_diagnostics or active_dates,
+            **date_args,
         )
         positions = filter_result.positions
         filter_diagnostics = filter_result.filter_diagnostics
@@ -563,7 +586,8 @@ def run_backtest_fast(
             trade_mode=trade_mode,
             time_filter_runtime=resolved_time_runtime,
             execution_model=execution_model,
-            collect_filter_diagnostics=collect_filter_diagnostics,
+            collect_filter_diagnostics=collect_filter_diagnostics or active_dates,
+            **date_args,
         )
         positions = filter_result.positions
         filter_diagnostics = filter_result.filter_diagnostics
@@ -572,14 +596,20 @@ def run_backtest_fast(
     else:
         # Disabled path — bit-identical to pre-WP7 baseline.
         positions = generate_positions(trend, trade_mode, execution_model)
+        if active_dates:
+            for i in range(1, len(positions)):
+                current = 0 if date_execution.boundary[i - 1] else positions[i - 1]
+                positions[i] = date_execution.at_open(i, current, positions[i])
 
     # Step 3: Calculate returns (open-to-open price basis)
-    returns = calculate_returns(
-        open_prices,
-        positions,
-        commission,
-        execution_model=execution_model,
-    )
+    date_legs = None
+    if active_dates:
+        from supertrend_optimizer.core.date_execution import executed_legs, project_window
+        date_legs = executed_legs(positions, date_execution, open_prices, close,
+                                  index, trend, global_offset, commission)
+        returns, _ = project_window(date_legs, open_prices, close, commission)
+    else:
+        returns = calculate_returns(open_prices, positions, commission, execution_model=execution_model)
 
     # Step 4: Calculate equity curve
     equity_curve = calculate_equity_curve(returns)
@@ -636,6 +666,7 @@ def run_backtest_fast(
         exit_dd = None
 
     return RawBacktestArtifacts(
+        date_legs=date_legs,
         returns=returns,
         equity_curve=equity_curve,
         trend=trend,

@@ -26,6 +26,8 @@ from supertrend_optimizer.utils.enums import ExecutionModel
 from supertrend_optimizer.utils.time_utils import WFWindowSlice
 
 from wf_grid.config.loader import ConfigError
+from supertrend_optimizer.core.date_execution import project_window
+from supertrend_optimizer.core.backtest import calculate_equity_curve
 
 if TYPE_CHECKING:
     from wf_grid.config.schema import GridConfig
@@ -407,6 +409,7 @@ def execute_oos_step(
     zigzag_global_stats: Any = None,
     volume_runtime: "Optional[VolumeRuntime]" = None,
     time_filter_runtime: Any = None,
+    date_execution=None,
 ) -> StepResult:
     """
     Execute one OOS WF step with canonical prepend path (§W.4.2).
@@ -477,6 +480,7 @@ def execute_oos_step(
         volume_runtime=sliced_volume_runtime,
         time_filter_runtime=sliced_time_filter_runtime,
         global_offset=ext_start,
+        **({"date_execution": date_execution.slice(ext_start, test_end)} if date_execution is not None else {}),
     )
     if ext_result.early_exit:
         raise RuntimeError(
@@ -509,7 +513,7 @@ def execute_oos_step(
     # --- Step 6: OOS boundary + guard ---
     oos_boundary = prepend_applied
 
-    if oos_boundary >= len(ext_returns):
+    if oos_boundary >= len(ext_returns) and date_execution is None:
         logger.warning(
             "Defensive fallback (boundary): gp=%s step=%d oos_boundary=%d len_ext=%d",
             grid_point.grid_point_id, wf_slice.step_index,
@@ -539,13 +543,16 @@ def execute_oos_step(
     # Trade-level filter (entry_index >= oos_boundary) stays where it is
     # in Step 9 — force-flat is applied on bar level only, so bar and trade
     # economics describe the SAME OOS-originated exposure.
-    oos_returns, oos_positions, oos_equity = _apply_oos_force_flat(
-        oos_returns=oos_returns,
-        oos_positions=oos_positions,
-        oos_equity=oos_equity,
-        ext_trades_df=ext_trades_df,
-        oos_boundary=oos_boundary,
-    )
+    if date_execution is not None:
+        oos_returns, oos_positions = project_window(
+            ext_trades_df, ext_open, ext_close, config.backtest.commission, oos_boundary
+        )
+        oos_equity = calculate_equity_curve(oos_returns)
+    else:
+        oos_returns, oos_positions, oos_equity = _apply_oos_force_flat(
+            oos_returns=oos_returns, oos_positions=oos_positions, oos_equity=oos_equity,
+            ext_trades_df=ext_trades_df, oos_boundary=oos_boundary,
+        )
 
     # --- Step 8: recompute OOS ratio metrics (warmup_period=0) ---
     oos_bar_metrics = calculate_all_metrics(
@@ -554,7 +561,10 @@ def execute_oos_step(
         positions=oos_positions,
         warmup_period=0,
         periods_per_year=periods_per_year,
-        min_trades_required=min_trades,
+        min_trades_required=(
+            0 if date_execution is not None and date_execution.boundary[test_start:test_end].any()
+            else min_trades
+        ),
     )
     # Remove effective_warmup from dict (will be 0 for canonical path)
     oos_bar_metrics.pop("effective_warmup", None)
@@ -610,6 +620,7 @@ def execute_train_step(
     zigzag_global_stats: Any = None,
     volume_runtime: "Optional[VolumeRuntime]" = None,
     time_filter_runtime: Any = None,
+    date_execution=None,
 ) -> StepResult:
     """Execute one train WF step (§W.6). No prepend."""
     train_start = wf_slice.train_start_idx
@@ -660,6 +671,7 @@ def execute_train_step(
         volume_runtime=sliced_volume_runtime,
         time_filter_runtime=sliced_time_filter_runtime,
         global_offset=train_start,
+        **({"date_execution": date_execution.slice(train_start, train_end)} if date_execution is not None else {}),
     )
 
     metrics = dict(result.metrics)

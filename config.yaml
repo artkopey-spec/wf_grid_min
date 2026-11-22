@@ -1,8 +1,10 @@
 schema_version: 1
 # WF Grid profile for the current data.csv.
-# Data snapshot: 105681 MIX 1m bars, 2026-03-06 09:24 to 2026-08-05 12:46 MSK.
-# QUIK columns include OHLC and volume.
-# WF windows: 63000 train bars / 21000 test bars / 21000 step bars (3:1, anchor=end).
+# Data snapshot: 190620 SBER OHLCV bars across 1112 calendar dates,
+# 2023-01-03 10:00 to 2026-11-05 23:45 MSK.
+# Source columns: FINAM DATE/TIME, OHLC and VOL.
+# WF windows: 29307 train bars / 9769 test bars / 9769 step bars
+# (3:1, anchor=end, 16 steps; 5009 leading bars outside the windows).
 # Run: python run.py --config config.yaml
 
 data:
@@ -11,43 +13,45 @@ data:
   annualization_basis: "trading"
 
 optimization:
-  atr_period_range: [10, 80]
+  atr_period_range: [10, 40]
   multiplier_range: [1.0, 4.0]
   multiplier_step: 0.2
-  atr_period_step: 3
+  atr_period_step: 1
   trade_mode: "revers"
 
 backtest:
-  # MIX commission per operation: 8.15 RUB / ~228275 RUB contract value.
-  commission: 0.0000357025
+  # Commission per transaction side (fraction).
+  commission: 0.0000667
   min_trades_required: 3
   early_exit_enabled: false
   early_exit_max_drawdown: 0.50
-  early_exit_check_bars: 50
+  early_exit_check_bars: 10
 
 validation:
-  warmup_period: 0
+  warmup_period: 0.0
   warmup_period_auto: true
   walk_forward:
-    train_size: "63000bars"
-    test_size: "21000bars"
-    step_size: "21000bars"
+    train_size: "29307bars"
+    test_size: "9769bars"
+    step_size: "9769bars"
     scheme: "rolling"
     anchor: "end"
-    min_train_bars: 63000
-    min_test_bars: 21000
+    min_train_bars: 29307
+    min_test_bars: 9769
 
 gates:
   step:
-    min_trades: 3
-    max_drawdown_threshold: -0.50
+    min_trades: 2
+    max_drawdown_threshold: -0.60
   candidate:
-    positive_median_threshold: 0.0
-    min_trades_median: 8.0
-    worst_segment_pnl_threshold: -15.0
-    max_drawdown_threshold: -0.45
-    min_total_trades: 500
-    min_ok_ratio: 0.80
+    positive_median_threshold: -1.0
+    min_trades_median: 5.0
+    worst_segment_pnl_threshold: -20.0
+    max_drawdown_threshold: -0.55
+    # Exploratory profile: at least 40 trades across valid OOS steps.
+    min_total_trades: 40
+    # With 16 WF steps, 0.66 requires at least 11 valid steps.
+    min_ok_ratio: 0.66
 
 ranking:
   mode: "gates_score"
@@ -66,10 +70,10 @@ scoring:
     abs_max_drawdown_Min:      0.12
 
 status:
-  min_meaningful_bars: 100
+  min_meaningful_bars: 20
 
 bucket:
-  atr_bucket_step: 9
+  atr_bucket_step: 2
   mult_bucket_step: 0.6
   min_buckets_for_median: 5
 
@@ -85,14 +89,17 @@ export:
 trade_filter:
   enabled: true
 
+  date_filter:
+    enabled: false
+    file_path: "data 1.csv"
+
   zigzag:
     enabled: false
 
   time_filter:
     enabled: true
     windows:
-      - "09:00-12:00"
-      - "16:00-18:00"
+      - "09:00-14:00"
 
   volume:
     enabled: false

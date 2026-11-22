@@ -246,6 +246,7 @@ class GridConfig:
 
     # Resolved at load time (not from YAML directly)
     resolved_periods_per_year: Optional[float] = None
+    date_filter_metadata: Optional[dict] = None
 
     def effective_step_min_trades(self) -> int:
         """Return effective step-gate min_trades (falls back to backtest setting)."""

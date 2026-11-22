@@ -66,6 +66,7 @@ def apply(
     daily_reset_event: Optional[np.ndarray] = None,
     time_filter_events: Optional[tuple[np.ndarray, np.ndarray]] = None,
     collect_filter_diagnostics: bool = True,
+    date_execution=None,
 ) -> VolumeOnlyFilterResult:
     if execution_model != ExecutionModel.OPEN_TO_OPEN:
         raise ValueError(
@@ -196,6 +197,7 @@ def apply(
     cycle_initial_direction = 0
     for t in range(n):
         state_at_bar_start = state
+        flip_dir = 0
         shared_decision = decide_trade_filter_entry(
             entry_attempt_event=state_at_bar_start == VolumeOnlyState.OFF,
             time_filter_in_window=bool(time_filter_in_window[t]),
@@ -291,7 +293,15 @@ def apply(
                 1 if _is_tradable_state(state) else 0
             )
         if t + 1 < n:
-            positions[t + 1] = np.int8(_state_position(state))
+            target = _state_position(state)
+            if date_execution is not None:
+                current = 0 if date_execution.boundary[t] else positions[t]
+                # The observed volume cycle survives a calendar close. Only a
+                # cycle start or an eligible ST flip can request another entry.
+                if target and state == state_at_bar_start and flip_dir != target:
+                    target = current
+                target = date_execution.at_open(t + 1, current, target)
+            positions[t + 1] = np.int8(target)
         if _is_cycle_state(state):
             active_age_bars += 1
         else:
@@ -352,6 +362,8 @@ def apply(
                 & (positions[1:] == 0),
                 dtype=np.int8,
             )
+        if date_execution is not None:
+            time_forced_exit[date_execution.boundary] = 0
         diagnostics["time_filter_forced_exit"] = time_forced_exit
     return VolumeOnlyFilterResult(
         positions=positions,

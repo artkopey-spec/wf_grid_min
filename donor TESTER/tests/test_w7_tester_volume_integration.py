@@ -46,12 +46,12 @@ def test_run_batch_tester_passes_index_to_volume_metrics():
     assert all(any(keyword.arg == "index" for keyword in call.keywords) for call in calls)
 
 
-def test_repo_config_tester_yaml_loads_production_reversal_and_time_profile():
+def test_repo_config_tester_yaml_loads_production_time_only_profile():
     path = Path(__file__).resolve().parents[2] / "config_tester.yaml"
 
     cfg = load_tester_config(str(path))
 
-    assert cfg["supertrend"]["atr_period"] == 19
+    assert cfg["supertrend"]["atr_period"] == 80
     assert cfg["supertrend"]["multiplier"] == 4.0
     assert cfg["commission"] >= 0.0
     assert cfg["export"]["diagnostics"] is True
@@ -70,10 +70,10 @@ def test_repo_config_tester_yaml_loads_production_reversal_and_time_profile():
     assert tf_cfg.zigzag.enabled is False
     assert tf_cfg.time_filter.enabled is True
     assert tf_cfg.time_filter.window is None
-    assert tf_cfg.time_filter.windows == ["09:00-12:00", "16:00-18:00"]
-    assert tf_cfg.time_filter._windows_minutes == ((540, 720), (960, 1080))
-    assert tf_cfg.reversal_confirmation.enabled is True
-    assert tf_cfg.reversal_confirmation.confirm_bars == 1
+    assert tf_cfg.time_filter.windows == ["09:00-19:00"]
+    assert tf_cfg.time_filter._windows_minutes == ((540, 1140),)
+    assert tf_cfg.reversal_confirmation.enabled is False
+    assert tf_cfg.reversal_confirmation.confirm_bars is None
 
     volume = cfg["trade_filter"].volume
     assert volume.enabled is False

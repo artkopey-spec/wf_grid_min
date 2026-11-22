@@ -577,12 +577,10 @@ def test_repo_config_yaml_uses_production_time_only_schedule():
     assert cfg.trade_filter.time_filter.enabled is True
     assert cfg.trade_filter.time_filter.window is None
     assert cfg.trade_filter.time_filter.windows == [
-        "09:00-12:00",
-        "16:00-18:00",
+        "09:00-14:00",
     ]
     assert cfg.trade_filter.time_filter._windows_minutes == (
-        (540, 720),
-        (960, 1080),
+        (540, 840),
     )
     assert cfg.trade_filter.wakeup_regime.enabled is False
 

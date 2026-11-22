@@ -150,6 +150,7 @@ def apply(
     time_filter_runtime: Optional[TimeFilterRuntime] = None,
     execution_model: ExecutionModel = ExecutionModel.OPEN_TO_OPEN,
     collect_filter_diagnostics: bool = True,
+    date_execution=None,
 ) -> ReversalConfirmationResult:
     """Apply standalone or time-combined confirmation in one forward O(n) loop."""
     trend_arr, dt_index = _validate_inputs(
@@ -231,6 +232,11 @@ def apply(
 
     for t in range(n):
         current = int(positions[t])
+        if date_execution is not None and date_execution.boundary[t]:
+            if pending is not None:
+                finish_cancel("date_filter_close")
+            state = ReversalConfirmationState.ARMED
+            current = 0
         current_target = int(target[t])
         previous_target = int(target[t - 1]) if t else 0
         previous_inside = bool(inside[t - 1]) if t else False
@@ -304,6 +310,10 @@ def apply(
                                 if trade_mode in {"revers", "both"}
                                 else 0
                             )
+                            if date_execution is not None:
+                                execution_position = date_execution.at_open(
+                                    execution_bar, current, execution_position
+                                )
                             next_position = execution_position
                             attempts.append(
                                 ReversalConfirmationAttempt(
@@ -368,7 +378,8 @@ def apply(
                                 and identities[execution_bar] == identities[t]
                             )
                         )
-                        if execution_bar < n and same_cycle_execution:
+                        if (execution_bar < n and same_cycle_execution and
+                                (date_execution is None or date_execution.entry[execution_bar])):
                             next_position = current_target
                             allowed_entry[t] = 1
                             kind = (
@@ -385,7 +396,7 @@ def apply(
                             metadata[
                                 "reversal_confirmation_execution_transition_kind"
                             ][execution_bar] = kind
-                        elif combined:
+                        elif combined and not same_cycle_execution:
                             block_reason[t] = (
                                 "execution_unavailable"
                                 if execution_bar >= n

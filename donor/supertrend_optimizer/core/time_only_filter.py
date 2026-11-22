@@ -36,6 +36,7 @@ def apply(
     time_filter_runtime: TimeFilterRuntime,
     execution_model: ExecutionModel = ExecutionModel.OPEN_TO_OPEN,
     collect_filter_diagnostics: bool = True,
+    date_execution=None,
 ) -> TimeOnlyFilterResult:
     """Build lagged positions with Time as the only trade-filter capability."""
     if execution_model != ExecutionModel.OPEN_TO_OPEN:
@@ -68,6 +69,8 @@ def apply(
 
     for t in range(n):
         current = int(positions[t])
+        if date_execution is not None and date_execution.boundary[t]:
+            current = 0
         current_target = int(target[t])
         decision = decide_time_entry(
             TimeEntryState(reentry_pending=reentry_pending),
@@ -97,6 +100,10 @@ def apply(
         reentry_pending = decision.next_reentry_pending
 
         if t + 1 < n:
+            if date_execution is not None:
+                next_position = date_execution.at_open(t + 1, current, next_position)
+                if not date_execution.entry[t + 1]:
+                    allowed_entry[t] = 0
             positions[t + 1] = np.int8(next_position)
 
     execution_metadata = build_filter_execution_metadata(

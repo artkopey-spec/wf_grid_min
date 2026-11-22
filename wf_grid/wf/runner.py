@@ -27,6 +27,19 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _date_execution(data, config):
+    from supertrend_optimizer.core.trade_filter_config import is_date_filter_enabled
+    from supertrend_optimizer.core.date_execution import DateExecution
+
+    if not is_date_filter_enabled(config.trade_filter):
+        return {}
+    if not {"_date_entry", "_date_boundary"}.issubset(data):
+        raise ValueError("active date_filter: calendar columns missing from WF data")
+    return {"date_execution": DateExecution(
+        data["_date_entry"].to_numpy(), data["_date_boundary"].to_numpy()
+    )}
+
+
 def run_wf_for_grid_point(
     grid_point: "GridPoint",
     wf_slices: List[WFWindowSlice],
@@ -72,6 +85,7 @@ def run_wf_for_grid_point(
     full_close = full_data["close"].values
     full_index = full_data.index
 
+    calendar_args = _date_execution(full_data, config)
     results: List[StepResult] = []
 
     for wf_slice in wf_slices:
@@ -89,6 +103,7 @@ def run_wf_for_grid_point(
                 zigzag_global_stats=zigzag_global_stats,
                 volume_runtime=volume_runtime,
                 time_filter_runtime=time_filter_runtime,
+                **calendar_args,
             )
         except Exception as exc:
             logger.error(
@@ -127,6 +142,7 @@ def run_wf_train_for_grid_point(
     full_close = full_data["close"].values
     full_index = full_data.index
 
+    calendar_args = _date_execution(full_data, config)
     results: List[StepResult] = []
 
     for wf_slice in wf_slices:
@@ -143,6 +159,7 @@ def run_wf_train_for_grid_point(
                 zigzag_global_stats=zigzag_global_stats,
                 volume_runtime=volume_runtime,
                 time_filter_runtime=time_filter_runtime,
+                **calendar_args,
             )
         except Exception as exc:
             logger.error(

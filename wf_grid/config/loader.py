@@ -172,10 +172,12 @@ _ALLOWED_KEYS: dict[str, set[str]] = {
         "lifecycle",
         "diagnostics",
         "time_filter",
+        "date_filter",
         "reversal_confirmation",
         "volume",
         "wakeup_regime",
     },
+    "trade_filter.date_filter": {"enabled", "file_path"},
     "trade_filter.time_filter": {
         "enabled",
         "window",
@@ -434,6 +436,15 @@ def _validate_trade_filter_unknown_keys(raw: dict[str, Any]) -> None:
             f"trade_filter must be a YAML mapping, got "
             f"{type(tf_raw).__name__!r}"
         )
+    if "date_filter" in tf_raw:
+        block = tf_raw["date_filter"]
+        if not isinstance(block, dict):
+            raise ConfigError("trade_filter.date_filter must be a mapping")
+        if not isinstance(block.get("enabled", False), bool):
+            raise ConfigError("trade_filter.date_filter.enabled must be bool")
+        path = block.get("file_path", "data 1.csv")
+        if not isinstance(path, str) or not path.strip():
+            raise ConfigError("trade_filter.date_filter.file_path must be a non-empty string")
     errors = _collect_trade_filter_unknown_keys(tf_raw, "trade_filter")
     if errors:
         raise ConfigError(

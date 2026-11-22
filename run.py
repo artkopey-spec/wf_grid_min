@@ -35,6 +35,7 @@ def main():
         help="Force sequential execution "
              "(overrides config.yaml execution.parallel_enabled).",
     )
+
     def _positive_int(value: str) -> int:
         try:
             n = int(value)
@@ -64,7 +65,7 @@ def main():
     print(f"Config:  {args.config}")
     print(f"Output:  {args.output or '(auto)'}")
     if parallel_enabled is not None:
-        print(f"Mode:    sequential (--sequential flag)")
+        print("Mode:    sequential (--sequential flag)")
     if args.max_workers is not None:
         print(f"Workers: {args.max_workers}")
     print()
@@ -87,10 +88,10 @@ def main():
         print(f"\nGrid:        {d.grid_size} points x {d.n_wf_steps} WF steps")
         print(f"Step status: {d.step_status_counts}")
         print(f"Tier dist:   {d.tier_counts}")
-        print(f"\nTop-5 ranked:")
+        print("\nTop-5 ranked:")
         for entry in d.top5_ranked:
             print(f"  {entry}")
-        print(f"\nTiming:")
+        print("\nTiming:")
         for stage, t in d.timings.items():
             print(f"  {stage:25s}: {t:.2f}s")
 

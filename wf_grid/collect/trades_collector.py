@@ -60,6 +60,7 @@ _FILTER_TRADE_COLS = [
     "entry_trigger_source",
     "exit_reason",
 ]
+_DATE_EXECUTION_COLS = ["exit_phase", "entry_global_index", "exit_global_index", "commission_sides"]
 
 # Full OOS trades long schema
 _OOS_TRADE_COLUMNS = (
@@ -229,7 +230,7 @@ def _enrich_chunk(
     identity_window = [
         "grid_point_id", "wf_step", "step_status", window_col_start, window_col_end
     ]
-    filter_cols_present = [c for c in _FILTER_TRADE_COLS if c in chunk.columns]
+    filter_cols_present = [c for c in _FILTER_TRADE_COLS + _DATE_EXECUTION_COLS if c in chunk.columns]
     full_cols = identity_window + _DONOR_TRADE_COLS + filter_cols_present
     return chunk[full_cols]
 

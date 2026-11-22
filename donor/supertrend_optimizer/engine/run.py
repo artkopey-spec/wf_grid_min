@@ -69,6 +69,7 @@ def run_single_backtest(
     *,
     time_filter_runtime: Any = None,
     collect_filter_diagnostics: bool = True,
+    date_execution=None,
 ) -> BacktestResult:
     """
     Run single backtest with unified interface.
@@ -162,7 +163,7 @@ def run_single_backtest(
         )
 
     # Validate minimum data length: need at least 2 bars to produce 1 return
-    if n_bars_original < 2:
+    if n_bars_original < (1 if date_execution is not None else 2):
         raise ValueError(
             f"Input data must contain at least 2 bars, got {n_bars_original}. "
             "A minimum of 2 bars is required to produce one return."
@@ -238,6 +239,7 @@ def run_single_backtest(
         index=index,                          # NEW: for daily_reset
         volume=volume,
         time_filter_runtime=time_filter_runtime,
+        **({"date_execution": date_execution} if date_execution is not None else {}),
         collect_filter_diagnostics=collect_filter_diagnostics,
         caller_mode=caller_mode,
         segmentation_mode="legacy",
@@ -306,22 +308,26 @@ def run_single_backtest(
         positions=positions,
         warmup_period=warmup_bars,
         periods_per_year=periods_per_year,
-        min_trades_required=min_trades_required
+        # A close fill is invisible to the legacy open-position trade count.
+        # Apply the threshold below using executed rows for such slices.
+        min_trades_required=(
+            0 if extract_trades_flag and date_execution is not None and date_execution.boundary.any()
+            else min_trades_required
+        )
     )
     
     # Step 4: Extract trades (DD-01: from available history)
     # early_exit=False → full input history; early_exit=True → truncated to exit_bar
     trades_df = None
     if extract_trades_flag:
-        trades_df = extract_trades(
-            positions=positions,
-            returns=returns,
-            execution_prices=execution_prices_for_trades,
-            index=index_for_trades,
-            commission_rate=commission,
-            trend=trend,
-            execution_model=execution_model.value
-        )
+        if date_execution is not None:
+            trades_df = _artifacts.date_legs
+        else:
+            trades_df = extract_trades(
+                positions=positions, returns=returns,
+                execution_prices=execution_prices_for_trades, index=index_for_trades,
+                commission_rate=commission, trend=trend, execution_model=execution_model.value,
+            )
         
         # Step 4.2: Attach trade-level filter diagnostics (WP7 / §8.3, §8.4).
         # Called on extended-slice indices BEFORE any OOS trim/rebase.
@@ -335,6 +341,12 @@ def run_single_backtest(
                 _artifacts.filter_diagnostics,
                 execution_metadata=_artifacts.filter_execution_metadata,
             )
+
+        if date_execution is not None:
+            if "exit_reason" not in trades_df:
+                trades_df["exit_reason"] = "st_flip"
+            trades_df.loc[trades_df.exit_phase == "close", "exit_reason"] = "date_filter_close"
+            trades_df.loc[trades_df.exit_phase == "mark_open", "exit_reason"] = "pending_open_trade_at_end"
 
         # Step 4.5: Recalculate trade-based metrics from trades_df.
         # Source of truth: simple entry/exit returns (net_pnl_pct), not compound bar-level returns.
@@ -446,7 +458,7 @@ def run_single_backtest(
         trades_df=trades_df,
         n_bars_original=n_bars_original,
         period_label="",
-        filter_diagnostics=_artifacts.filter_diagnostics,
+        filter_diagnostics=_artifacts.filter_diagnostics if collect_filter_diagnostics else None,
         filter_config_snapshot=filter_config_snapshot,
         filter_execution_metadata=_artifacts.filter_execution_metadata,
         reversal_confirmation_events=getattr(

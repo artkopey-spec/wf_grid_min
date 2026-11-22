@@ -62,12 +62,12 @@ def test_root_config_loads_as_current_operator_sample() -> None:
     tf_cfg = cfg.get("trade_filter")
     assert tf_cfg is not None
     assert tf_cfg.enabled is True
-    assert resolve_trade_filter_mode(tf_cfg) == "reversal_and_time"
+    assert resolve_trade_filter_mode(tf_cfg) == "time_only"
     assert tf_cfg.zigzag.enabled is False
     assert tf_cfg.volume.enabled is False
-    assert tf_cfg.time_filter.windows == ["09:00-12:00", "16:00-18:00"]
-    assert tf_cfg.reversal_confirmation.enabled is True
-    assert tf_cfg.reversal_confirmation.confirm_bars == 1
+    assert tf_cfg.time_filter.windows == ["09:00-19:00"]
+    assert tf_cfg.reversal_confirmation.enabled is False
+    assert tf_cfg.reversal_confirmation.confirm_bars is None
     assert tf_cfg.wakeup_regime.enabled is False
 
 
